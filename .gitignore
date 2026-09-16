@@ -1,0 +1,21 @@
+# Private requirement answers and runtime content (public repository)
+/demand_list.md
+/data/
+/private/
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
