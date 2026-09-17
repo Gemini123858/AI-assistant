@@ -8,6 +8,7 @@ import json
 import re
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,10 +27,27 @@ class TracedModel:
     """Private synthetic-test diagnostics only; never capture credentials/headers."""
     def __init__(self, service):
         self.service, self.delegate = service, service.model
+        self.budget_path = service.store.root / ".paid-budget.json"
+        if not self.budget_path.exists():
+            service.store._write_json(self.budget_path, {"schema_version": 1,
+                "limit": service.config.daily_calls, "attempts": service.store.usage(service.day())["calls"]})
+        if service.store._read_json(self.budget_path).get("limit") != service.config.daily_calls:
+            raise AssistantError("不能在复用联调目录时改变累计授权上限；追加额度需单独确认。")
 
     def complete_tools(self, messages, tools, timeout=None):
-        attempt = self.service.store.usage(self.service.day())["calls"]
-        result = self.delegate.complete_tools(messages, tools, timeout)
+        budget = self.service.store._read_json(self.budget_path)
+        if type(budget.get("attempts")) is not int or not 0 <= budget["attempts"] < budget["limit"]:
+            raise AssistantError("本轮累计付费尝试上限已到达；未请求模型。", 429)
+        attempt = budget["attempts"] + 1
+        self.service.store._write_json(self.budget_path, {**budget, "attempts": attempt})
+        self.service.store._write_json(self.service.store.root / f"model-input-{attempt}.json",
+                                      {"messages": messages, "tools": tools})
+        try:
+            result = self.delegate.complete_tools(messages, tools, timeout)
+        except AssistantError as error:
+            self.service.store._write_json(self.service.store.root / f"model-attempt-{attempt}.json",
+                                          {"error": str(error), "failed": True})
+            raise
         self.service.store._write_json(self.service.store.root / f"model-attempt-{attempt}.json", result)
         return result
 
@@ -114,11 +132,73 @@ def popup_check(service):
     return record["passed"]
 
 
+def wait_task(tasks, store, key):
+    deadline, previous = time.monotonic() + 315, None
+    while time.monotonic() < deadline:
+        tasks.wait(timeout=5)
+        saved = store.get_task(key)
+        progress = (saved["status"], saved["calls"], len(saved["pages"]))
+        if progress != previous:
+            print("Progress: status / attempts / pages:", *progress, flush=True)
+            previous = progress
+        if saved["status"] not in {"queued", "running"}:
+            return saved
+    tasks.cancel(key)
+    tasks.wait(timeout=5)
+    return store.get_task(key)
+
+
+def scenario_passed(scenario, saved):
+    result = saved["result"]
+    if scenario == "network-stop":
+        return bool(saved["status"] == "failed" and result and saved["errors"] and not saved["pages"]
+                    and saved["calls"] < saved["limits"]["calls"])
+    if saved["status"] != "completed" or not result:
+        return False
+    if scenario == "jobs":
+        cited = {item["page_id"] for item in result.get("jobs", []) + result.get("findings", [])
+                 if any(p["id"] == item["page_id"] and p["kind"] == "detail" for p in saved["pages"])}
+        return len(cited) >= 2
+    if scenario == "recover":
+        return bool(saved["errors"] and any(p.get("ready") for p in saved["pages"]))
+    if scenario == "vision":
+        return any(a["tool"] == "take_screenshot" and a["status"] == "success" for a in saved["actions"])
+    return bool(result.get("findings"))
+
+
+def controlled_browser_factory(scenario):
+    """Fault state survives model-selected restarts within this one test case."""
+    from assistant.browser import BrowserScope, allowed_request
+    from .browser_generic_smoke import LocalBrowser, START
+
+    state = {"attempts": 0}
+
+    class ControlledBrowser(LocalBrowser):
+        def __init__(self, check):
+            super().__init__(check, scope=BrowserScope(START))
+
+        def _route(self, route):
+            request = route.request
+            if (scenario in {"recover", "network-stop"} and request.resource_type == "document"
+                    and allowed_request(request.url, request.method, request.resource_type, scope=self.scope)):
+                state["attempts"] += 1
+                if scenario == "network-stop" or state["attempts"] == 1:
+                    route.abort("addressunreachable")
+                    return
+            return super()._route(route)
+
+    return ControlledBrowser
+
+
 def main():
     parser = argparse.ArgumentParser(description="Explicit paid Kimi/browser integration check")
     parser.add_argument("--dns", choices=["system", "google"], default="system")
     parser.add_argument("--calls", type=int, choices=range(1, 201), required=True,
                         help="Explicit authorized total attempt cap (1–200); no default paid budget")
+    parser.add_argument("--task-calls", type=int, choices=range(1, 201),
+                        help="Optional task cap inside the SAME cumulative run budget")
+    parser.add_argument("--run-id", help="Reuse one synthetic test directory and cumulative budget across scenarios")
+    parser.add_argument("--scenario", choices=["jobs", "docs", "recover", "network-stop", "vision"], default="jobs")
     parser.add_argument("--popup-check", action="store_true",
                         help="Spend one of the SAME call budget on a synthetic promotion with real Kimi")
     parser.add_argument("--review-id", help="Review an existing synthetic run ID; --calls is its CUMULATIVE cap")
@@ -128,7 +208,9 @@ def main():
         parser.error("需要明确 API 模式和私有环境配置；不会回退到演示模式。")
     if args.review_id and (not re.fullmatch(r"[a-f0-9]{32}", args.review_id) or args.popup_check):
         parser.error("复核需要合法合成测试标识，不能同时运行推广检查。")
-    config.data_dir = Path("data/live-browser-check") / (args.review_id or uuid.uuid4().hex)
+    if args.run_id and (not re.fullmatch(r"[a-f0-9]{32}", args.run_id) or args.review_id):
+        parser.error("run-id 需要合法合成测试标识，不能与 review-id 混用。")
+    config.data_dir = Path("data/live-browser-check") / (args.review_id or args.run_id or uuid.uuid4().hex)
     if args.review_id and not config.data_dir.is_dir():
         parser.error("合成测试记录不存在，不会创建空复核记录。")
     config.browser_calls = config.daily_calls = args.calls
@@ -143,40 +225,48 @@ def main():
         if args.review_id:
             review_saved(service, args.calls)
             return
+        if (store.memory()["profile"] not in {"", PROFILE} or store.memory()["rules"]
+                or any(t["memory"]["profile"] != PROFILE for t in store.list_tasks())):
+            raise AssistantError("联调仅接受本脚本的合成画像，不读取真实用户数据。")
         store.update_memory("profile", PROFILE)
         popup_passed = popup_check(service) if args.popup_check else True
-        spent = store.usage(service.day())["calls"]
+        spent = store._read_json(service.model.budget_path)["attempts"]
         if spent >= args.calls:
             print("Call budget exhausted by promotion check; public-site task not started.", flush=True)
             raise SystemExit(1)
-        config.browser_calls = args.calls - spent
-        tasks = Tasks(service)
-        task = tasks.start({"start_url": "https://jobs.bytedance.com/experienced/position",
-                           "public_request": "合成测试：搜索算法，读取至少两份不同岗位详情；不登录、不投递。读取后 analyze_results，再结束。",
-                           "request": "这是合成测试。请搜索算法，读取至少两份岗位详情。"
+        config.browser_calls = min(args.task_calls or args.calls, args.calls - spent)
+        payload = {"start_url": "https://jobs.bytedance.com/experienced/position",
+                           "public_request": "合成测试：查询算法研究/实习岗位，自主选择检索策略，至少尝试一个组合查询（例如算法 实习），必要时调整查询。访问第二页及至少两份不同详情；不登录、不投递。读取后 analyze_results 再结束。",
+                           "request": "这是合成测试。请查询算法研究/实习岗位，读取至少两份岗位详情。"
                                       "结合合成画像列出潜在匹配或待确认项，给出原文依据和缺失条件；不登录、不投递。"
-                                      f"最多{config.browser_calls}次模型调用，留一次用于 finish_task；区分入口成功和后续失败，不笼统声称全部访问失败。"})
-        deadline, previous = time.monotonic() + 315, None
-        while time.monotonic() < deadline:
-            tasks.wait(timeout=5)
-            saved = store.get_task(task["id"])
-            progress = (saved["status"], saved["calls"], len(saved["pages"]))
-            if progress != previous:
-                print("Progress: status / attempts / pages:", *progress, flush=True)
-                previous = progress
-            if saved["status"] not in {"queued", "running"}:
-                break
-        saved = store.get_task(task["id"])
+                                      f"最多{config.browser_calls}次模型调用，留一次用于 finish_task；区分入口成功和后续失败，不笼统声称全部访问失败。"}
+        factory = None
+        if args.scenario == "docs":
+            payload = {"start_url": "https://docs.python.org/3/library/urllib.parse.html",
+                       "public_request": "查询 Python 官方 urllib.parse 文档：urljoin 如何解析相对 URL？访问该文档的至少一个相关链接，记录实际来源，不访问其他域。用 findings 引用编号行，不需要画像分析。",
+                       "request": "解释相对 URL 的尾部斜线差异及 urljoin 的安全注意项，只引用实际读取的来源。"}
+        elif args.scenario in {"recover", "network-stop", "vision"}:
+            from .browser_generic_smoke import START
+            factory = controlled_browser_factory(args.scenario)
+            payload = {"start_url": START, "public_request": "读取此公开资料目录，找出图结构资料及其说明。操作失败时根据工具事实自主恢复或停止，报告实际错误，不能编造根因。",
+                       "request": "合成故障注入检查，不代表真实网站故障；请完成目录读取或有证据地报告阻塞。"}
+            if args.scenario == "vision":
+                config.browser_vision = True
+                payload["public_request"] = "合成匿名网页视觉测试：请先 take_screenshot 查看网页布局，然后用 findings 引用正文描述可见搜索区和筛选区，不填写私人表单或点击发送/保存。"
+        tasks = Tasks(service, factory)
+        print("Private synthetic evidence directory:", str(config.data_dir), flush=True)
+        # Locally fulfilled fault/vision sites cannot resolve or reach the Internet.
+        with patch("assistant.browser.resolver_rules", return_value="MAP * ~NOTFOUND") if factory else nullcontext():
+            task = tasks.start(payload)
+            saved = wait_task(tasks, store, task["id"])
         print("Integration status:", saved["status"], "model attempts:", saved["calls"],
               "pages:", len(saved["pages"]), flush=True)
         print("Private synthetic evidence directory:", str(config.data_dir), flush=True)
-        print("Total paid attempts including promotion check:", store.usage(service.day())["calls"], "/", args.calls, flush=True)
-        if (not popup_passed or saved["status"] != "completed" or not saved["result"]
-                or len({item["page_id"] for item in saved["result"].get("jobs", []) + saved["result"].get("findings", [])
-                        if any(p["id"] == item["page_id"] and p["kind"] == "detail" for p in saved["pages"])}) < 2):
+        print("Total cumulative paid attempts:", store._read_json(service.model.budget_path)["attempts"], "/", args.calls, flush=True)
+        if not popup_passed or not scenario_passed(args.scenario, saved):
             print("Check not passed:", saved["note"])
             raise SystemExit(1)
-        print("Public-site + Kimi tool path passed; suitability quality still requires human review.")
+        print("Scenario passed:", args.scenario, "; judgments still require human review.")
     finally:
         if tasks:
             tasks.close()

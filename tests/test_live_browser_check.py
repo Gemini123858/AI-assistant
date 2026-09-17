@@ -2,16 +2,19 @@
 
 import copy
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from assistant.config import Config
 from assistant.errors import AssistantError
 from assistant.service import Service
 from assistant.storage import Store
-from .live_browser_check import PROFILE, review_saved
+from .live_browser_check import PROFILE, TracedModel, controlled_browser_factory, review_saved, scenario_passed
 from .test_tasks import DETAIL, ScriptModel, call, final_result
 
 
@@ -82,6 +85,56 @@ class SavedReviewTests(unittest.TestCase):
             review_saved(service, 8)
         self.assertEqual(len(service.model.calls), 1)
         self.assertEqual(self.store.usage(service.day())["calls"], 7)
+
+    def test_shared_trace_budget_counts_failures_and_does_not_reset_with_daily_usage(self):
+        service = self.service([call("finish_task", self.result), AssistantError("合成网络故障", 502)])
+        delegate = service.model
+        traced = TracedModel(service)
+        self.store.reserve_call(service.day(), 8)
+        traced.complete_tools([], [])
+        self.store.reserve_call(service.day(), 8)
+        with self.assertRaises(AssistantError):
+            traced.complete_tools([], [])
+        self.assertEqual(self.store._read_json(traced.budget_path)["attempts"], 8)
+        self.assertTrue(json.loads((self.root / "model-attempt-8.json").read_text())["failed"])
+        with patch.object(self.store, "usage", return_value={"calls": 0}):
+            with self.assertRaises(AssistantError):
+                traced.complete_tools([], [])
+        self.assertEqual(len(delegate.calls), 2)
+
+    def test_reused_run_cannot_silently_raise_its_paid_authorization(self):
+        service = self.service([])
+        TracedModel(service)
+        service.config.daily_calls = 20
+        with self.assertRaises(AssistantError):
+            TracedModel(service)
+
+    def test_failure_report_is_not_mislabelled_as_successful_query(self):
+        failed = {**self.task, "status": "failed", "pages": [], "errors": [{"kind": "network"}],
+                  "result": {"summary": "连续连接失败。"}}
+        self.assertTrue(scenario_passed("network-stop", failed))
+        self.assertFalse(scenario_passed("jobs", failed))
+        failed["calls"] = failed["limits"]["calls"]
+        self.assertFalse(scenario_passed("network-stop", failed), "budget-forced finish is not autonomous stopping")
+
+    def test_transient_fault_is_not_reinjected_after_browser_restart(self):
+        factory = controlled_browser_factory("recover")
+        first, second = Mock(), Mock()
+        request = SimpleNamespace(url="https://catalog.example/topics", method="GET", resource_type="document", post_data=None)
+        first.request = second.request = request
+        factory(lambda: None)._route(first)
+        factory(lambda: None)._route(second)
+        first.abort.assert_called_once_with("addressunreachable")
+        second.abort.assert_not_called()
+        second.fulfill.assert_called_once()
+
+    def test_permanent_fault_remains_after_browser_restart(self):
+        factory = controlled_browser_factory("network-stop")
+        for _ in range(2):
+            route = Mock()
+            route.request = SimpleNamespace(url="https://catalog.example/topics", method="GET", resource_type="document")
+            factory(lambda: None)._route(route)
+            route.abort.assert_called_once_with("addressunreachable")
 
 
 if __name__ == "__main__":
