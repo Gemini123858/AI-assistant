@@ -4,6 +4,8 @@ import time
 import argparse
 import json
 import re
+import uuid
+from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 from assistant.browser import ENTRY, SEARCH_PATH, KEYWORDS, JobBrowser, allowed_request, navigation_url
@@ -12,6 +14,22 @@ from assistant.errors import AssistantError
 
 class DiagnosticBrowser(JobBrowser):
     """Anonymous public-site metadata only; never dump signatures, headers or cookies."""
+
+    snapshot = False
+
+    def _snapshot(self):
+        if not self.snapshot:
+            return
+        root = Path("data/site-probe") / uuid.uuid4().hex
+        root.mkdir(mode=0o700, parents=True)
+        self.page.screenshot(path=str(root / "page.png"), timeout=3000)
+        # A fresh anonymous page only; no HTML, storage, cookies or request headers.
+        observations = self.page.locator(
+            'button, [role="button"], [role="dialog"], dialog').evaluate_all(
+                "els => els.slice(0,80).map(e => ({tag:e.tagName,role:e.getAttribute('role'),"
+                "text:e.innerText.slice(0,1500),visible:!!e.getClientRects().length}))")
+        print("Public UI observations:", json.dumps(observations, ensure_ascii=False), flush=True)
+        print("Anonymous screenshot:", str(root / "page.png"), flush=True)
 
     def __enter__(self):
         super().__enter__()
@@ -81,7 +99,9 @@ class DiagnosticBrowser(JobBrowser):
 
     def read(self, url):
         try:
-            return super().read(url)
+            page = super().read(url)
+            self._snapshot()
+            return page
         except AssistantError:
             print("Public-page diagnostics:", "path:", urlsplit(self.page.url).path,
                   "title:", self.page.title(), "body characters:",
@@ -92,6 +112,7 @@ class DiagnosticBrowser(JobBrowser):
                     print("safe anchor:", navigation_url(href), flush=True)
                 except AssistantError:
                     pass
+            self._snapshot()
             raise
 
 
@@ -99,6 +120,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dns", choices=["system", "google"], default="system")
     parser.add_argument("--diagnostics", action="store_true")
+    parser.add_argument("--snapshot", action="store_true",
+                        help="Save anonymous screenshots to ignored data/site-probe")
+    parser.add_argument("--details", type=int, choices=range(1, 4), default=1,
+                        help="Read 1–3 distinct observed public job details")
     parser.add_argument("--listing-only", action="store_true",
                         help="Skip the previously inspected homepage during list diagnostics")
     args = parser.parse_args()
@@ -108,8 +133,10 @@ def main():
         if time.monotonic() >= deadline:
             raise AssistantError("官网探测达到90秒上限。")
 
-    factory = DiagnosticBrowser if args.diagnostics else JobBrowser
+    factory = DiagnosticBrowser if args.diagnostics or args.snapshot else JobBrowser
     with factory(check, args.dns) as browser:
+        if isinstance(browser, DiagnosticBrowser):
+            browser.snapshot = args.snapshot
         listing_url = "https://jobs.bytedance.com/experienced/position"
         if not args.listing_only:
             entry = browser.read(ENTRY)
@@ -119,11 +146,15 @@ def main():
         print("listing:", listing["url"], "safe links:", len(listing["links"]), flush=True)
         search = browser.read(browser.search_url("算法", 1))
         print("search:", search["url"], "safe links:", len(search["links"]), flush=True)
-        detail_url = next(link["url"] for link in search["links"] if link["url"].endswith("/detail"))
-        detail = browser.read(detail_url)
-        assert "职位要求" in detail["text"]
-        print("detail:", detail["url"], "characters:", len(detail["text"]),
-              "blocked requests:", detail["blocked_requests"], flush=True)
+        detail_urls = list(dict.fromkeys(link["url"] for link in search["links"]
+                                        if link["url"].endswith("/detail")))
+        if len(detail_urls) < args.details:
+            raise AssistantError("可观察到的详情链接不足，不能完成本次多详情检查。", 502)
+        for detail_url in detail_urls[:args.details]:
+            detail = browser.read(detail_url)
+            assert "职位要求" in detail["text"]
+            print("detail:", detail["url"], "characters:", len(detail["text"]),
+                  "blocked requests:", detail["blocked_requests"], flush=True)
     print("Public-site read path passed; no login, model calls or submissions.")
 
 
