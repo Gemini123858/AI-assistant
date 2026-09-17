@@ -22,6 +22,7 @@ ASSET_HOSTS = {
     "sf-atsx-tob.larksuite.com", "starling.zijieapi.com",
 }
 SEARCH_PATH = "/api/v1/search/job/posts"
+CSRF_PATH = "/api/v1/csrf/token"
 KEYWORDS = ("", "算法", "机器学习", "深度学习", "大模型", "人工智能", "知识图谱", "自然语言处理",
             "计算机视觉", "推荐", "搜索", "Python", "Java", "C++", "后端", "前端", "研发",
             "实习", "测试", "安全", "数据分析", "数据开发", "基础架构", "产品")
@@ -77,9 +78,16 @@ def allowed_request(url, method, resource_type, post_data=None):
                     and not parsed.path.startswith("/api/")
                     and bool(re.search(r"\.(?:js|css|png|jpe?g|webp|svg|gif|ico|woff2?|ttf|otf)$", parsed.path))
                     or bool(READ_API.fullmatch(parsed.path)))
-        if method != "POST" or resource_type not in {"xhr", "fetch"} or parsed.path != SEARCH_PATH or parsed.query:
+        if method != "POST" or resource_type not in {"xhr", "fetch"}:
             return False
         data = json.loads(post_data)
+        if parsed.path == CSRF_PATH:
+            # Anonymous read-session bootstrap, not account authentication or a
+            # business write. Only the site's fixed public portal identifier.
+            return (not parsed.query and isinstance(data, dict) and set(data) == {"portal_entrance"}
+                    and type(data["portal_entrance"]) is int and data["portal_entrance"] == 1)
+        if parsed.path != SEARCH_PATH:
+            return False
         if not isinstance(data, dict) or set(data) - SEARCH_FIELDS:
             return False
         if (type(data.get("limit")) is not int or not 1 <= data["limit"] <= 20
@@ -93,6 +101,22 @@ def allowed_request(url, method, resource_type, post_data=None):
             if (not isinstance(items, list) or len(items) > 20
                     or any(not isinstance(item, str) or len(item) > 100 for item in items)):
                 return False
+        # The site's own browser SDK mirrors pagination fields and signs this read
+        # request. Preserve its signature; never generate one or bypass challenges.
+        pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True) if parsed.query else []
+        if len(pairs) > len(SEARCH_FIELDS) + 1 or len({key for key, _ in pairs}) != len(pairs):
+            return False
+        for key, value in pairs:
+            if key == "_signature":
+                if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,2048}", value):
+                    return False
+            else:
+                if key not in SEARCH_FIELDS:
+                    return False
+                expected = data.get(key, [])
+                expected = ",".join(expected) if isinstance(expected, list) else str(expected)
+                if value != expected:
+                    return False
         return True
     except (AssistantError, ValueError, TypeError, AttributeError):
         return False
@@ -135,6 +159,7 @@ class JobBrowser:
         self.playwright = self.browser = self.context = self.page = None
         self.blocked = 0
         self.read_errors = []
+        self.response_errors = {}
         self.search_verified = False
 
     def __enter__(self):
@@ -151,7 +176,9 @@ class JobBrowser:
             self.context.route("**/*", self._route)
             self.context.route_web_socket("**/*", lambda ws: ws.close())
             self.page = self.context.new_page()
-            self.page.on("response", self._response)
+            # Read bodies only after transfer completion. Reading response.json()
+            # on the headers event can block the synchronous cancellation loop.
+            self.page.on("requestfinished", self._finished)
             self.context.on("page", lambda page: page.close() if page != self.page else None)
             return self
         except AssistantError:
@@ -185,19 +212,38 @@ class JobBrowser:
             route.abort()
 
     def _response(self, response):
-        path = urlsplit(response.url).path
+        parsed = urlsplit(response.url)
+        if parsed.hostname != SITE:
+            return
+        path = parsed.path
         if path == SEARCH_PATH or re.fullmatch(r"/api/v1/job/posts/[0-9]+", path):
+            if path == SEARCH_PATH:
+                self.search_verified = False
             try:
+                if response.status != 200:
+                    self.response_errors[path] = f"岗位读取接口返回 HTTP {response.status}，不能视为没有岗位。"
+                    return
                 body = response.json()
-                if response.status != 200 or body.get("code") != 0:
-                    self.read_errors.append("岗位读取接口返回错误，不能视为没有岗位。")
+                if body.get("code") != 0:
+                    self.response_errors[path] = "岗位读取接口返回错误，不能视为没有岗位。"
                 elif path == SEARCH_PATH:
                     if not isinstance(body.get("data", {}).get("job_post_list"), list):
-                        self.read_errors.append("岗位检索响应结构未能验证，未报告为零岗位。")
+                        self.response_errors[path] = "岗位检索响应结构未能验证，未报告为零岗位。"
                     else:
                         self.search_verified = True
+                        self.response_errors.pop(path, None)
+                else:
+                    self.response_errors.pop(path, None)
             except Exception:
-                self.read_errors.append("岗位读取接口响应未能验证。")
+                self.response_errors[path] = "岗位读取接口响应未能验证。"
+
+    def _finished(self, request):
+        parsed = urlsplit(request.url)
+        if (parsed.hostname == SITE and
+                (parsed.path == SEARCH_PATH or re.fullmatch(r"/api/v1/job/posts/[0-9]+", parsed.path))):
+            response = request.response()
+            if response is not None:
+                self._response(response)
 
     def read(self, url):
         from playwright.sync_api import Error as PlaywrightError
@@ -205,6 +251,7 @@ class JobBrowser:
         url = navigation_url(url)
         self.check()
         self.read_errors = []
+        self.response_errors = {}
         self.search_verified = False
         try:
             response = self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -217,7 +264,7 @@ class JobBrowser:
                 self.check()
                 text = self.page.locator("body").inner_text(timeout=2000)
                 useful = ("职位要求" in text if is_detail(url) else
-                          ("开启新的工作" in text if "/position" in url else
+                          ("开启新的工作" in text and self.search_verified if "/position" in url else
                            self.page.locator('a[href*="/experienced/position"]').count() > 0))
                 stable = stable + 1 if useful and text == previous else 0
                 if stable >= 2:
@@ -225,9 +272,13 @@ class JobBrowser:
                 previous = text
                 self.page.wait_for_timeout(300)
             else:
+                errors = [*self.read_errors, *self.response_errors.values()]
+                if errors:
+                    raise AssistantError(errors[0], 502)
                 raise AssistantError("页面正文或岗位列表未完整加载；可能受限，未报告为零岗位。", 502)
-            if self.read_errors:
-                raise AssistantError(self.read_errors[0], 502)
+            errors = [*self.read_errors, *self.response_errors.values()]
+            if errors:
+                raise AssistantError(errors[0], 502)
             if "/position" in url and not is_detail(url) and not self.search_verified:
                 raise AssistantError("岗位检索响应未验证，未报告为零岗位。", 502)
             final = navigation_url(self.page.url)
