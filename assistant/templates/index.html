@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>个人助手 · 通知与记忆</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="个人助手首页"><span class="brand-mark">助</span>个人助手<span class="version">v0.1</span></a>
+    <div class="topbar-right"><span id="mode-badge" class="badge">正在连接</span><span class="local-note">仅本机 · 外部操作只读</span></div>
+  </header>
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">NOTIFICATIONS / CONTEXT / MEMORY</p><h1>重要的事，少漏一点。</h1><p class="muted">整理通知，核对原文，告诉助手你真正关心什么。</p></div>
+      <div class="status-box"><span id="model-name">读取模型配置…</span><small id="usage">—</small></div>
+    </section>
+    <div id="mode-notice" class="notice">加载中…</div>
+    <nav class="tabs" aria-label="工作区">
+      <button class="tab active" data-tab="notifications" aria-selected="true">通知工作台</button>
+      <button class="tab" data-tab="memory" aria-selected="false">画像与规则</button>
+      <span class="roadmap-note">自动采集、主动推送、授权邮件发送：后续版本</span>
+    </nav>
+    <section id="notifications-panel" class="workspace">
+      <div class="feed-column">
+        <details class="panel import-panel" open>
+          <summary>导入一条通知 <span class="muted">手动输入 / JSON 文件</span></summary>
+          <form id="import-form">
+            <div class="form-grid">
+              <label>来源<select id="source"><option value="manual">手动资料</option><option value="qq">QQ（手动导入）</option><option value="wechat">微信（手动导入）</option><option value="email">邮件（手动导入）</option></select></label>
+              <label>群 / 会话<input id="conversation" required maxlength="120" placeholder="例如：课程群"></label>
+              <label>发送者<input id="sender" maxlength="120" placeholder="未知"></label>
+              <label>原消息时间（本机时区）<input id="sent-at" type="datetime-local" required></label>
+            </div>
+            <label>通知正文<textarea id="notification-text" rows="4" required maxlength="12000" placeholder="粘贴原通知。不要把收到通知的时间替换成活动或截止时间。"></textarea></label>
+            <label>原消息 ID（可选）<input id="message-id" maxlength="200" placeholder="有稳定 ID 时填写；否则按来源、发送者、原时间和正文去重"></label>
+            <div class="form-actions"><button class="primary" id="import-button" type="submit">保存通知</button><label class="file-button">导入 JSON<input type="file" id="json-file" accept="application/json,.json"></label><button id="sample-button" type="button" class="quiet">载入合成样例</button></div>
+            <p class="caption">保存后再明确点击分析。本版只分析文字，不读取图片、附件或链接目标。</p>
+          </form>
+        </details>
+        <div class="section-heading"><div><h2>通知与事项 <span id="message-count" class="count">0</span></h2><p class="caption">旧结果保留当时的记忆版本，纠正后可手动重新分析。</p></div><button id="refresh-button" class="quiet">刷新</button></div>
+        <div id="message-list" class="message-list" aria-live="polite"></div>
+        <div class="pagination"><button id="previous-page" class="quiet">上一页</button><span id="page-info" class="caption"></span><button id="next-page" class="quiet">下一页</button></div>
+      </div>
+      <aside class="panel chat-panel">
+        <div class="chat-heading"><div><h2>和助手聊聊</h2><p class="caption">追问事项、整理待办，或起草邮件文本。</p></div><span class="chat-dot" aria-hidden="true"></span></div>
+        <p id="chat-context" class="context-note">未选择时使用最近 10 条通知；完整历史保存，模型仅读取最近 6 轮。</p>
+        <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
+        <form id="chat-form" class="chat-form"><label class="sr-only" for="chat-input">对话消息</label><textarea id="chat-input" rows="3" required maxlength="4000" placeholder="这条通知需要我做什么？&#10;/记住 我目前正在找实习&#10;/规则 报名截止不等于活动开始"></textarea><div class="chat-footer"><span class="caption">普通对话不自动写画像；没有发送工具。</span><button id="chat-button" class="primary" type="submit">发送</button></div></form>
+      </aside>
+    </section>
+    <section id="memory-panel" class="memory-workspace" hidden>
+      <div class="memory-intro"><h2>让判断有自己的上下文。</h2><p class="muted">信息与纠正保存在本机 Markdown 文件，可直接编辑。保存即生效，不修改你的原资料。</p><p class="caption">这里的内容会随分析和问答发送给已配置的模型。不要填写密码、Key 或不适合外发的内容。</p></div>
+      <form class="panel memory-form" data-kind="profile"><h3>个人画像</h3><p class="caption">明确的个人信息、当前状态和偏好。推断信息请标明“待核实”。</p><label class="sr-only" for="profile-text">个人画像内容</label><textarea id="profile-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 我目前正在找实习。&#10;- 我希望优先看到需要报名或提交材料的通知。"></textarea><button class="primary" type="submit">保存画像</button></form>
+      <form class="panel memory-form" data-kind="rules"><h3>纠正规则</h3><p class="caption">具体、可验证的纠正。规则不能授予助手发送或提交权限。</p><label class="sr-only" for="rules-text">纠正规则内容</label><textarea id="rules-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 不要把报名截止时间当成活动开始时间。"></textarea><button class="primary" type="submit">保存规则</button></form>
+    </section>
+  </main>
+  <footer>文件持久化 · 原文可追溯 · 当前没有自动采集或主动推送</footer>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="source-dialog"><div class="dialog-heading"><h2>通知原文</h2><button id="close-dialog" class="quiet">关闭</button></div><p id="source-meta" class="caption"></p><pre id="source-body"></pre><p id="source-attachments" class="notice"></p><p id="source-id" class="caption"></p></dialog>
+</body>
+</html>
