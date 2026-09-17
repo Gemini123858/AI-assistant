@@ -50,7 +50,7 @@ class FixtureBrowser:
     def read(self, url):
         self.check()
         self.reads.append(url)
-        if url == ENTRY.rstrip("/"):
+        if url.rstrip("/") == ENTRY.rstrip("/"):
             text, links, kind = "公开招聘入口", [{"url": LIST, "text": "所有职位"}], "listing"
         elif "/detail" in url:
             if self.fail_detail:
@@ -161,12 +161,13 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(len(task["errors"]), 1)
         self.assertEqual(task["result"]["jobs"], [])
 
-    def test_repeated_url_does_not_loop_or_reread(self):
+    def test_repeated_url_can_reread_but_does_not_duplicate_unchanged_evidence(self):
         self.runner([call("open_link", {"link_id": "p1-l1"}), call("open_link", {"link_id": "p1-l1"}),
                      call("finish_task", {"summary": "已访问链接不重复读取。", "questions": [], "jobs": []})])
         task = self.run_task()
-        self.assertEqual(task["steps"], 2)
-        self.assertEqual(len(FixtureBrowser.reads), 2)
+        self.assertEqual(task["steps"], 3)
+        self.assertEqual(len(FixtureBrowser.reads), 3)
+        self.assertEqual(len(task["pages"]), 2)
 
     def test_call_limit_and_daily_limit_stop_without_retry(self):
         self.runner([call("open_link", {"link_id": "p1-l1"})], browser_calls=1)
@@ -235,11 +236,13 @@ class TaskTests(unittest.TestCase):
             self.tasks.start({"request": "查岗位"})
         self.assertEqual(self.store.list_tasks(), [])
 
-    def test_model_cannot_exfiltrate_profile_as_search_keyword(self):
-        self.runner([call("fill_field", {"element_id": "current-search", "text": PROFILE, "submit": True})])
+    def test_browsing_context_does_not_receive_private_profile(self):
+        model = self.runner([call("fill_field", {"element_id": "current-search", "text": "图神经网络 研究实习", "submit": True}),
+                             call("finish_task", {"summary": "仅测试公开检索。", "questions": []})])
         task = self.run_task()
         self.assertEqual(task["status"], "partial")
-        self.assertEqual(len(task["pages"]), 1)
+        self.assertEqual(len(task["pages"]), 2)
+        self.assertNotIn(PROFILE, json.dumps(model.calls, ensure_ascii=False))
 
     def test_generic_observe_fill_scroll_and_final_call_reservation(self):
         result = final_result()
@@ -253,18 +256,18 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(task["steps"], 6)
         self.assertEqual(len(task["pages"]), 4)
         self.assertEqual([action["tool"] for action in task["actions"]],
-                         ["open_link", "open_link", "observe_page", "fill_field", "scroll_page", "open_link"])
+                         ["open_url", "open_link", "observe_page", "fill_field", "scroll_page", "open_link"])
         self.assertEqual([tool["function"]["name"] for tool in model.tools[-1]], ["finish_task"])
         self.assertNotIn("search_jobs", [tool["function"]["name"] for tool in model.tools[0]])
 
     def test_entire_group_validated_before_any_action(self):
         output = call("open_link", {"link_id": "p1-l1"})
-        output["tool_calls"] += call("fill_field", {"element_id": "current-search", "text": PROFILE, "submit": True},
+        output["tool_calls"] += call("fill_field", {"element_id": "current-search", "text": "x" * 1001, "submit": True},
                                      key="second-call")["tool_calls"]
         self.runner([output])
         task = self.run_task()
         self.assertEqual(len(FixtureBrowser.reads), 1)
-        self.assertEqual(task["calls"], 1)
+        self.assertEqual(task["calls"], 2)
 
     def test_unobserved_link_in_group_blocks_earlier_valid_action(self):
         output = call("open_link", {"link_id": "p1-l1"})

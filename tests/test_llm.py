@@ -92,3 +92,14 @@ class ModelTests(unittest.TestCase):
                 "name": "open_link", "arguments": "[]"}}]}):
             with self.subTest(message=message), self.assertRaises(AssistantError):
                 validate_tool_message(message)
+
+    def test_optional_image_blocks_are_preserved_in_native_tools_wire_format(self):
+        image = "data:image/png;base64,c3ludGhldGlj"
+        messages = [{"role": "user", "content": [{"type": "text", "text": "合成匿名截图"},
+                    {"type": "image_url", "image_url": {"url": image}}]}]
+        message = {"tool_calls": [{"id": "finish-image", "type": "function", "function": {
+            "name": "finish_task", "arguments": '{"summary":"合成","questions":[]}'}}]}
+        envelope = {"choices": [{"finish_reason": "tool_calls", "message": message}]}
+        with patch.object(self.model.opener, "open", return_value=io.BytesIO(json.dumps(envelope).encode())) as opened:
+            self.model.complete_tools(messages, [{"type": "function"}])
+        self.assertEqual(json.loads(opened.call_args.args[0].data)["messages"], messages)

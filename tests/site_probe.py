@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
-from assistant.browser import ENTRY, SEARCH_PATH, KEYWORDS, JobBrowser, allowed_request, navigation_url
+from assistant.browser import ENTRY, SEARCH_PATH, JobBrowser, allowed_request, navigation_url
 from assistant.errors import AssistantError
 
 
@@ -17,12 +17,12 @@ class DiagnosticBrowser(JobBrowser):
 
     snapshot = False
 
-    def observe(self, wait_seconds=2):
+    def observe(self, wait_seconds=2, **kwargs):
         try:
-            return super().observe(wait_seconds)
+            return super().observe(wait_seconds, **kwargs)
         except AssistantError:
             parsed = urlsplit(self.page.url)
-            metadata = [(key, value if value in KEYWORDS or value.isdigit() and len(value) < 5
+            metadata = [(key, value if value.isdigit() and len(value) < 5
                          else {"length": len(value)}) for key, value in parse_qsl(parsed.query, keep_blank_values=True)]
             print("Anonymous navigation metadata:", parsed.hostname, parsed.path, metadata, flush=True)
             raise
@@ -78,7 +78,7 @@ class DiagnosticBrowser(JobBrowser):
                 data = json.loads(request.post_data)
                 metadata = {key: ({"count": len(value), "item_types": sorted({type(item).__name__ for item in value})}
                                   if isinstance(value, list) else
-                                  value if type(value) is int or value in KEYWORDS else type(value).__name__)
+                                  value if type(value) is int else type(value).__name__)
                             for key, value in data.items()}
                 print("Denied search field metadata:", metadata, "query fields:",
                       [key for key, _ in parse_qsl(urlsplit(request.url).query, keep_blank_values=True)],
@@ -110,6 +110,10 @@ class DiagnosticBrowser(JobBrowser):
     def read(self, url):
         try:
             page = super().read(url)
+            if not page["ready"]:
+                print("Unverified page:", self.target(page["url"]), page["read_error"], flush=True)
+                print("Allowed-request network errors:", json.dumps(page["network_errors"], ensure_ascii=False), flush=True)
+                print("Active policy blocks:", json.dumps(page["policy_blocks"], ensure_ascii=False), flush=True)
             self._snapshot()
             return page
         except AssistantError:
@@ -197,7 +201,8 @@ def main():
             raise AssistantError("可观察到的详情链接不足，不能完成本次多详情检查。", 502)
         for detail_url in detail_urls[:args.details]:
             detail = browser.read(detail_url)
-            assert detail["ready"] and "职位要求" in detail["text"]
+            if not detail["ready"] or "职位要求" not in detail["text"]:
+                raise AssistantError(detail.get("read_error") or "详情正文未验证，不能报告读取成功。", 502)
             print("detail:", detail["url"], "characters:", len(detail["text"]),
                   "blocked requests:", detail["blocked_requests"], flush=True)
     print("Public-site read path passed; no login, model calls or submissions.")

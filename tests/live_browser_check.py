@@ -117,8 +117,8 @@ def popup_check(service):
 def main():
     parser = argparse.ArgumentParser(description="Explicit paid Kimi/browser integration check")
     parser.add_argument("--dns", choices=["system", "google"], default="system")
-    parser.add_argument("--calls", type=int, choices=range(1, 9), default=6,
-                        help="This run's authorized total model attempt limit (1–8)")
+    parser.add_argument("--calls", type=int, choices=range(1, 201), required=True,
+                        help="Explicit authorized total attempt cap (1–200); no default paid budget")
     parser.add_argument("--popup-check", action="store_true",
                         help="Spend one of the SAME call budget on a synthetic promotion with real Kimi")
     parser.add_argument("--review-id", help="Review an existing synthetic run ID; --calls is its CUMULATIVE cap")
@@ -151,7 +151,9 @@ def main():
             raise SystemExit(1)
         config.browser_calls = args.calls - spent
         tasks = Tasks(service)
-        task = tasks.start({"request": "这是合成测试。请从入口进入岗位列表，搜索算法，读取至少两份岗位详情。"
+        task = tasks.start({"start_url": "https://jobs.bytedance.com/experienced/position",
+                           "public_request": "合成测试：搜索算法，读取至少两份不同岗位详情；不登录、不投递。读取后 analyze_results，再结束。",
+                           "request": "这是合成测试。请搜索算法，读取至少两份岗位详情。"
                                       "结合合成画像列出潜在匹配或待确认项，给出原文依据和缺失条件；不登录、不投递。"
                                       f"最多{config.browser_calls}次模型调用，留一次用于 finish_task；区分入口成功和后续失败，不笼统声称全部访问失败。"})
         deadline, previous = time.monotonic() + 315, None
@@ -170,7 +172,8 @@ def main():
         print("Private synthetic evidence directory:", str(config.data_dir), flush=True)
         print("Total paid attempts including promotion check:", store.usage(service.day())["calls"], "/", args.calls, flush=True)
         if (not popup_passed or saved["status"] != "completed" or not saved["result"]
-                or len(saved["result"]["jobs"]) < 2):
+                or len({item["page_id"] for item in saved["result"].get("jobs", []) + saved["result"].get("findings", [])
+                        if any(p["id"] == item["page_id"] and p["kind"] == "detail" for p in saved["pages"])}) < 2):
             print("Check not passed:", saved["note"])
             raise SystemExit(1)
         print("Public-site + Kimi tool path passed; suitability quality still requires human review.")

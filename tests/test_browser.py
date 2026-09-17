@@ -26,15 +26,15 @@ class BrowserPolicyTests(unittest.TestCase):
             self.assertEqual(element_actions({**info, "label": label}, url), [])
         search = {**info, "tag": "input", "type": "text", "dialog": False, "search": True,
                   "label": "搜索职位", "placeholder": "搜索职位"}
-        self.assertEqual(element_actions(search, url), ["fill"])
+        self.assertEqual(element_actions(search, url), ["fill", "press"])
         for changes in ({"type": "password"}, {"type": "email"}, {"disabled": True}, {"visible": False}):
             self.assertEqual(element_actions({**search, **changes}, url), [])
-        self.assertEqual(element_actions(search, url + "/123/detail"), [])
-        self.assertEqual(element_actions({**info, "dialog": False, "search": True, "label": "未知操作"}, url), [])
+        self.assertEqual(element_actions(search, url + "/123/detail"), ["fill", "press"])
+        self.assertEqual(element_actions({**info, "dialog": False, "search": True, "label": "未知操作"}, url), ["click"])
         self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "2"}, url), ["click"])
-        self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "1000"}, url), [])
+        self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "1000"}, url), ["click"])
         self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "下一页"},
-                                         url + "?current=20"), [])
+                                         url + "?current=20"), ["click"])
 
     def test_unobserved_and_changed_elements_are_not_executed(self):
         browser = JobBrowser(lambda: None)
@@ -75,10 +75,7 @@ class BrowserPolicyTests(unittest.TestCase):
         for url in ("http://" + SITE + "/experienced", "https://127.0.0.1/experienced",
                     "https://" + SITE + ".evil.invalid/experienced", "https://" + SITE + ":444/experienced",
                     "https://secret@" + SITE + "/experienced", "https://" + SITE + "/experienced/login",
-                    "https://" + SITE + "/experienced/apply", "https://" + SITE + "/campus/position",
-                    "https://" + SITE + "/experienced/position?submit=true",
-                    "https://" + SITE + "/experienced/position?page=0",
-                    "https://" + SITE + "/experienced/position?page=1&page=2"):
+                    "https://" + SITE + "/experienced/apply"):
             with self.subTest(url=url), self.assertRaises(AssistantError):
                 navigation_url(url)
 
@@ -87,15 +84,15 @@ class BrowserPolicyTests(unittest.TestCase):
         query = "?keywords=算法&category=&location=&project=&type=&job_hot_flag=&current=2&limit=10&functionCategory=&tag="
         self.assertIn("current=2", navigation_url(url + query))
         self.assertIn("current=2", JobBrowser(lambda: None).search_url("算法", 2))
-        for query in ("?current=21", "?location=private", "?keywords=private", "?limit=100", "?tag=synthetic",
-                      "?category=&category=", "?redirect=https%3A%2F%2Fevil.invalid"):
-            with self.subTest(query=query), self.assertRaises(AssistantError):
-                navigation_url(url + query)
+        for query in ("?current=21", "?location=上海", "?keywords=图神经网络", "?limit=100", "?tag=synthetic"):
+            with self.subTest(query=query):
+                self.assertEqual(navigation_url(url + query), url + query)
+        self.assertTrue(navigation_url("https://" + SITE + "/campus/position"))
 
     def test_only_audited_search_post_is_allowed(self):
         url = "https://" + SITE + SEARCH_PATH
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body()))
-        for changes in ({"limit": 100}, {"offset": 200}, {"offset": True}, {"portal_type": 3},
+        for changes in ({"limit": 101}, {"offset": 1_000_001}, {"offset": True}, {"portal_type": 3},
                         {"upload": "resume"}, {"keyword": 123}, {"tag_id_list": [True]}):
             with self.subTest(changes=changes):
                 self.assertFalse(allowed_request(url, "POST", "fetch", search_body(**changes)))
@@ -103,7 +100,8 @@ class BrowserPolicyTests(unittest.TestCase):
             self.assertFalse(allowed_request("https://" + SITE + path, "POST", "fetch", search_body()))
         self.assertFalse(allowed_request(url, "DELETE", "fetch"))
         self.assertFalse(allowed_request(url, "POST", "fetch", "bad JSON"))
-        self.assertFalse(allowed_request(url, "POST", "fetch", search_body(keyword="private-profile-fragment")))
+        self.assertTrue(allowed_request(url, "POST", "fetch", search_body(keyword="图神经网络 上海", offset=250)))
+        self.assertFalse(allowed_request(url, "POST", "fetch", search_body(keyword="x" * 1001)))
         self.assertFalse(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "script"))
 
     def test_assets_cannot_be_navigation_or_writes(self):

@@ -143,12 +143,12 @@ class Store:
         except (OSError, UnicodeError) as exc:
             raise AssistantError(f"无法读取数据文件 {path.name}，请检查或从备份恢复。", 500) from exc
 
-    def _read_json(self, path):
+    def _read_json(self, path, versions=(1,)):
         try:
             data = json.loads(self._read_text(path))
         except json.JSONDecodeError as exc:
             raise AssistantError(f"数据文件 {path.name} 已损坏，不会自动覆盖。", 500) from exc
-        if not isinstance(data, dict) or data.get("schema_version") != 1:
+        if not isinstance(data, dict) or data.get("schema_version") not in versions:
             raise AssistantError(f"数据文件 {path.name} 的格式版本不受支持。", 500)
         return data
 
@@ -223,14 +223,16 @@ class Store:
             raise AssistantError("任务标识无效。")
         return self.root / "tasks" / f"{key}.json"
 
-    def create_task(self, request, portal, mode, memory, limits):
+    def create_task(self, request, portal, mode, memory, limits, scope=None, public_request=None):
         with self._mutex:
             key = uuid.uuid4().hex
-            record = {"schema_version": 1, "id": key, "request": request, "portal": portal,
+            record = {"schema_version": 2 if scope else 1, "id": key, "request": request, "portal": portal,
                       "mode": mode, "memory": memory, "limits": limits, "status": "queued",
                       "created_at": now_iso(), "updated_at": now_iso(), "cancel_requested": False,
                       "calls": 0, "steps": 0, "pages": [], "actions": [], "errors": [], "result": None,
-                      "note": "仅限公开招聘查询；不登录、不投递。"}
+                      "note": "仅限授权的公开网页读取；不登录、不发送或提交。"}
+            if scope:
+                record.update(scope=scope, public_request=public_request, phase="browsing", stop_reason="")
             self._write_json(self._task_path(key), record)
             return record
 
@@ -239,13 +241,16 @@ class Store:
             path = self._task_path(key)
             if not path.exists():
                 raise AssistantError("任务不存在。", 404)
-            record = self._read_json(path)
+            record = self._read_json(path, versions=(1, 2))
             try:
                 # Existing v0.2 records predate browser action transcripts.
                 record.setdefault("actions", [])
+                version = record.get("schema_version")
+                modern = version == 2
                 if (record.get("id") != key or record.get("status") not in
                         {"queued", "running", "completed", "partial", "failed", "cancelled", "interrupted"}
-                        or record.get("portal") != "bytedance_experienced"
+                        or version not in {1, 2}
+                        or record.get("portal") != ("public_web" if modern else "bytedance_experienced")
                         or record.get("mode") not in {"api", "demo"}
                         or not isinstance(record.get("pages"), list)
                         or not isinstance(record.get("errors"), list)
@@ -255,47 +260,61 @@ class Store:
                 text_field(record["note"], "任务状态说明", 3000)
                 for kind in ("profile", "rules"):
                     text_field(record["memory"][kind], "任务记忆", allow_empty=True)
-                for limit, maximum in (("calls", 30), ("seconds", 600), ("steps", 40), ("pages", 30), ("details", 20)):
+                if modern:
+                    from .browser import BrowserScope
+                    scope = record["scope"]
+                    if BrowserScope(scope["start_url"], scope["domains"], scope["resource_domains"]).as_dict() != scope:
+                        raise ValueError("invalid scope")
+                    text_field(record["public_request"], "公开查询说明", 4000)
+                    if record["phase"] not in {"browsing", "analysis"}:
+                        raise ValueError("invalid phase")
+                    text_field(record["stop_reason"], "停止原因", 3000, True)
+                maxima = (("calls", 200), ("seconds", 3600), ("steps", 500), ("pages", 500), ("details", 500)) if modern else (
+                    ("calls", 30), ("seconds", 600), ("steps", 40), ("pages", 30), ("details", 20))
+                for limit, maximum in maxima:
                     value = record["limits"][limit]
                     if type(value) is not int or not 1 <= value <= maximum:
                         raise ValueError("invalid limit")
                 for counter in ("calls", "steps"):
                     if type(record[counter]) is not int or not 0 <= record[counter] <= record["limits"][counter]:
                         raise ValueError("invalid counter")
-                if len(record["pages"]) > record["limits"]["pages"] or len(record["errors"]) > 40:
+                if len(record["pages"]) > record["limits"]["pages"] or len(record["errors"]) > (record["limits"]["steps"] + 1 if modern else 40):
                     raise ValueError("invalid coverage")
                 seen = set()
                 for page in record["pages"]:
-                    if (not isinstance(page["id"], str) or not re.fullmatch(r"p[1-9][0-9]?", page["id"])
-                            or page["id"] in seen or page["kind"] not in {"detail", "listing"}
-                            or not isinstance(page["links"], list) or len(page["links"]) > 80):
+                    if (not isinstance(page["id"], str) or not re.fullmatch(r"p[1-9][0-9]{0,2}", page["id"])
+                            or page["id"] in seen or page["kind"] not in ({"detail", "listing", "page"} if modern else {"detail", "listing"})
+                            or not isinstance(page["links"], list) or len(page["links"]) > (200 if modern else 80)):
                         raise ValueError("invalid page")
                     seen.add(page["id"])
                     text_field(page["url"], "页面地址", 2000)
-                    text_field(page["text"], "页面正文", 16000)
+                    text_field(page["text"], "页面正文", 65536 if modern else 16000, modern)
                     text_field(page["title"], "页面标题", 300, True)
                     text_field(page["fetched_at"], "页面获取时间", 80)
                     if type(page.get("ready", True)) is not bool:
                         raise ValueError("invalid readiness")
                     elements = page.get("elements", [])
-                    if not isinstance(elements, list) or len(elements) > 80:
+                    if not isinstance(elements, list) or len(elements) > (200 if modern else 80):
                         raise ValueError("invalid elements")
                     for element in elements:
                         text_field(element["id"], "元素编号", 80)
                         text_field(element["label"], "元素标签", 200, True)
-                        if not isinstance(element["actions"], list) or set(element["actions"]) - {"click", "fill"}:
+                        if not isinstance(element["actions"], list) or set(element["actions"]) - (
+                                {"click", "fill", "press", "select", "check"} if modern else {"click", "fill"}):
                             raise ValueError("invalid capabilities")
                 if not isinstance(record["actions"], list) or len(record["actions"]) > record["steps"]:
                     raise ValueError("invalid actions")
                 for action in record["actions"]:
                     if (type(action["step"]) is not int or not 1 <= action["step"] <= record["steps"]
-                            or action["tool"] not in {"open_link", "observe_page", "click_element", "fill_field", "scroll_page"}
+                            or action["tool"] not in {"open_link", "open_url", "observe_page", "click_element", "fill_field", "scroll_page",
+                                                      "go_back", "refresh_page", "wait_page", "press_key", "select_option", "check_field",
+                                                      "restart_browser", "take_screenshot", "read_source"}
                             or action["status"] not in {"running", "success", "incomplete", "failed", "interrupted"}
                             or not isinstance(action["arguments"], dict)):
                         raise ValueError("invalid action")
                 if record["result"] is not None and not isinstance(record["result"], dict):
                     raise ValueError("invalid result")
-            except (KeyError, TypeError, ValueError, AssistantError):
+            except (KeyError, TypeError, ValueError, AttributeError, AssistantError):
                 raise AssistantError("任务记录损坏，不会自动覆盖。", 500) from None
             return record
 
@@ -307,16 +326,36 @@ class Store:
 
     def update_task(self, key, **changes):
         # Read-modify-write under one lock: cancellation cannot be lost by a worker.
-        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "actions", "errors", "result", "note"}
+        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "actions", "errors", "result", "note", "phase", "stop_reason"}
         if set(changes) - allowed:
             raise AssistantError("不能修改任务身份或已授权上下文。", 500)
         with self._mutex:
             record = self.get_task(key)
-            if record["cancel_requested"] and changes.get("status") == "completed":
-                changes.update(status="cancelled", result=None, note="完成前收到取消请求；证据保留，结果未发布。")
+            if record["cancel_requested"] and changes.get("status") in {"completed", "partial", "failed"}:
+                changes.update(status="cancelled", result=None, note="结束前收到取消请求；证据保留，结果未发布。")
+                if record.get("schema_version") == 2:
+                    changes["stop_reason"] = changes["note"]
             record.update(changes, updated_at=now_iso())
             self._write_json(self._task_path(key), record)
             return record
+
+    def save_task_screenshot(self, key, step, data_url):
+        self._task_path(key)
+        if (type(step) is not int or not 1 <= step <= 500 or not isinstance(data_url, str)
+                or not data_url.startswith("data:image/png;base64,") or len(data_url) > 3_000_000):
+            raise AssistantError("截图格式无效，未保存。", 500)
+        with self._mutex:
+            directory = self.root / "screenshots"
+            if directory.is_symlink():
+                raise AssistantError("截图目录不能是符号链接。", 500)
+            directory.mkdir(mode=0o700, exist_ok=True)
+            if directory.stat().st_uid != os.getuid():
+                raise AssistantError("截图目录必须属于当前用户。", 500)
+            directory.chmod(0o700)
+            name = f"{key}-{step}.json"
+            self._write_json(directory / name, {"schema_version": 1, "task_id": key, "step": step,
+                                               "fetched_at": now_iso(), "image": data_url, "masked": True})
+            return name
 
     def update_memory(self, kind, content, append=False):
         if kind not in {"profile", "rules"}:
