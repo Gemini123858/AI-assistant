@@ -21,7 +21,7 @@ from assistant.errors import AssistantError
 from assistant.web import create_app
 
 from .test_task_web import outputs
-from .test_tasks import DETAIL, LIST, PROFILE, FixtureBrowser, ScriptModel
+from .test_tasks import DETAIL, LIST, PROFILE, FixtureBrowser, ScriptModel, call
 
 
 class LocalResponseBrowser(JobBrowser):
@@ -81,16 +81,11 @@ def main():
                 raise AssertionError("Old element ID executed")
             except AssistantError as error:
                 assert error.status == 409
-            try:
-                executor.fill(element(listing, "搜索职位")["id"], "private-profile-fragment", True)
-                raise AssertionError("Private search text sent")
-            except AssistantError as error:
-                assert error.status == 403
-            search = executor.fill(element(listing, "搜索职位")["id"], "算法", True)
+            search = executor.fill(element(listing, "搜索职位")["id"], "图神经网络 上海 研究实习", True)
             assert search["ready"] and "keywords=" in search["url"]
             second = executor.click(element(search, "2")["id"])
             assert second["ready"] and "current=2" in second["url"]
-            assert executor.searches[-1]["offset"] == 10 and executor.searches[-1]["keyword"] == "算法"
+            assert executor.searches[-1]["offset"] == 10 and executor.searches[-1]["keyword"] == "图神经网络 上海 研究实习"
             executor.scroll("down")
             detail = executor.read(DETAIL)
             assert detail["kind"] == "detail"
@@ -100,7 +95,12 @@ def main():
 
     with tempfile.TemporaryDirectory() as temporary:
         FixtureBrowser.fail_detail = False
-        model = ScriptModel(outputs())
+        script = outputs()
+        final = json.loads(script[-1]["tool_calls"][0]["function"]["arguments"])
+        final["findings"] = [{"page_id": "p3", "text": "通用发现：已读取公开要求。", "line_start": 2,
+                              "line_end": 2, "uncertainties": []}]
+        script[-1] = call("finish_task", final)
+        model = ScriptModel(script)
         app = create_app(Config(data_dir=Path(temporary) / "data", mode="api", api_key="synthetic"),
                          model, FixtureBrowser)
         app.extensions["store"].update_memory("profile", PROFILE)
@@ -115,10 +115,15 @@ def main():
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.goto(f"http://127.0.0.1:{server.server_port}")
                 page.get_by_role("button", name="网页任务", exact=True).click()
+                page.locator("#task-url").fill(ENTRY)
+                page.locator("#task-public-request").fill("合成算法岗位查询")
+                page.locator("#task-public-confirm").check()
                 page.locator("#task-request").fill("合成算法岗位查询")
                 page.locator("#task-button").click()
                 expect(page.locator(".task-card .tag").first).to_have_text("已完成", timeout=15000)
-                expect(page.locator(".job-result")).to_contain_text("会 Python")
+                expect(page.locator(".job-result").last).to_contain_text("会 Python")
+                expect(page.locator(".job-result").first).to_contain_text("通用发现")
+                expect(page.locator(".job-result").first).to_contain_text("职位要求：熟悉 Python")
                 page.get_by_text("查看浏览器动作记录", exact=True).click()
                 expect(page.locator(".task-actions")).to_contain_text("打开链接")
                 page.get_by_text("查看已访问页面及保存的正文", exact=True).click()

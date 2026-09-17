@@ -7,6 +7,7 @@ from assistant.config import Config
 from assistant.web import create_app
 
 from .test_tasks import FixtureBrowser, ScriptModel, PROFILE, call, final_result
+from .test_generic_tasks import result
 
 
 def outputs():
@@ -80,3 +81,42 @@ class TaskWebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/tasks/invalid").status_code, 400)
         self.assertEqual(self.client.post(f"/api/tasks/{key}/cancel", json={"send": True},
                                          headers=self.headers).status_code, 400)
+
+    def test_custom_scope_and_separate_public_context_survive_explicit_restart(self):
+        self.model.outputs = [call("finish_task", result())]
+        payload = {"request": "PRIVATE_RESTART_REQUIREMENT", "public_request": "公开资料查询",
+                   "start_url": "https://catalog.example/topics/", "domains": ["catalog.example", "docs.example"],
+                   "resource_domains": ["cdn.example"]}
+        response = self.client.post("/api/tasks", json=payload, headers=self.headers)
+        self.assertEqual(response.status_code, 202)
+        self.app.extensions["tasks"].wait()
+        old = self.client.get(f"/api/tasks/{response.json['task']['id']}").json["task"]
+        self.model.outputs = [call("finish_task", result())]
+        response = self.client.post(f"/api/tasks/{old['id']}/restart", json={}, headers=self.headers)
+        self.assertEqual(response.status_code, 202)
+        self.app.extensions["tasks"].wait()
+        new = self.client.get(f"/api/tasks/{response.json['task']['id']}").json["task"]
+        self.assertEqual(new["scope"], old["scope"])
+        self.assertEqual(new["public_request"], payload["public_request"])
+        self.assertEqual(new["request"], payload["request"])
+        self.assertEqual(new["status"], "completed")
+        self.assertNotIn(payload["request"], str(self.model.calls))
+
+    def test_status_exposes_effective_daily_budget_without_starting_calls(self):
+        store, service = self.app.extensions["store"], self.app.extensions["service"]
+        store.reserve_call(service.day(), service.config.daily_calls)
+        status = self.client.get("/api/status").json
+        self.assertEqual(status["browser_budget"], {"calls": 40, "steps": 120, "seconds": 900, "effective_calls": 29})
+        self.assertFalse(status["capabilities"]["browser_vision"])
+        self.assertEqual(self.model.calls, [])
+
+    def test_schema_one_task_and_job_result_remain_readable_via_api(self):
+        store = self.app.extensions["store"]
+        legacy = store.create_task("旧任务", "bytedance_experienced", "api", store.memory(),
+                                   {"calls": 12, "seconds": 300, "steps": 40, "pages": 30, "details": 20})
+        store.update_task(legacy["id"], status="partial", result={"summary": "旧结果", "jobs": [], "questions": []})
+        response = self.client.get(f"/api/tasks/{legacy['id']}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["task"]["schema_version"], 1)
+        self.assertEqual(response.json["task"]["result"]["summary"], "旧结果")
+        self.assertNotIn("memory", response.json["task"])

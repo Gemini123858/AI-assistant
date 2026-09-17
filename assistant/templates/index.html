@@ -55,13 +55,17 @@
     </section>
     <section id="tasks-panel" class="tasks-workspace" hidden>
       <div class="panel">
-        <h2>公开招聘查询</h2>
-        <p class="muted">从招聘入口逐层浏览，查看岗位详情，再结合你的画像筛选。</p>
+        <h2>公开网页任务</h2>
+        <p class="muted">由 Kimi 自主浏览、检索和恢复失败操作，再结合私人条件分析已读证据。</p>
         <form id="task-form">
-          <label>当前范围<input value="字节跳动 · 社会招聘公开页面（不登录、不投递）" disabled></label>
+          <label>起始 URL<input id="task-url" type="url" required value="https://jobs.bytedance.com/experienced/position" maxlength="2000"></label>
+          <label>额外授权访问域（可选，逗号分隔）<input id="task-domains" placeholder="完整域名；起始 URL 的域自动加入"></label>
+          <label>额外资源域（可选，仅脚本/样式/图片/字体）<input id="task-resources" placeholder="已核实的 CDN 域名；不会自动授权第三方接口"></label>
+          <label>可发送网站的公开查询说明<textarea id="task-public-request" rows="3" required maxlength="4000" placeholder="例如：查找上海的图神经网络研究实习岗位。不要填姓名、联系方式或私人经历。"></textarea></label>
           <label for="task-request">查询要求<textarea id="task-request" rows="4" required maxlength="2000" placeholder="例如：查询算法相关岗位，优先上海或杭州。结合我已保存的画像，列出可能匹配的岗位、差距和待确认信息。"></textarea></label>
-          <button id="task-button" type="submit" class="primary">开始读取与筛选</button>
-          <p class="caption">这次任务会调用模型并使用已保存的画像。最多读取20份详情，受调用、步骤与耗时预算限制；不会发送邮件、上传简历或提交表单。</p>
+          <label><input id="task-public-confirm" type="checkbox" required> 我确认上面的公开查询说明可用于网站检索；查询词可由模型自由组织。</label>
+          <button id="task-button" type="submit" class="primary">开始读取与分析</button>
+          <p class="caption">查询要求与画像只用于关闭网站动作后的分析。任务共享日调用额度；不会登录、发送、上传或提交，未知写操作只报告待授权。失败可在总预算内恢复。</p>
           <p id="task-availability" class="caption"></p>
         </form>
       </div>

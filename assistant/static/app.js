@@ -149,17 +149,18 @@ async function loadStatus() {
     "真实模型已启用。分析、普通问答和主动发起的网页任务会调用 API，并使用记忆；失败尝试也计入额度。普通问答没有浏览工具，网页任务不登录、不投递。当前没有自动采集、推送或邮件发送。" :
     "当前为演示模式：只验证界面、文件保存和显式记忆命令，不判断真实相关性或日期。配置 API 后重启，可进行真实分析和问答。";
   $("task-button").disabled = !status.capabilities.browser_tasks;
+  const budget = status.browser_budget;
   $("task-availability").textContent = status.capabilities.browser_tasks ?
-    "当前支持一个串行网页任务；期间通知分析或普通问答可能提示稍后重试。" :
+    `本任务配置 ${budget.calls} 次模型调用 / ${budget.steps} 步 / ${Math.round(budget.seconds / 60)} 分钟；受日剩余额度限制，当前有效模型预算 ${budget.effective_calls} 次。视觉截图${status.capabilities.browser_vision ? "已开启（仅匿名页，输入遮罩）" : "未开启"}。一次仅运行一个任务。` :
     "演示模式不执行网页任务，不伪造招聘查询。请配置 API 和 Chromium 后重启。";
 }
 
-function sourceLink(url, label) {
+function sourceLink(url, label, domains = ["jobs.bytedance.com"]) {
   const link = node("a", "", label);
   let target;
   try { target = new URL(url); } catch (_) { return link; }
   // A stored/model-produced link is still untrusted; never render javascript: URLs.
-  if (target.protocol === "https:" && target.hostname === "jobs.bytedance.com" && !target.username && !target.password) {
+  if (target.protocol === "https:" && domains.includes(target.hostname) && (!target.port || target.port === "443") && !target.username && !target.password) {
     link.href = target.href;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
@@ -173,25 +174,36 @@ function taskCard(task) {
   const names = { queued: "待运行", running: "运行中", completed: "已完成", partial: "部分完成",
     failed: "失败", cancelled: "已取消", interrupted: "中断" };
   const top = node("div", "card-top");
+  const domains = task.scope?.domains || ["jobs.bytedance.com"];
   top.append(node("h3", "", task.request), node("span", "tag", names[task.status] || "未知"));
   card.append(top, node("p", "reason", task.note), node("p", "caption",
-    `已保存 ${task.pages.length} 份页面观察 · ${task.steps} 次浏览器动作 · 模型尝试 ${task.calls}/${task.limits.calls} · ${formatTime(task.created_at)}`));
+    `已保存 ${task.pages.length} 份页面观察 · 动作 ${task.steps}/${task.limits.steps} · 模型 ${task.calls}/${task.limits.calls} · ${task.phase === "analysis" ? "私人分析（无网站动作）" : "公开浏览"} · ${formatTime(task.created_at)}`));
+  if (task.scope) card.append(node("p", "caption", "授权访问域：" + domains.join("、")));
   if (task.actions?.length) {
     const actions = node("details", "task-actions");
     actions.append(node("summary", "", "查看浏览器动作记录"));
-    const labels = { open_link: "打开链接", observe_page: "观察页面", click_element: "点击元素", fill_field: "填写搜索框", scroll_page: "滚动页面" };
+    const labels = { open_link: "打开链接", open_url: "打开 URL", observe_page: "观察页面", click_element: "点击元素", fill_field: "填写搜索框", scroll_page: "滚动页面", go_back: "返回", refresh_page: "刷新", wait_page: "等待", press_key: "按键", select_option: "选择筛选项", check_field: "勾选筛选", restart_browser: "重启匿名浏览器", take_screenshot: "截图（输入已遮罩）", read_source: "读取保存证据" };
     const states = { running: "执行中", success: "成功", incomplete: "内容未验证", failed: "失败", interrupted: "已中止，结果未验证" };
     for (const action of task.actions) {
-      actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error ? " · " + action.error : ""}`));
+      actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error_kind ? " · " + action.error_kind : ""}${action.error ? " · " + action.error : ""}`));
+      if (action.loop_warning) actions.append(node("p", "caption", action.loop_warning));
+      if (action.remaining) actions.append(node("p", "caption", `动作结束时剩余：模型 ${action.remaining.calls} 次 / 动作 ${action.remaining.steps} 步 / 时间 ${action.remaining.seconds} 秒`));
     }
     card.append(actions);
   }
   if (task.result) {
     card.append(node("p", "summary-text", task.result.summary), node("p", "notice", task.result.coverage));
-    for (const job of task.result.jobs) {
+    for (const finding of task.result.findings || []) {
+      const result = node("section", "job-result");
+      result.append(node("p", "summary-text", finding.text), sourceLink(finding.url, `${finding.page_id} · 原来源`, domains),
+        node("p", "task-evidence", `原文（${finding.line_start}–${finding.line_end}行）：\n${finding.quote}`));
+      if (finding.uncertainties.length) result.append(node("p", "notice", "未知项：" + finding.uncertainties.join("；")));
+      card.append(result);
+    }
+    for (const job of task.result.jobs || []) {
       const result = node("section", "job-result");
       const fit = { potential_match: "潜在匹配", needs_confirmation: "待确认", not_match: "当前不匹配" }[job.fit];
-      result.append(sourceLink(job.url, job.title), node("span", "tag", fit), node("p", "reason", job.reason),
+      result.append(sourceLink(job.url, job.title, domains), node("span", "tag", fit), node("p", "reason", job.reason),
         node("p", "caption", "获取时间：" + formatTime(job.fetched_at)),
         node("p", "task-evidence", "岗位原文：\n" + job.job_evidence));
       if (job.profile_evidence.length) result.append(node("p", "reason", "画像依据：" + job.profile_evidence.join("；")));
@@ -200,12 +212,16 @@ function taskCard(task) {
     }
     if (task.result.questions.length) card.append(node("p", "notice", "需要你补充：" + task.result.questions.join("；")));
   }
-  for (const error of task.errors) card.append(node("p", "notice", "未覆盖：" + error.url + " · " + error.error));
+  for (const error of task.errors) {
+    card.append(node("p", "notice", `历史失败/恢复线索${error.step ? "（步骤" + error.step + "）" : ""}：${error.kind || "读取失败"} · ${error.url} · ${error.error}`));
+    for (const item of error.network_errors || []) card.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
+    for (const item of error.policy_blocks || []) card.append(node("p", "caption", `主动拦截（不是网络故障）：${item.target} · ${item.reason}`));
+  }
   const evidence = node("details", "task-pages");
   evidence.append(node("summary", "", "查看已访问页面及保存的正文"));
   for (const page of task.pages) {
     const row = node("p");
-    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}${page.ready === false ? " · 内容尚未验证" : ""}`));
+    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}${page.ready === false ? " · 内容尚未验证" : ""}`, domains));
     evidence.append(row);
   }
   const view = node("button", "quiet", "载入保存的正文");
@@ -217,6 +233,8 @@ function taskCard(task) {
         node("p", "caption", `${formatTime(page.fetched_at)}${page.text_truncated ? " · 正文已截断，覆盖不完整" : ""}`),
         node("pre", "task-evidence", page.text));
       if (page.ready === false) evidence.append(node("p", "notice", page.read_error || "界面观察不等于有效岗位详情。"));
+      for (const item of page.network_errors || []) evidence.append(node("p", "caption", `网络失败：${item.target} · ${item.code}`));
+      for (const item of page.policy_blocks || []) evidence.append(node("p", "caption", `主动拦截：${item.target} · ${item.reason}`));
     }
   }));
   evidence.append(view);
@@ -258,8 +276,13 @@ async function loadTasks() {
 $("task-form").addEventListener("submit", (event) => {
   event.preventDefault();
   working($("task-button"), async () => {
-    await api("/api/tasks", "POST", { request: $("task-request").value });
-    toast("已发起受限只读任务，可查看进度或取消。");
+    const start = new URL($("task-url").value);
+    const splitDomains = (id) => $(id).value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+    const domains = [...new Set([start.hostname, ...splitDomains("task-domains")])];
+    await api("/api/tasks", "POST", { request: $("task-request").value,
+      public_request: $("task-public-request").value, start_url: start.href,
+      domains, resource_domains: splitDomains("task-resources") });
+    toast("已发起公开网页任务，可查看动作、恢复记录或取消。");
     await loadTasks();
   });
 });

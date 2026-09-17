@@ -74,8 +74,12 @@ def create_app(config=None, model=None, browser_factory=None):
     def status():
         return jsonify(mode=config.mode, model=config.model if config.mode == "api" else "演示（无真实推理）",
                        usage=store.usage(service.day()), daily_limit=config.daily_calls,
-                       timezone=config.timezone, version="0.2.0", capabilities={"auto_collect": False,
-                       "browser_tasks": config.mode == "api", "browser_scope": "bytedance_experienced_public",
+                       timezone=config.timezone, version="0.2.0",
+                       browser_budget={"calls": config.browser_calls, "steps": config.browser_steps,
+                                       "seconds": config.browser_seconds,
+                                       "effective_calls": min(config.browser_calls, max(0, config.daily_calls - store.usage(service.day())["calls"]))},
+                       capabilities={"auto_collect": False, "browser_vision": config.browser_vision,
+                       "browser_tasks": config.mode == "api", "browser_scope": "task_authorized_public_domains",
                        "push": False, "send_email": False, "automatic_memory": False})
 
     def public_task(task, detail=False):
@@ -113,7 +117,10 @@ def create_app(config=None, model=None, browser_factory=None):
         previous = store.get_task(key)
         if previous["status"] in {"queued", "running"}:
             raise AssistantError("运行中的任务不能重新发起。", 409)
-        return jsonify(task=public_task(tasks.start({"request": previous["request"]}))), 202
+        payload = {"request": previous["request"]}
+        if previous.get("schema_version") == 2:
+            payload.update(public_request=previous["public_request"], **previous["scope"])
+        return jsonify(task=public_task(tasks.start(payload))), 202
 
     @app.get("/api/messages")
     def messages():
