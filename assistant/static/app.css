@@ -92,5 +92,11 @@ dialog::backdrop { background:#162b2466; }
 dialog pre { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); padding:17px; border-radius:9px; max-height:55vh; overflow:auto; }
 #source-id { overflow-wrap:anywhere; }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.tasks-workspace { max-width:1000px; margin:auto; }
+.task-card { overflow-wrap:anywhere; }
+.task-evidence { white-space:pre-wrap; font-size:12px; max-height:320px; overflow:auto; background:var(--bg); padding:14px; border-radius:8px; }
+.job-result { border-top:1px solid var(--line); padding-top:14px; margin-top:14px; }
+.task-card a { color:var(--accent); overflow-wrap:anywhere; }
+.task-card details { margin-top:12px; }
 @media(max-width:900px) { .workspace { grid-template-columns:1fr; } .chat-panel { position:static; } .chat-history { max-height:400px; } .roadmap-note { display:none; } }
 @media(max-width:560px) { .topbar { padding:0 18px; height:64px; } .local-note { display:none; } main { padding:24px 16px; } .intro { align-items:flex-start; } .status-box { min-width:0; max-width:130px; font-size:11px; } .form-grid,.memory-workspace { grid-template-columns:1fr; } .panel { padding:17px; } .chat-panel { padding:0; } .memory-intro { grid-column:auto; } .source-time { margin-left:0; } .brand { font-size:15px; gap:8px; } .version { font-size:10px; } }

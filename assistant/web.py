@@ -8,9 +8,10 @@ from .config import Config
 from .errors import AssistantError
 from .service import Service
 from .storage import Store
+from .tasks import Tasks
 
 
-def create_app(config=None, model=None):
+def create_app(config=None, model=None, browser_factory=None):
     config = config or Config.from_env()
     config.validate()
     app = Flask(__name__)
@@ -18,7 +19,12 @@ def create_app(config=None, model=None):
     app.json.ensure_ascii = False
     store = Store(config.data_dir)
     service = Service(store, config, model)
-    app.extensions.update(store=store, service=service)
+    try:
+        tasks = Tasks(service, browser_factory)
+    except Exception:
+        store.close()
+        raise
+    app.extensions.update(store=store, service=service, tasks=tasks)
     csrf_token = secrets.token_urlsafe(32)
 
     @app.before_request
@@ -68,8 +74,44 @@ def create_app(config=None, model=None):
     def status():
         return jsonify(mode=config.mode, model=config.model if config.mode == "api" else "演示（无真实推理）",
                        usage=store.usage(service.day()), daily_limit=config.daily_calls,
-                       timezone=config.timezone, version="0.1.0", capabilities={"auto_collect": False,
+                       timezone=config.timezone, version="0.2.0", capabilities={"auto_collect": False,
+                       "browser_tasks": config.mode == "api", "browser_scope": "bytedance_experienced_public",
                        "push": False, "send_email": False, "automatic_memory": False})
+
+    def public_task(task, detail=False):
+        # Memory snapshots never need to be sent back with every task-progress poll.
+        safe = {key: value for key, value in task.items() if key != "memory"}
+        if not detail:
+            safe["pages"] = [{key: page[key] for key in ("id", "url", "title", "kind", "fetched_at")}
+                             for page in task["pages"]]
+        return safe
+
+    @app.get("/api/tasks")
+    def list_tasks():
+        return jsonify(tasks=[public_task(task) for task in store.list_tasks()])
+
+    @app.post("/api/tasks")
+    def start_task():
+        return jsonify(task=public_task(tasks.start(body()))), 202
+
+    @app.get("/api/tasks/<key>")
+    def task_detail(key):
+        return jsonify(task=public_task(store.get_task(key), detail=True))
+
+    @app.post("/api/tasks/<key>/cancel")
+    def cancel_task(key):
+        if body():
+            raise AssistantError("取消不接受额外参数。")
+        return jsonify(task=public_task(tasks.cancel(key)))
+
+    @app.post("/api/tasks/<key>/restart")
+    def restart_task(key):
+        if body():
+            raise AssistantError("重新发起不接受额外参数。")
+        previous = store.get_task(key)
+        if previous["status"] in {"queued", "running"}:
+            raise AssistantError("运行中的任务不能重新发起。", 409)
+        return jsonify(task=public_task(tasks.start({"request": previous["request"]}))), 202
 
     @app.get("/api/messages")
     def messages():

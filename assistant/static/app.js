@@ -146,9 +146,108 @@ async function loadStatus() {
   $("model-name").textContent = status.model;
   $("usage").textContent = `今日 API 尝试 ${status.usage.calls} / ${status.daily_limit}`;
   $("mode-notice").textContent = status.mode === "api" ?
-    "真实模型已启用。点击分析或发送普通问答会调用 API，并传入通知和记忆；失败尝试也计入额度。当前没有自动采集、推送或邮件发送。" :
+    "真实模型已启用。分析、普通问答和主动发起的网页任务会调用 API，并使用记忆；失败尝试也计入额度。普通问答没有浏览工具，网页任务不登录、不投递。当前没有自动采集、推送或邮件发送。" :
     "当前为演示模式：只验证界面、文件保存和显式记忆命令，不判断真实相关性或日期。配置 API 后重启，可进行真实分析和问答。";
+  $("task-button").disabled = !status.capabilities.browser_tasks;
+  $("task-availability").textContent = status.capabilities.browser_tasks ?
+    "当前支持一个串行网页任务；期间通知分析或普通问答可能提示稍后重试。" :
+    "演示模式不执行网页任务，不伪造招聘查询。请配置 API 和 Chromium 后重启。";
 }
+
+function sourceLink(url, label) {
+  const link = node("a", "", label);
+  let target;
+  try { target = new URL(url); } catch (_) { return link; }
+  // A stored/model-produced link is still untrusted; never render javascript: URLs.
+  if (target.protocol === "https:" && target.hostname === "jobs.bytedance.com" && !target.username && !target.password) {
+    link.href = target.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  }
+  return link;
+}
+
+function taskCard(task) {
+  const card = node("article", "message-card task-card");
+  card.dataset.taskId = task.id;
+  const names = { queued: "待运行", running: "运行中", completed: "已完成", partial: "部分完成",
+    failed: "失败", cancelled: "已取消", interrupted: "中断" };
+  const top = node("div", "card-top");
+  top.append(node("h3", "", task.request), node("span", "tag", names[task.status] || "未知"));
+  card.append(top, node("p", "reason", task.note), node("p", "caption",
+    `已读取 ${task.pages.length} 页 · ${task.steps} 次导航 · 模型尝试 ${task.calls}/${task.limits.calls} · ${formatTime(task.created_at)}`));
+  if (task.result) {
+    card.append(node("p", "summary-text", task.result.summary), node("p", "notice", task.result.coverage));
+    for (const job of task.result.jobs) {
+      const result = node("section", "job-result");
+      const fit = { potential_match: "潜在匹配", needs_confirmation: "待确认", not_match: "当前不匹配" }[job.fit];
+      result.append(sourceLink(job.url, job.title), node("span", "tag", fit), node("p", "reason", job.reason),
+        node("p", "caption", "获取时间：" + formatTime(job.fetched_at)),
+        node("p", "task-evidence", "岗位原文：\n" + job.job_evidence));
+      if (job.profile_evidence.length) result.append(node("p", "reason", "画像依据：" + job.profile_evidence.join("；")));
+      if (job.uncertainties.length) result.append(node("p", "notice", "未知项：" + job.uncertainties.join("；")));
+      card.append(result);
+    }
+    if (task.result.questions.length) card.append(node("p", "notice", "需要你补充：" + task.result.questions.join("；")));
+  }
+  for (const error of task.errors) card.append(node("p", "notice", "未覆盖：" + error.url + " · " + error.error));
+  const evidence = node("details");
+  evidence.append(node("summary", "", "查看已访问页面及保存的正文"));
+  for (const page of task.pages) {
+    const row = node("p");
+    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}`));
+    evidence.append(row);
+  }
+  const view = node("button", "quiet", "载入保存的正文");
+  view.addEventListener("click", () => working(view, async () => {
+    const saved = (await api(`/api/tasks/${task.id}`)).task;
+    view.remove();
+    for (const page of saved.pages) {
+      evidence.append(node("h3", "", page.id + " · " + page.title),
+        node("p", "caption", `${formatTime(page.fetched_at)}${page.text_truncated ? " · 正文已截断，覆盖不完整" : ""}`),
+        node("pre", "task-evidence", page.text));
+    }
+  }));
+  evidence.append(view);
+  card.append(evidence);
+  const active = ["queued", "running"].includes(task.status);
+  const button = node("button", "quiet", active ? "取消任务" : "重新发起（重新计费）");
+  button.disabled = active && task.cancel_requested;
+  button.addEventListener("click", () => working(button, async () => {
+    if (!active && !window.confirm("将创建新任务、使用当前画像并重新调用 API；旧记录保留。是否继续？")) return;
+    await api(`/api/tasks/${task.id}/${active ? "cancel" : "restart"}`, "POST", {});
+    await loadTasks();
+  }));
+  const actions = node("div", "card-actions");
+  actions.append(button);
+  card.append(actions);
+  return card;
+}
+
+let taskPoll;
+async function loadTasks() {
+  clearTimeout(taskPoll);
+  const data = await api("/api/tasks");
+  const open = new Set([...$("task-list").querySelectorAll(".task-card")]
+    .filter((card) => card.querySelector("details")?.open).map((card) => card.dataset.taskId));
+  const cards = data.tasks.map(taskCard);
+  cards.forEach((card) => { card.querySelector("details").open = open.has(card.dataset.taskId); });
+  $("task-list").replaceChildren(...cards);
+  if (!data.tasks.length) $("task-list").append(node("div", "empty-state", "尚未发起网页任务。后台不会自行启动查询或分析。"));
+  if (data.tasks.some((task) => ["queued", "running"].includes(task.status))) {
+    taskPoll = setTimeout(() => loadTasks().catch((error) => toast(error.message, true)), 2500);
+  } else await loadStatus();
+}
+
+$("task-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  working($("task-button"), async () => {
+    await api("/api/tasks", "POST", { request: $("task-request").value });
+    toast("已发起受限只读任务，可查看进度或取消。");
+    await loadTasks();
+  });
+});
+$("tasks-refresh").addEventListener("click", () => working($("tasks-refresh"), () => loadTasks()));
 
 function chatTurn(turn) {
   const wrapper = node("div", "chat-turn");
@@ -248,6 +347,7 @@ document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click",
   });
   $("notifications-panel").hidden = tab.dataset.tab !== "notifications";
   $("memory-panel").hidden = tab.dataset.tab !== "memory";
+  $("tasks-panel").hidden = tab.dataset.tab !== "tasks";
 }));
 $("refresh-button").addEventListener("click", () => working($("refresh-button"), () => Promise.all([loadMessages(), loadStatus()])));
 $("previous-page").addEventListener("click", async () => { offset = Math.max(0, offset - pageSize); await loadMessages().catch((e) => toast(e.message, true)); });
@@ -256,5 +356,5 @@ $("close-dialog").addEventListener("click", () => $("source-dialog").close());
 
 const current = new Date();
 $("sent-at").value = new Date(current.getTime() - current.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-Promise.all([loadMessages(), loadStatus(), loadChat(), api("/api/memory").then(refreshMemory)])
+Promise.all([loadMessages(), loadStatus(), loadTasks(), loadChat(), api("/api/memory").then(refreshMemory)])
   .catch((error) => toast(error.message, true));
