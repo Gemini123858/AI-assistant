@@ -263,7 +263,7 @@ class Store:
                 if modern:
                     from .browser import BrowserScope
                     scope = record["scope"]
-                    if BrowserScope(scope["start_url"], scope["domains"], scope["resource_domains"]).as_dict() != scope:
+                    if BrowserScope(**scope).as_dict() != scope:
                         raise ValueError("invalid scope")
                     text_field(record["public_request"], "公开查询说明", 4000)
                     if record["phase"] not in {"browsing", "analysis"}:
@@ -308,7 +308,7 @@ class Store:
                     if (type(action["step"]) is not int or not 1 <= action["step"] <= record["steps"]
                             or action["tool"] not in {"open_link", "open_url", "observe_page", "click_element", "fill_field", "scroll_page",
                                                       "go_back", "refresh_page", "wait_page", "press_key", "select_option", "check_field",
-                                                      "restart_browser", "take_screenshot", "read_source"}
+                                                      "restart_browser", "take_screenshot", "read_source", "search_source", "hover_element", "dismiss_overlay"}
                             or action["status"] not in {"running", "success", "incomplete", "failed", "interrupted"}
                             or not isinstance(action["arguments"], dict)):
                         raise ValueError("invalid action")

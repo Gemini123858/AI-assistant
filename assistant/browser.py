@@ -24,14 +24,11 @@ ASSET_HOSTS = {
 }
 SEARCH_PATH = "/api/v1/search/job/posts"
 CSRF_PATH = "/api/v1/csrf/token"
-SEARCH_FIELDS = {"keyword", "limit", "offset", "portal_type", "portal_entrance",
-                 "job_category_id_list", "tag_id_list", "location_code_list", "subject_id_list",
-                 "recruitment_id_list", "job_function_id_list", "storefront_id_list"}
 READ_API = re.compile(r"/(?:api/v1/(?:common/setting|ip/location|website/agent/config|"
                       r"config/job/filters/[0-9]+|job/posts/[0-9]+)|people-suite/next-sdk/api/notice)/?")
 
 # Fixed, read-only DOM inspection code. Models never supply selectors or JavaScript.
-ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,[role="button"],[role="tab"],[role="checkbox"],[class*="pagination"] li'
+ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,summary,[role="button"],[role="tab"],[role="menuitem"],[role="link"],[role="checkbox"],[tabindex],[class*="pagination"] li'
 ELEMENT_INFO = """e => {
     const visible = !!e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
     const parent = e.closest('[role="search"], [class*="search" i]');
@@ -40,16 +37,18 @@ ELEMENT_INFO = """e => {
       role:e.getAttribute('role') || (e.tagName === 'A' ? 'link' : e.tagName === 'INPUT' ? 'textbox' : 'button'),
       label:(e.getAttribute('aria-label') || (e.labels && Array.from(e.labels).map(l=>l.innerText).join(' ')) || e.innerText || e.getAttribute('placeholder') || e.title || '').trim().slice(0,200),
       href:e.tagName === 'A' ? e.href : '', type:e.getAttribute('type') || '',
+      name:e.getAttribute('name') || '',
       placeholder:e.getAttribute('placeholder') || '', disabled:!!e.disabled || e.getAttribute('aria-disabled') === 'true',
       search:!!parent, pagination:!!e.closest('[class*="pagination" i]'),
       filter:!!e.closest('[class*="filter" i],[aria-label*="筛选"],[aria-label*="filter" i]'),
       form:!!form, form_method:form ? form.method.toUpperCase() : '', form_action:form ? form.action : '',
       options:e.tagName==='SELECT' ? Array.from(e.options).slice(0,100).map(o=>({value:o.value,label:o.label,disabled:o.disabled})) : [],
-      dialog:!!e.closest('[role="dialog"],dialog,[class*="modal"],[class*="Modal"]')};
+      dialog:!!e.closest('[role="dialog"],dialog,[class*="modal"],[class*="Modal"]'),
+      cookie:!!e.closest('[class*="cookie" i],[id*="cookie" i]')};
 }"""
 
 
-WRITE_LABEL = re.compile(r"投递|申请|登录|登入|注册|上传|发送|提交|验证码|立即体验|订阅|购买|确认|删除|保存|支付|sign.?in|log.?in|apply|submit|send|upload|save|delete|purchase|subscribe|checkout", re.I)
+WRITE_LABEL = re.compile(r"投递|登录|登入|注册|上传|发送|提交|验证码|订阅|购买|删除|保存|支付|sign.?in|log.?in|apply now|submit|send|upload|save|delete|purchase|subscribe|checkout", re.I)
 WRITE_PATH = re.compile(r"(?:^|[/_.-])(?:login|logout|signin|signup|register|apply|submit|upload|delete|remove|save|send|unsubscribe|checkout|purchase|payment|captcha|verify)(?:$|[/_.-])", re.I)
 
 
@@ -79,7 +78,7 @@ def normalize_domain(value):
 
 class BrowserScope:
     """Immutable task authority. Page content cannot add hosts or write capabilities."""
-    def __init__(self, start_url=ENTRY, domains=None, resource_domains=None):
+    def __init__(self, start_url=ENTRY, domains=None, resource_domains=None, read_post_urls=None):
         if not isinstance(start_url, str):
             raise AssistantError("起始 URL 必须为 HTTPS 文本地址。", 400)
         try:
@@ -93,10 +92,23 @@ class BrowserScope:
         resources.update(normalize_domain(item) for item in (resource_domains or []))
         self.resource_domains = frozenset(resources)
         self.start_url = navigation_url(start_url, self)
+        if read_post_urls is not None and (not isinstance(read_post_urls, list) or len(read_post_urls) > 20):
+            raise AssistantError("只读 POST 接口必须为不超过20项的完整 HTTPS URL 列表。", 400)
+        urls = set()
+        for value in read_post_urls or []:
+            value = navigation_url(value, self)
+            parsed = urlsplit(value)
+            if parsed.query or parsed.fragment:
+                raise AssistantError("只读 POST 授权填写精确接口地址，不带查询参数或片段。", 400)
+            urls.add(value)
+        self.read_post_urls = frozenset(urls)
 
     def as_dict(self):
-        return {"start_url": self.start_url, "domains": sorted(self.domains),
-                "resource_domains": sorted(self.resource_domains)}
+        result = {"start_url": self.start_url, "domains": sorted(self.domains),
+                  "resource_domains": sorted(self.resource_domains)}
+        if self.read_post_urls:
+            result["read_post_urls"] = sorted(self.read_post_urls)
+        return result
 
 
 def element_actions(info, url, scope=None):
@@ -112,14 +124,18 @@ def element_actions(info, url, scope=None):
             return ["click"]
         except AssistantError:
             return []
-    search = info.get("search") or info.get("type") == "search" or bool(re.search(r"搜索|关键词|search|query", info.get("placeholder", ""), re.I))
+    search = info.get("search") or info.get("type") == "search" or bool(re.search(
+        r"搜索|关键词|关键字|search|query|keywords", " ".join(info.get(k, "") for k in ("label", "placeholder", "name")), re.I))
     read_control = search or info.get("filter") or info.get("pagination")
     if info.get("form"):
         try:
             navigation_url(info.get("form_action"), scope)
         except AssistantError:
             return []
-        if info.get("form_method") != "GET" or not search:
+        method = info.get("form_method")
+        action = urlsplit(info.get("form_action"))
+        post_allowed = scope and urlunsplit((action.scheme, action.netloc, action.path, "", "")) in scope.read_post_urls
+        if not search or method != "GET" and not (method == "POST" and post_allowed):
             return []
     if info.get("tag") in {"input", "textarea"}:
         if read_control and info.get("type") in {"", "text", "search"}:
@@ -131,7 +147,11 @@ def element_actions(info, url, scope=None):
         return ["select"]
     if read_control or info.get("role") == "tab":
         return ["click"]
-    if info.get("dialog") and re.search(r"关闭|取消|稍后|暂不|以后|不，谢谢|close|cancel|later|no thanks|dismiss", label, re.I):
+    # Navigation/UI buttons are model-directed; the network layer still blocks
+    # unapproved POST/writes. No positive popup-label whitelist is needed.
+    if info.get("tag") == "button" or info.get("role") in {"button", "menuitem", "link"}:
+        if re.search(r"同意|接受|accept|agree", label, re.I) and not info.get("cookie"):
+            return []
         return ["click"]
     return []
 
@@ -159,21 +179,55 @@ def write_query(query):
                for key, value in parse_qsl(query, keep_blank_values=True))
 
 
+def read_post_body(body):
+    if not isinstance(body, str) or len(body) > 65536:
+        return False
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        try:
+            return bool(parse_qsl(body, strict_parsing=True)) and not write_query(body)
+        except ValueError:
+            return False
+    def writes(value):
+        if isinstance(value, dict):
+            return any(WRITE_PATH.search(key) or key.lower() == "mutation"
+                       or key.lower() in {"operation", "action", "op", "cmd"} and isinstance(item, str) and WRITE_PATH.search(item)
+                       or key.lower() == "query" and isinstance(item, str) and re.search(r"^\s*mutation\b", item, re.I)
+                       or writes(item) for key, item in value.items())
+        return isinstance(value, list) and any(writes(item) for item in value)
+    try:
+        return isinstance(data, dict) and not writes(data)
+    except RecursionError:
+        return False
+
+
 def allowed_request(url, method, resource_type, post_data=None, scope=None):
-    """Validate semantics of the known read endpoint, not merely the HTTP method."""
+    """Scoped public GETs, exact POST read grants and obvious-write guards."""
     try:
         parsed = urlsplit(url)
         if (parsed.scheme != "https" or parsed.port not in (None, 443)
                 or parsed.username or parsed.password or write_query(parsed.query)):
             return False
+        resources = scope.resource_domains if scope else {SITE, *ASSET_HOSTS}
+        if (scope and parsed.hostname in resources and method in {"GET", "HEAD"}
+                and resource_type in {"xhr", "fetch"} and not WRITE_PATH.search(unquote(parsed.path))):
+            return True
         if resource_type == "document":
             navigation_url(url, scope)
-            return method == "GET"
-        resources = scope.resource_domains if scope else {SITE, *ASSET_HOSTS}
+            if method == "GET":
+                return True
+        if scope and parsed.hostname in scope.domains:
+            navigation_url(url, scope)
+            endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+            if (method == "POST" and resource_type in {"xhr", "fetch", "document"}
+                    and endpoint in scope.read_post_urls):
+                # User-approved exact read endpoint, not a model-added wildcard.
+                # Preserve site-generated fields instead of hardcoding its schema.
+                return read_post_body(post_data)
         if (parsed.hostname in resources and method in {"GET", "HEAD"} and resource_type in {
                 "script", "stylesheet", "image", "font"} and not WRITE_PATH.search(unquote(parsed.path))
-                and not parsed.path.startswith("/api/")
-                and re.search(r"\.(?:js|css|png|jpe?g|webp|svg|gif|ico|woff2?|ttf|otf)$", parsed.path)):
+                and not parsed.path.startswith("/api/")):
             return True
         if parsed.hostname != SITE or scope and SITE not in scope.domains:
             return False
@@ -185,44 +239,20 @@ def allowed_request(url, method, resource_type, post_data=None, scope=None):
         if method != "POST" or resource_type not in {"xhr", "fetch"}:
             return False
         data = json.loads(post_data)
+        if not read_post_body(post_data):
+            return False
         if parsed.path == CSRF_PATH:
-            # Anonymous read-session bootstrap, not account authentication or a
-            # business write. Only the site's fixed public portal identifier.
             return (not parsed.query and isinstance(data, dict) and set(data) == {"portal_entrance"}
-                    and type(data["portal_entrance"]) is int and data["portal_entrance"] == 1)
-        if parsed.path != SEARCH_PATH:
+                    and type(data["portal_entrance"]) is int and 1 <= data["portal_entrance"] <= 100)
+        if parsed.path != SEARCH_PATH or not isinstance(data, dict):
             return False
-        if not isinstance(data, dict) or set(data) - SEARCH_FIELDS:
-            return False
-        if (type(data.get("limit")) is not int or not 1 <= data["limit"] <= 100
-                or type(data.get("offset")) is not int or not 0 <= data["offset"] <= 1_000_000
-                or type(data.get("portal_type")) is not int or data["portal_type"] != 2
-                or type(data.get("portal_entrance")) is not int or data["portal_entrance"] != 1
-                or not isinstance(data.get("keyword"), str) or len(data["keyword"]) > 1000):
-            return False
-        for key in SEARCH_FIELDS - {"keyword", "limit", "offset", "portal_type", "portal_entrance"}:
-            items = data.get(key, [])
-            if (not isinstance(items, list) or len(items) > 20
-                    or any(not isinstance(item, str) or len(item) > 100 for item in items)):
-                return False
-        # The site's own browser SDK mirrors pagination fields and signs this read
-        # request. Preserve its signature; never generate one or bypass challenges.
-        pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True) if parsed.query else []
-        if len(pairs) > len(SEARCH_FIELDS) + 1 or len({key for key, _ in pairs}) != len(pairs):
-            return False
-        for key, value in pairs:
-            if key == "_signature":
-                if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,2048}", value):
-                    return False
-            else:
-                if key not in SEARCH_FIELDS:
-                    return False
-                expected = data.get(key, [])
-                expected = ",".join(expected) if isinstance(expected, list) else str(expected)
-                if value != expected:
-                    return False
-        return True
-    except (AssistantError, ValueError, TypeError, AttributeError):
+        # This endpoint is an audited public query capability. Site-generated
+        # portal/filter fields and signatures are preserved, not a fixed schema.
+        # Keep resource bounds and reject explicit write-shaped payloads only.
+        return (type(data.get("limit")) is int and 1 <= data["limit"] <= 100
+                and type(data.get("offset")) is int and 0 <= data["offset"] <= 1_000_000
+                and isinstance(data.get("keyword", ""), str) and len(data.get("keyword", "")) <= 1000)
+    except (AssistantError, ValueError, TypeError, AttributeError, RecursionError):
         return False
 
 
@@ -271,12 +301,14 @@ class JobBrowser:
         self._observation = 0
         self._element_url = None
         self.network_errors = []
+        self.internal_errors = []
         self.policy_blocks = []
         self._document_ok = False
         self._search_seen = False
 
     def diagnostics(self):
-        return {"network_errors": self.network_errors[-12:], "policy_blocks": self.policy_blocks[-12:]}
+        return {"network_errors": self.network_errors[-12:], "policy_blocks": self.policy_blocks[-12:],
+                "internal_errors": self.internal_errors[-5:]}
 
     @staticmethod
     def target(url):
@@ -346,21 +378,46 @@ class JobBrowser:
         else:
             self.blocked += 1
             self.policy_blocks.append({"target": self.target(request.url), "type": request.resource_type,
-                                       "reason": "未授权域、未知读取接口或潜在业务写请求"})
+                                       "method": request.method,
+                                       "reason": "未授权域/潜在写操作/POST读取接口尚未确认；可确认精确只读接口后重新发起"})
             self.policy_blocks = self.policy_blocks[-50:]
             if urlsplit(request.url).path == SEARCH_PATH:
                 self.read_errors.append("岗位检索请求超出已验证范围，未报告为零岗位。")
             route.abort()
 
     def _redirect_response(self, event):
+        from playwright.sync_api import Error as PlaywrightError
+
         key = event["requestId"]
+        try:
+            self._continue_response(event, key)
+        except Exception as error:
+            if isinstance(error, PlaywrightError) and "Invalid InterceptionId" in str(error):
+                # Navigation can cancel a queued response event. Chromium says
+                # this interception no longer exists; there is nothing to resume.
+                return
+            detail = str(error).splitlines()[0][:250]
+            self.internal_errors.append("CDP 响应校验失败；可重启匿名浏览器恢复，不是网站网络故障。诊断：" + detail)
+            try:
+                self._cdp.send("Fetch.failRequest", {"requestId": key, "errorReason": "BlockedByClient"})
+            except Exception:
+                try:
+                    self.page.close()
+                except Exception:
+                    pass
+
+    def _continue_response(self, event, key):
         location = next((h["value"] for h in event.get("responseHeaders", [])
                          if h["name"].lower() == "location"), None)
         permitted = True
-        if location and 300 <= event.get("responseStatusCode", 0) < 400:
+        status = event.get("responseStatusCode") or 0
+        if location and 300 <= status < 400:
             target = urljoin(event["request"]["url"], location)
             kind = event["resourceType"].lower()
-            permitted = allowed_request(target, "GET", kind, scope=self.scope)
+            method = event["request"].get("method", "GET")
+            if status == 303 and method not in {"GET", "HEAD"} or status in {301, 302} and method == "POST":
+                method = "GET"
+            permitted = allowed_request(target, method, kind, event["request"].get("postData"), self.scope)
             if not permitted:
                 self.policy_blocks.append({"target": self.target(target), "type": kind,
                                            "reason": "重定向超出授权或涉及业务写操作"})
@@ -381,7 +438,7 @@ class JobBrowser:
         request = response.request
         if request.resource_type == "document" and request.frame == self.page.main_frame:
             self._document_ok = response.status < 400
-        if (response.status >= 400 and request.resource_type in {"document", "script"}
+        if (response.status >= 400 and request.resource_type in {"document", "script", "xhr", "fetch"}
                 and allowed_request(request.url, request.method, request.resource_type, request.post_data, self.scope)):
             self.network_errors.append({"target": self.target(request.url), "type": request.resource_type,
                                         "code": "HTTP " + str(response.status)})
@@ -446,6 +503,8 @@ class JobBrowser:
         except (PlaywrightError, OSError, ValueError):
             if any(item["type"] == "document" for item in self.policy_blocks) and not self.network_errors:
                 raise BrowserError("导航/重定向被任务权限阻断，不是网络不可达。", "permission", False, 403) from None
+            if self.internal_errors:
+                raise BrowserError(self.internal_errors[-1], "internal") from None
             raise BrowserError("页面导航失败或超时；模型可根据诊断选择重试或停止。", "network") from None
 
     def _clear_elements(self):
@@ -489,7 +548,7 @@ class JobBrowser:
                 self.page.wait_for_timeout(300)
             errors = [*self.read_errors, *self.response_errors.values()]
             required_failures = [error for error in self.network_errors if error["type"] in {"document", "script"}]
-            ready = bool(useful and stable >= 2 and not errors and not required_failures)
+            ready = bool(useful and not errors and not required_failures and not self.internal_errors)
             if text_start > len(text):
                 raise AssistantError("正文偏移超过页面长度，请调整 text_start。")
             window = text[text_start:text_start + text_length]
@@ -514,7 +573,14 @@ class JobBrowser:
                 if len(elements) >= 200:
                     handle.dispose()
                     continue
-                info = handle.evaluate(ELEMENT_INFO)
+                try:
+                    info = handle.evaluate(ELEMENT_INFO)
+                except PlaywrightError:
+                    try:
+                        handle.dispose()
+                    except PlaywrightError:
+                        pass
+                    continue
                 if not info["connected"] or not info["visible"]:
                     handle.dispose()
                     continue
@@ -533,13 +599,17 @@ class JobBrowser:
                     "text_truncated": text_start > 0 or len(text) > text_start + text_length,
                     "links": list(safe.values())[:200],
                     "fetched_at": now_iso(), "kind": "detail" if is_detail(final) else "page",
-                    "blocked_requests": self.blocked, "elements": elements, "ready": ready, **self.diagnostics(),
+                    "blocked_requests": self.blocked, "elements": elements, "ready": ready,
+                    "body_stable": stable >= 2, **self.diagnostics(),
                     "read_error": None if ready else (errors[0] if errors else
                         "正文/必要资源或读取接口尚未验证；可等待、刷新或换入口，不能判为零结果。")}
         except AssistantError:
             raise
-        except (PlaywrightError, OSError, ValueError):
-            raise AssistantError("页面观察失败或超时，未自动重试。", 502) from None
+        except (PlaywrightError, OSError, ValueError) as error:
+            if self.internal_errors:
+                raise BrowserError(self.internal_errors[-1], "internal") from None
+            detail = str(error).splitlines()[0][:250]
+            raise BrowserError("页面观察失败或超时；可重新观察/刷新。诊断：" + detail, "interaction") from None
 
     def _element(self, identity, action):
         self.check()
@@ -548,7 +618,9 @@ class JobBrowser:
         handle, expected = self._elements[identity]
         try:
             actual = handle.evaluate(ELEMENT_INFO)
-            if actual != expected or navigation_url(self.page.url, self.scope) != self._element_url:
+            critical = ("connected", "tag", "role", "href", "type", "name", "form", "form_method", "form_action")
+            if (not actual.get("connected") or any(actual.get(k) != expected.get(k) for k in critical)
+                    or navigation_url(self.page.url, self.scope) != self._element_url):
                 raise AssistantError("元素已变化，请重新观察页面，未执行动作。", 409)
             if action not in element_actions(actual, navigation_url(self.page.url, self.scope), self.scope):
                 raise AssistantError("该控件不在已验证的只读操作范围内，未执行。", 403)
@@ -557,6 +629,19 @@ class JobBrowser:
             raise
         except Exception:
             raise AssistantError("元素已失效，请重新观察页面，未执行动作。", 409) from None
+
+    def hover(self, identity):
+        self.check()
+        if identity not in self._elements:
+            raise AssistantError("元素编号过期，请重新观察。", 409)
+        handle, _ = self._elements[identity]
+        handle.hover(timeout=5000)
+        return self.observe()
+
+    def escape(self):
+        self.check()
+        self.page.keyboard.press("Escape")
+        return self.observe()
 
     def click(self, identity):
         from playwright.sync_api import Error as PlaywrightError

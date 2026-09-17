@@ -68,7 +68,7 @@ def main():
             def element(page, label):
                 return next(item for item in page["elements"] if item["label"] == label)
             old = element(listing, "稍后再试")["id"]
-            for label in ("立即体验", "投递"):
+            for label in ("投递",):
                 try:
                     executor.click(element(listing, label)["id"])
                     raise AssertionError("Sensitive control executed")

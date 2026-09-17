@@ -124,7 +124,7 @@ class GenericTaskTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_REQUIREMENT_SENTINEL", serialized)
         self.assertIn("PRIVATE_PROFILE_SENTINEL", json.dumps(model.calls[1]))
         self.assertEqual({t["function"]["name"] for t in model.tools[1]},
-                         {"read_source", "finish_task", "resume_browsing"})
+                         {"read_source", "search_source", "finish_task", "resume_browsing"})
         self.assertEqual(FixtureBrowser.reads, [LIST, ENTRY])
 
     def test_free_search_and_revisits_are_not_keyword_or_url_limited(self):
@@ -213,6 +213,44 @@ class GenericTaskTests(unittest.TestCase):
         with self.assertRaises(AssistantError):
             validate_result(result(), task)
 
+    def test_unseen_line_requires_read_source_and_can_be_fixed_within_budget(self):
+        original = FixtureBrowser.read
+        def long_page(browser, url):
+            page = original(browser, url)
+            page["text"] = "\n".join(f"合成资料第{n}行" for n in range(1, 81))
+            return page
+        final = result()
+        final["findings"][0].update(line_start=65, line_end=65)
+        with patch.object(FixtureBrowser, "read", long_page):
+            model = self.runner([call("finish_task", final),
+                call("read_source", {"page_id": "p1", "start_line": 65, "lines": 1}),
+                call("finish_task", final)], browser_calls=3)
+            task = self.start_generic()
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["calls"], 3)
+        self.assertIn("尚未提供给模型", model.calls[1][-1]["content"])
+        self.assertEqual(json.loads(model.calls[2][-1]["content"])["source"]["text"], "合成资料第65行")
+
+    def test_job_lines_derive_evidence_and_title_on_non_bytedance_page(self):
+        page = {"id": "p1", "kind": "page", "url": "https://careers.example/roles/engineer",
+                "title": "合成研发实习岗位", "text": "合成研发实习岗位\n熟悉 Python\n经验未知",
+                "fetched_at": "2026-09-17T12:00:00+00:00", "seen_ranges": [[1, 3]]}
+        output = result(findings=[], jobs=[{"page_id": "p1", "fit": "needs_confirmation",
+            "reason": "需要确认经验。", "uncertainties": ["经验未知"], "line_start": 2, "line_end": 2}])
+        checked = validate_result(output, {"pages": [page], "memory": {"profile": "会 Python"}})
+        self.assertEqual(checked["jobs"][0]["title"], page["title"])
+        self.assertEqual(checked["jobs"][0]["job_evidence"], "熟悉 Python")
+        self.assertEqual(checked["jobs"][0]["profile_evidence"], [])
+
+    def test_saved_source_keyword_search_returns_numbered_evidence_without_navigation(self):
+        model = self.runner([call("analyze_results", {}),
+            call("search_source", {"page_id": "p1", "query": "岗位"}), call("finish_task", result())])
+        task = self.start_generic()
+        self.assertEqual(task["status"], "completed")
+        matches = json.loads(model.calls[-1][-1]["content"])["matches"]
+        self.assertEqual(matches[0]["numbered_lines"], [{"line": 1, "text": "岗位列表"}])
+        self.assertEqual(FixtureBrowser.reads, [LIST])
+
     def test_partial_finish_does_not_overwrite_pending_cancel(self):
         self.runner([call("finish_task", result())])
         task = self.start_generic()
@@ -223,6 +261,18 @@ class GenericTaskTests(unittest.TestCase):
 
 
 class GenericScopeTests(unittest.TestCase):
+    def test_exact_read_post_authority_not_added_by_model_and_no_write_bodies(self):
+        scope = BrowserScope("https://docs.example/catalog", read_post_urls=["https://docs.example/data"])
+        self.assertTrue(allowed_request("https://docs.example/data?page=2", "POST", "fetch", '{"q":"图结构","new_field":2}', scope))
+        self.assertTrue(allowed_request("https://docs.example/data", "POST", "document", 'q=Python', scope))
+        for url, body in (("https://docs.example/other", '{}'),
+                          ("https://docs.example/data", '{"operation":"delete"}'),
+                          ("https://docs.example/data", '{"query":"mutation { createUser }"}')):
+            self.assertFalse(allowed_request(url, "POST", "fetch", body, scope))
+        with self.assertRaises(AssistantError):
+            BrowserScope("https://docs.example/catalog", read_post_urls=["https://foreign.example/data"])
+        self.assertEqual(BrowserScope(**scope.as_dict()).as_dict(), scope.as_dict())
+
     def test_relative_url_semantics_fragments_and_write_queries_are_preserved_or_denied(self):
         self.assertEqual(navigation_url(ENTRY), ENTRY)
         url = "https://" + SITE + "/public/#section"
@@ -237,8 +287,8 @@ class GenericScopeTests(unittest.TestCase):
         self.assertEqual(navigation_url("https://docs.example/catalog?q=图神经网络&city=上海&page=88", scope),
                          "https://docs.example/catalog?q=图神经网络&city=上海&page=88")
         self.assertTrue(allowed_request("https://docs.example/app.js", "GET", "script", scope=scope))
-        for url, kind in (("https://docs.example/api/preferences", "xhr"),
-                          ("https://foreign.example/app.js", "script"),
+        self.assertTrue(allowed_request("https://docs.example/api/preferences", "GET", "xhr", scope=scope))
+        for url, kind in (("https://foreign.example/app.js", "script"),
                           ("https://" + SITE + "/api/v1/common/setting", "xhr")):
             self.assertFalse(allowed_request(url, "GET", kind, scope=scope))
         self.assertFalse(allowed_request("https://docs.example/api/save", "POST", "fetch", "{}", scope))

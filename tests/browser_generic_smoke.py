@@ -30,6 +30,14 @@ class LocalBrowser(JobBrowser):
             route.fulfill(status=302, headers={"Location": "https://foreign.example/private"}, body="")
         elif path == "/blank":
             route.fulfill(status=200, content_type="text/html", body="<html><body></body></html>")
+        elif path == "/api/catalog":
+            route.fulfill(status=200, content_type="application/json", body='{"title":"公开 SPA 资料已加载"}')
+        elif path == "/spa":
+            route.fulfill(status=200, content_type="text/html; charset=utf-8", body="""<h1>公开目录</h1>
+<div id="data"></div><p id="clock"></p><script>
+fetch('/api/catalog').then(r=>r.json()).then(d=>document.querySelector('#data').textContent=d.title);
+setInterval(()=>document.querySelector('#clock').textContent=String(Date.now()),100);
+</script>""")
         elif path == "/articles/graph":
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<h1>图结构资料</h1><p>公开方法说明</p>")
         else:
@@ -48,6 +56,9 @@ def main():
             assert first["ready"] and first["kind"] == "page"
             assert browser.blocked >= 2
             assert not first["network_errors"], "policy blocks must not become network failures"
+            search_id = element(first, "搜索资料")["id"]
+            browser.page.locator('input[type="search"]').evaluate("e=>e.placeholder='搜索资料（已更新）'")
+            first = browser.fill(search_id, "公开查询", False)
             assert element(first, "姓名")["actions"] == []
             assert element(first, "发送")["actions"] == []
             for label in ("保存", "发送"):
@@ -56,8 +67,8 @@ def main():
                     raise AssertionError("Unauthorized write control executed")
                 except AssistantError as error:
                     assert error.status == 403
-            search = browser.fill(element(first, "搜索资料")["id"], "KG alignment 图结构 上海", False)
-            search = browser.press(element(search, "搜索资料")["id"], "Enter")
+            search = browser.fill(element(first, "搜索资料（已更新）")["id"], "KG alignment 图结构 上海", False)
+            search = browser.press(element(search, "搜索资料（已更新）")["id"], "Enter")
             assert "q=" in search["url"] and search["ready"]
             selected = browser.select(element(search, "城市")["id"], "sh")
             checked = browser.check_field(element(selected, "仅开放资料")["id"], True)
@@ -76,6 +87,10 @@ def main():
             assert fragment["ready"] and "#" in fragment["url"]
             blank = browser.read("https://catalog.example/blank")
             assert not blank["ready"] and blank["text"] == "" and "read_error" in blank
+            spa = browser.read("https://catalog.example/spa")
+            assert spa["ready"] and not spa["body_stable"] and "公开 SPA 资料已加载" in spa["text"]
+            browser.hover(element(browser.read(START), "图结构资料")["id"])
+            browser.escape()
             for path in ("/redirect", "/foreign"):
                 try:
                     browser.read("https://catalog.example" + path)

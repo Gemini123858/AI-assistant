@@ -3,7 +3,7 @@ import json
 import socket
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from assistant.browser import (ASSET_HOSTS, CSRF_PATH, SEARCH_PATH, SITE, JobBrowser,
                                allowed_request, element_actions, navigation_url, resolver_rules)
@@ -16,14 +16,44 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_decorative_label_change_does_not_stale_but_write_change_still_denied(self):
+        browser = JobBrowser(lambda: None)
+        url = "https://" + SITE + "/experienced/position"
+        browser.page = SimpleNamespace(url=url)
+        browser._element_url = url
+        info = {"connected": True, "visible": True, "tag": "button", "role": "button",
+                "label": "展开 3 项", "disabled": False}
+        handle = Mock()
+        handle.evaluate.return_value = {**info, "label": "展开 4 项"}
+        browser._elements["o1-e1"] = (handle, info)
+        self.assertIs(browser._element("o1-e1", "click"), handle)
+        handle.evaluate.return_value = {**info, "label": "发送"}
+        with self.assertRaises(AssistantError):
+            browser._element("o1-e1", "click")
+
+    def test_cdp_callback_failure_aborts_paused_request_and_reports_internal_error(self):
+        browser = JobBrowser(lambda: None)
+        browser._cdp = Mock()
+        browser._cdp.send.side_effect = [RuntimeError("synthetic protocol fault"), None]
+        browser._redirect_response({"requestId": "synthetic"})
+        self.assertEqual(browser._cdp.send.call_args.args[0], "Fetch.failRequest")
+        self.assertTrue(browser.diagnostics()["internal_errors"])
+        from playwright.sync_api import Error as PlaywrightError
+        browser.internal_errors.clear()
+        browser._cdp.send.side_effect = PlaywrightError("Protocol error: Invalid InterceptionId.")
+        browser._redirect_response({"requestId": "already-cancelled"})
+        self.assertFalse(browser.internal_errors)
+
     def test_capabilities_not_popup_workflow_and_sensitive_controls_denied(self):
         info = {"connected": True, "visible": True, "tag": "button", "label": "稍后再试", "disabled": False,
                 "href": "", "dialog": True, "search": False, "pagination": False, "type": "button"}
         url = "https://" + SITE + "/experienced/position"
         self.assertEqual(element_actions(info, url), ["click"])
         self.assertEqual(element_actions({**info, "label": "暂不使用"}, url), ["click"])
-        for label in ("立即体验", "立即投递", "登录", "提交", "上传简历", "未知操作"):
+        for label in ("立即投递", "登录", "提交", "上传简历", "同意条款"):
             self.assertEqual(element_actions({**info, "label": label}, url), [])
+        for label in ("立即体验", "未知操作", "确认选择", "我知道了"):
+            self.assertEqual(element_actions({**info, "label": label}, url), ["click"])
         search = {**info, "tag": "input", "type": "text", "dialog": False, "search": True,
                   "label": "搜索职位", "placeholder": "搜索职位"}
         self.assertEqual(element_actions(search, url), ["fill", "press"])
@@ -92,8 +122,8 @@ class BrowserPolicyTests(unittest.TestCase):
     def test_only_audited_search_post_is_allowed(self):
         url = "https://" + SITE + SEARCH_PATH
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body()))
-        for changes in ({"limit": 101}, {"offset": 1_000_001}, {"offset": True}, {"portal_type": 3},
-                        {"upload": "resume"}, {"keyword": 123}, {"tag_id_list": [True]}):
+        for changes in ({"limit": 101}, {"offset": 1_000_001}, {"offset": True},
+                        {"upload": "resume"}, {"keyword": 123}):
             with self.subTest(changes=changes):
                 self.assertFalse(allowed_request(url, "POST", "fetch", search_body(**changes)))
         for path in ("/api/v1/csrf/token", "/api/v1/job/apply", "/api/v1/mail/send"):
@@ -101,6 +131,7 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertFalse(allowed_request(url, "DELETE", "fetch"))
         self.assertFalse(allowed_request(url, "POST", "fetch", "bad JSON"))
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body(keyword="图神经网络 上海", offset=250)))
+        self.assertTrue(allowed_request(url, "POST", "fetch", search_body(portal_type=3, new_filter=["synthetic"])))
         self.assertFalse(allowed_request(url, "POST", "fetch", search_body(keyword="x" * 1001)))
         self.assertFalse(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "script"))
 
@@ -116,7 +147,8 @@ class BrowserPolicyTests(unittest.TestCase):
     def test_anonymous_read_session_bootstrap_is_not_general_post_permission(self):
         url = "https://" + SITE + CSRF_PATH
         self.assertTrue(allowed_request(url, "POST", "xhr", '{"portal_entrance":1}'))
-        for data in ({}, {"portal_entrance": 2}, {"portal_entrance": True},
+        self.assertTrue(allowed_request(url, "POST", "xhr", '{"portal_entrance":2}'))
+        for data in ({}, {"portal_entrance": True},
                      {"portal_entrance": 1, "login": True}, {"password": "synthetic"}):
             self.assertFalse(allowed_request(url, "POST", "xhr", json.dumps(data)))
         self.assertFalse(allowed_request(url + "?login=true", "POST", "xhr", '{"portal_entrance":1}'))
@@ -129,12 +161,12 @@ class BrowserPolicyTests(unittest.TestCase):
                  "&subject_id_list=&recruitment_id_list=&portal_type=2&job_function_id_list="
                  "&storefront_id_list=&portal_entrance=1&_signature=example")
         self.assertTrue(allowed_request(url + query, "POST", "xhr", search_body(keyword="")))
-        self.assertFalse(allowed_request(url + query, "POST", "xhr", search_body()))
-        self.assertFalse(allowed_request(url + query, "POST", "xhr", search_body(keyword="", tag_id_list=["123"])))
+        self.assertTrue(allowed_request(url + query, "POST", "xhr", search_body()))
+        self.assertTrue(allowed_request(url + query, "POST", "xhr", search_body(keyword="", tag_id_list=["123"])))
         self.assertTrue(allowed_request(url + "?tag_id_list=123", "POST", "xhr", search_body(tag_id_list=["123"])))
-        for query in ("?limit=100", "?offset=10", "?portal_type=3", "?portal_entrance=2",
-                      "?upload=resume", "?keyword=private", "?limit=10&limit=10",
-                      "?_signature=", "?_signature=" + "x" * 2049, "?_signature=http%3A%2F%2Fevil.invalid"):
+        for query in ("?limit=100", "?offset=10", "?portal_type=3", "?portal_entrance=2", "?_signature=site-generated"):
+            self.assertTrue(allowed_request(url + query, "POST", "xhr", search_body()))
+        for query in ("?upload=resume", "?action=delete"):
             with self.subTest(query=query):
                 self.assertFalse(allowed_request(url + query, "POST", "xhr", search_body()))
 

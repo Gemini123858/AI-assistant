@@ -179,6 +179,7 @@ function taskCard(task) {
   card.append(top, node("p", "reason", task.note), node("p", "caption",
     `已保存 ${task.pages.length} 份页面观察 · 动作 ${task.steps}/${task.limits.steps} · 模型 ${task.calls}/${task.limits.calls} · ${task.phase === "analysis" ? "私人分析（无网站动作）" : "公开浏览"} · ${formatTime(task.created_at)}`));
   if (task.scope) card.append(node("p", "caption", "授权访问域：" + domains.join("、")));
+  if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "已确认只读 POST：" + task.scope.read_post_urls.join("、")));
   if (task.actions?.length) {
     const actions = node("details", "task-actions");
     actions.append(node("summary", "", "查看浏览器动作记录"));
@@ -281,7 +282,8 @@ $("task-form").addEventListener("submit", (event) => {
     const domains = [...new Set([start.hostname, ...splitDomains("task-domains")])];
     await api("/api/tasks", "POST", { request: $("task-request").value,
       public_request: $("task-public-request").value, start_url: start.href,
-      domains, resource_domains: splitDomains("task-resources") });
+      domains, resource_domains: splitDomains("task-resources"),
+      read_post_urls: $("task-read-posts").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
     toast("已发起公开网页任务，可查看动作、恢复记录或取消。");
     await loadTasks();
   });

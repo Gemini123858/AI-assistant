@@ -200,6 +200,8 @@ class TaskTests(unittest.TestCase):
         model.complete_tools = blocking
         task = self.tasks.start({"request": "合成取消查询"})
         self.assertTrue(entered.wait(timeout=3))
+        self.assertEqual(self.tasks.service.chat({"message": "/查看画像"})["reply"], PROFILE,
+                         "Browser/API waiting must not hold the global conversation lock")
         with self.assertRaises(AssistantError):
             self.tasks.start({"request": "不能并行启动"})
         self.tasks.cancel(task["id"])
@@ -257,7 +259,7 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(len(task["pages"]), 4)
         self.assertEqual([action["tool"] for action in task["actions"]],
                          ["open_url", "open_link", "observe_page", "fill_field", "scroll_page", "open_link"])
-        self.assertEqual([tool["function"]["name"] for tool in model.tools[-1]], ["finish_task"])
+        self.assertEqual([tool["function"]["name"] for tool in model.tools[-1]], ["read_source", "search_source", "finish_task"])
         self.assertNotIn("search_jobs", [tool["function"]["name"] for tool in model.tools[0]])
 
     def test_entire_group_validated_before_any_action(self):
