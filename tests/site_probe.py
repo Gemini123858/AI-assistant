@@ -17,6 +17,16 @@ class DiagnosticBrowser(JobBrowser):
 
     snapshot = False
 
+    def observe(self, wait_seconds=2):
+        try:
+            return super().observe(wait_seconds)
+        except AssistantError:
+            parsed = urlsplit(self.page.url)
+            metadata = [(key, value if value in KEYWORDS or value.isdigit() and len(value) < 5
+                         else {"length": len(value)}) for key, value in parse_qsl(parsed.query, keep_blank_values=True)]
+            print("Anonymous navigation metadata:", parsed.hostname, parsed.path, metadata, flush=True)
+            raise
+
     def _snapshot(self):
         if not self.snapshot:
             return
@@ -126,6 +136,8 @@ def main():
                         help="Read 1–3 distinct observed public job details")
     parser.add_argument("--listing-only", action="store_true",
                         help="Skip the previously inspected homepage during list diagnostics")
+    parser.add_argument("--actions", action="store_true",
+                        help="Check generic observation/input/Enter/page-2 tools against the public site")
     args = parser.parse_args()
     deadline = time.monotonic() + 90
 
@@ -143,16 +155,49 @@ def main():
             print("entry:", entry["url"], "safe links:", len(entry["links"]), flush=True)
             listing_url = next(link["url"] for link in entry["links"] if link["url"].endswith("/position"))
         listing = browser.read(listing_url)
+        if not listing["ready"]:
+            raise AssistantError(listing["read_error"], 502)
         print("listing:", listing["url"], "safe links:", len(listing["links"]), flush=True)
-        search = browser.read(browser.search_url("算法", 1))
+        if args.actions:
+            print("Observed read controls:", json.dumps([element for element in listing["elements"]
+                  if element["role"] != "link"], ensure_ascii=False), flush=True)
+            if not listing["ready"]:
+                raise AssistantError(listing["read_error"], 502)
+            field = next((element for element in listing["elements"] if "fill" in element["actions"]), None)
+            if field is None:
+                raise AssistantError("官网没有已授权搜索框，不能验证输入动作。", 502)
+            search = browser.fill(field["id"], "算法", True)
+            if not search["ready"]:
+                search = browser.observe(wait_seconds=10)
+            if not search["ready"]:
+                raise AssistantError(search["read_error"], 502)
+        else:
+            search = browser.read(browser.search_url("算法", 1))
         print("search:", search["url"], "safe links:", len(search["links"]), flush=True)
+        if not search["ready"]:
+            raise AssistantError(search["read_error"], 502)
+        if args.actions:
+            print("Search read controls:", json.dumps([element for element in search["elements"]
+                  if element["role"] != "link"], ensure_ascii=False), flush=True)
+            second = next((element for element in search["elements"] if element["label"] == "2"
+                           and element["context"] == "pagination" and "click" in element["actions"]), None)
+            if second is None:
+                raise AssistantError("没有可验证的第二页控件，不能声称分页成功。", 502)
+            first_urls = {link["url"] for link in search["links"] if link["url"].endswith("/detail")}
+            search = browser.click(second["id"])
+            if not search["ready"]:
+                search = browser.observe(wait_seconds=10)
+            next_urls = {link["url"] for link in search["links"] if link["url"].endswith("/detail")}
+            if not search["ready"] or not next_urls or next_urls == first_urls:
+                raise AssistantError("第二页内容未验证或没有变化，未报告为分页成功。", 502)
+            print("page 2:", search["url"], "different observed detail URLs:", len(next_urls - first_urls), flush=True)
         detail_urls = list(dict.fromkeys(link["url"] for link in search["links"]
                                         if link["url"].endswith("/detail")))
         if len(detail_urls) < args.details:
             raise AssistantError("可观察到的详情链接不足，不能完成本次多详情检查。", 502)
         for detail_url in detail_urls[:args.details]:
             detail = browser.read(detail_url)
-            assert "职位要求" in detail["text"]
+            assert detail["ready"] and "职位要求" in detail["text"]
             print("detail:", detail["url"], "characters:", len(detail["text"]),
                   "blocked requests:", detail["blocked_requests"], flush=True)
     print("Public-site read path passed; no login, model calls or submissions.")
