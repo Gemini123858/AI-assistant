@@ -29,9 +29,58 @@ KEYWORDS = ("", "算法", "机器学习", "深度学习", "大模型", "人工�
 SEARCH_FIELDS = {"keyword", "limit", "offset", "portal_type", "portal_entrance",
                  "job_category_id_list", "tag_id_list", "location_code_list", "subject_id_list",
                  "recruitment_id_list", "job_function_id_list", "storefront_id_list"}
+# The public search input emits these empty filters along with current/limit.
+# Nonempty filters are not yet audited; this is not arbitrary query permission.
+EMPTY_FILTERS = {"category", "location", "project", "type", "job_hot_flag", "functionCategory", "tag"}
 NAVIGATION = re.compile(r"/experienced(?:/|/position/?|/position/[0-9]+/detail/?)?")
 READ_API = re.compile(r"/(?:api/v1/(?:common/setting|ip/location|website/agent/config|"
                       r"config/job/filters/[0-9]+|job/posts/[0-9]+)|people-suite/next-sdk/api/notice)/?")
+
+# Fixed, read-only DOM inspection code. Models never supply selectors or JavaScript.
+ELEMENT_SELECTOR = 'a[href],button,input,[role="button"],[role="tab"],[class*="pagination"] li'
+ELEMENT_INFO = """e => {
+    const visible = !!e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+    const parent = e.closest('[class*="search"], [class*="Search"]');
+    return {connected:e.isConnected, visible, tag:e.tagName.toLowerCase(),
+      role:e.getAttribute('role') || (e.tagName === 'A' ? 'link' : e.tagName === 'INPUT' ? 'textbox' : 'button'),
+      label:(e.getAttribute('aria-label') || e.innerText || e.getAttribute('placeholder') || e.title || '').trim().slice(0,200),
+      href:e.tagName === 'A' ? e.href : '', type:e.getAttribute('type') || '',
+      placeholder:e.getAttribute('placeholder') || '', disabled:!!e.disabled || e.getAttribute('aria-disabled') === 'true',
+      search:!!parent, pagination:!!e.closest('[class*="pagination"], [class*="Pagination"]'),
+      dialog:!!e.closest('[role="dialog"],dialog,[class*="modal"],[class*="Modal"]')};
+}"""
+
+
+def element_actions(info, url):
+    """Site-level read capabilities, NOT a fixed popup/search workflow."""
+    if not info.get("connected") or not info.get("visible") or info.get("disabled"):
+        return []
+    label = info.get("label", "")
+    if re.search(r"投递|申请|登录|登入|注册|上传|发送|提交|验证码|立即体验|订阅|购买|确认", label):
+        return []
+    if info.get("href"):
+        try:
+            navigation_url(info["href"])
+            return ["click"]
+        except AssistantError:
+            return []
+    listing = urlsplit(url).path.rstrip("/") == "/experienced/position"
+    if (listing and info.get("tag") == "input" and info.get("type") in {"", "text", "search"}
+            and (info.get("search") or re.search(r"搜索.*职位|职位.*搜索|关键词", info.get("placeholder", "")))):
+        return ["fill"]
+    if info.get("tag") == "input":
+        return []
+    if listing and info.get("pagination"):
+        current = int(dict(parse_qsl(urlsplit(url).query)).get("current", "1"))
+        if ((label.isdigit() and 1 <= int(label) <= 20)
+                or label == "上一页" and current > 1 or label == "下一页" and current < 20):
+            return ["click"]
+        return []
+    if listing and info.get("search") and label in {"", "搜索", "查询", "搜索职位", "清除", "清空", "重置"}:
+        return ["click"]
+    if info.get("dialog") and re.search(r"关闭|取消|稍后|暂不|以后|不，谢谢", label):
+        return ["click"]
+    return []
 
 
 def navigation_url(value):
@@ -41,12 +90,16 @@ def navigation_url(value):
                 or url.username or url.password or not NAVIGATION.fullmatch(url.path)):
             raise ValueError("outside read scope")
         pairs = parse_qsl(url.query, keep_blank_values=True, strict_parsing=True) if url.query else []
-        if len(pairs) > 3 or len({key for key, _ in pairs}) != len(pairs):
+        if len(pairs) > len(EMPTY_FILTERS) + 4 or len({key for key, _ in pairs}) != len(pairs):
             raise ValueError("duplicate query")
+        if pairs and url.path.rstrip("/") != "/experienced/position":
+            raise ValueError("query outside listing")
         for key, item in pairs:
-            if key == "keywords" and len(item) <= 80:
+            if key == "keywords" and item in KEYWORDS:
                 continue
-            if key == "page" and item.isdigit() and 1 <= int(item) <= 20:
+            if key in {"page", "current"} and item.isdigit() and 1 <= int(item) <= 20:
+                continue
+            if key == "limit" and item == "10" or key in EMPTY_FILTERS and item == "":
                 continue
             raise ValueError("unapproved query")
         return urlunsplit(("https", SITE, url.path.rstrip("/") or "/", urlencode(pairs), ""))
@@ -161,6 +214,9 @@ class JobBrowser:
         self.read_errors = []
         self.response_errors = {}
         self.search_verified = False
+        self._elements = {}
+        self._observation = 0
+        self._element_url = None
 
     def __enter__(self):
         try:
@@ -189,6 +245,7 @@ class JobBrowser:
             raise AssistantError("浏览器未能启动，请检查 Playwright、Chromium 安装及网络；未自动重试。", 502) from None
 
     def __exit__(self, *_):
+        self._clear_elements()
         for resource in (self.context, self.browser):
             if resource is not None:
                 try:
@@ -257,11 +314,33 @@ class JobBrowser:
             response = self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
             if response is None or response.status >= 400:
                 raise AssistantError("招聘页面返回错误状态，未视为有效内容。", 502)
-            # Wait for useful, stable content; avoid networkidle on a telemetry-heavy SPA.
-            deadline = time.monotonic() + 20
+            return self.observe(wait_seconds=20)
+        except AssistantError:
+            raise
+        except (PlaywrightError, OSError, ValueError):
+            raise AssistantError("浏览器读取失败或超时，未自动重试。", 502) from None
+
+    def _clear_elements(self):
+        for handle, _ in self._elements.values():
+            try:
+                handle.dispose()
+            except Exception:
+                pass
+        self._elements = {}
+
+    def observe(self, wait_seconds=2):
+        """Return useful incomplete UI too, so the model can handle an overlay."""
+        from playwright.sync_api import Error as PlaywrightError
+
+        self.check()
+        try:
+            url = navigation_url(self.page.url)
+            deadline = time.monotonic() + wait_seconds
             previous, stable = "", 0
+            text, useful = "", False
             while time.monotonic() < deadline:
                 self.check()
+                url = navigation_url(self.page.url)
                 text = self.page.locator("body").inner_text(timeout=2000)
                 useful = ("职位要求" in text if is_detail(url) else
                           ("开启新的工作" in text and self.search_verified if "/position" in url else
@@ -271,16 +350,10 @@ class JobBrowser:
                     break
                 previous = text
                 self.page.wait_for_timeout(300)
-            else:
-                errors = [*self.read_errors, *self.response_errors.values()]
-                if errors:
-                    raise AssistantError(errors[0], 502)
-                raise AssistantError("页面正文或岗位列表未完整加载；可能受限，未报告为零岗位。", 502)
             errors = [*self.read_errors, *self.response_errors.values()]
-            if errors:
-                raise AssistantError(errors[0], 502)
-            if "/position" in url and not is_detail(url) and not self.search_verified:
-                raise AssistantError("岗位检索响应未验证，未报告为零岗位。", 502)
+            ready = bool(useful and stable >= 2 and not errors)
+            if not text.strip():
+                raise AssistantError(errors[0] if errors else "页面正文未加载；未报告为零岗位。", 502)
             final = navigation_url(self.page.url)
             links = self.page.locator("a[href]").evaluate_all(
                 "els => els.map(e => ({text:e.innerText.slice(0,160),url:e.href}))")
@@ -293,18 +366,96 @@ class JobBrowser:
                     continue
             heading = self.page.locator("h1").first
             title = heading.inner_text(timeout=2000) if heading.count() else self.page.title()
+            self._clear_elements()
+            self._observation += 1
+            self._element_url = final
+            elements = []
+            for handle in self.page.query_selector_all(ELEMENT_SELECTOR):
+                if len(elements) >= 80:
+                    handle.dispose()
+                    continue
+                info = handle.evaluate(ELEMENT_INFO)
+                if not info["connected"] or not info["visible"]:
+                    handle.dispose()
+                    continue
+                identity = f"o{self._observation}-e{len(elements) + 1}"
+                actions = element_actions(info, final)
+                elements.append({"id": identity, "role": info["role"], "label": info["label"],
+                                 "actions": actions, "disabled": info["disabled"],
+                                 "href": info["href"] if actions and info["href"] else None,
+                                 "context": "dialog" if info["dialog"] else "search" if info["search"] else
+                                            "pagination" if info["pagination"] else "page"})
+                self._elements[identity] = (handle, info)
             return {"url": final, "title": title[:300], "text": text[:16000],
                     "text_truncated": len(text) > 16000, "links": list(safe.values())[:80],
                     "fetched_at": now_iso(), "kind": "detail" if is_detail(final) else "listing",
-                    "blocked_requests": self.blocked}
+                    "blocked_requests": self.blocked, "elements": elements, "ready": ready,
+                    "read_error": None if ready else (errors[0] if errors else
+                        "页面或岗位检索尚未完整验证；可以观察或操作已授权控件，不能判为零岗位。")}
         except AssistantError:
             raise
         except (PlaywrightError, OSError, ValueError):
-            raise AssistantError("浏览器读取失败或超时，未自动重试。", 502) from None
+            raise AssistantError("页面观察失败或超时，未自动重试。", 502) from None
+
+    def _element(self, identity, action):
+        self.check()
+        if not isinstance(identity, str) or identity not in self._elements:
+            raise AssistantError("元素编号过期或未观察到，请重新观察页面。", 409)
+        handle, expected = self._elements[identity]
+        try:
+            actual = handle.evaluate(ELEMENT_INFO)
+            if actual != expected or navigation_url(self.page.url) != self._element_url:
+                raise AssistantError("元素已变化，请重新观察页面，未执行动作。", 409)
+            if action not in element_actions(actual, navigation_url(self.page.url)):
+                raise AssistantError("该控件不在已验证的只读操作范围内，未执行。", 403)
+            return handle
+        except AssistantError:
+            raise
+        except Exception:
+            raise AssistantError("元素已失效，请重新观察页面，未执行动作。", 409) from None
+
+    def click(self, identity):
+        from playwright.sync_api import Error as PlaywrightError
+
+        element = self._element(identity, "click")
+        # Invalidate the previous search proof before a search/pagination action.
+        info = self._elements[identity][1]
+        if info["search"] or info["pagination"]:
+            self.search_verified = False
+            self.response_errors = {}
+        try:
+            element.click(timeout=5000)  # No force=True: do not click through overlays.
+            return self.observe(wait_seconds=5)
+        except PlaywrightError:
+            raise AssistantError("元素点击失败或被遮挡；未强制点击，可重新观察页面。", 409) from None
+
+    def fill(self, identity, text, submit):
+        from playwright.sync_api import Error as PlaywrightError
+
+        if not isinstance(text, str) or text not in KEYWORDS or type(submit) is not bool:
+            raise AssistantError("仅允许填写安全职位关键词，不向网站发送画像或任意表单内容。", 403)
+        element = self._element(identity, "fill")
+        try:
+            element.fill(text, timeout=5000)
+            if submit:
+                self.check()
+                self.search_verified = False
+                self.response_errors = {}
+                element.press("Enter", timeout=5000)
+            return self.observe(wait_seconds=5 if submit else 2)
+        except PlaywrightError:
+            raise AssistantError("搜索框填写失败或被遮挡；未强制操作。", 409) from None
+
+    def scroll(self, direction):
+        if not isinstance(direction, str) or direction not in {"up", "down"}:
+            raise AssistantError("滚动方向无效。")
+        self.check()
+        self.page.mouse.wheel(0, 700 if direction == "down" else -700)
+        return self.observe()
 
     def search_url(self, keyword, page):
         if (not isinstance(keyword, str) or keyword not in KEYWORDS or type(page) is not int
                 or not 1 <= page <= 20):
             raise AssistantError("查询词不在本版安全职位词表中，或页码不合法。")
         return navigation_url("https://" + SITE + "/experienced/position?" +
-                              urlencode({"keywords": keyword, "page": page}))
+                              urlencode({"keywords": keyword, "current": page, "limit": 10}))

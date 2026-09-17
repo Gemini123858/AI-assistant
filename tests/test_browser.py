@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from assistant.browser import (ASSET_HOSTS, CSRF_PATH, SEARCH_PATH, SITE, JobBrowser,
-                               allowed_request, navigation_url, resolver_rules)
+                               allowed_request, element_actions, navigation_url, resolver_rules)
 from assistant.errors import AssistantError
 
 
@@ -16,6 +16,38 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_capabilities_not_popup_workflow_and_sensitive_controls_denied(self):
+        info = {"connected": True, "visible": True, "tag": "button", "label": "稍后再试", "disabled": False,
+                "href": "", "dialog": True, "search": False, "pagination": False, "type": "button"}
+        url = "https://" + SITE + "/experienced/position"
+        self.assertEqual(element_actions(info, url), ["click"])
+        self.assertEqual(element_actions({**info, "label": "暂不使用"}, url), ["click"])
+        for label in ("立即体验", "立即投递", "登录", "提交", "上传简历", "未知操作"):
+            self.assertEqual(element_actions({**info, "label": label}, url), [])
+        search = {**info, "tag": "input", "type": "text", "dialog": False, "search": True,
+                  "label": "搜索职位", "placeholder": "搜索职位"}
+        self.assertEqual(element_actions(search, url), ["fill"])
+        for changes in ({"type": "password"}, {"type": "email"}, {"disabled": True}, {"visible": False}):
+            self.assertEqual(element_actions({**search, **changes}, url), [])
+        self.assertEqual(element_actions(search, url + "/123/detail"), [])
+        self.assertEqual(element_actions({**info, "dialog": False, "search": True, "label": "未知操作"}, url), [])
+        self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "2"}, url), ["click"])
+        self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "1000"}, url), [])
+        self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "下一页"},
+                                         url + "?current=20"), [])
+
+    def test_unobserved_and_changed_elements_are_not_executed(self):
+        browser = JobBrowser(lambda: None)
+        with self.assertRaises(AssistantError) as caught:
+            browser._element("invented", "click")
+        self.assertEqual(caught.exception.status, 409)
+        expected = {"connected": True, "visible": True}
+        handle = SimpleNamespace(evaluate=lambda _: {**expected, "connected": False})
+        browser._elements["o1-e1"] = (handle, expected)
+        with self.assertRaises(AssistantError) as caught:
+            browser._element("o1-e1", "click")
+        self.assertEqual(caught.exception.status, 409)
+
     def test_search_failure_is_not_empty_and_only_valid_retry_clears_response_error(self):
         browser = JobBrowser(lambda: None)
         url = "https://" + SITE + SEARCH_PATH
@@ -49,6 +81,16 @@ class BrowserPolicyTests(unittest.TestCase):
                     "https://" + SITE + "/experienced/position?page=1&page=2"):
             with self.subTest(url=url), self.assertRaises(AssistantError):
                 navigation_url(url)
+
+    def test_actual_search_navigation_empty_filters_and_current_are_bounded(self):
+        url = "https://" + SITE + "/experienced/position"
+        query = "?keywords=算法&category=&location=&project=&type=&job_hot_flag=&current=2&limit=10&functionCategory=&tag="
+        self.assertIn("current=2", navigation_url(url + query))
+        self.assertIn("current=2", JobBrowser(lambda: None).search_url("算法", 2))
+        for query in ("?current=21", "?location=private", "?keywords=private", "?limit=100", "?tag=synthetic",
+                      "?category=&category=", "?redirect=https%3A%2F%2Fevil.invalid"):
+            with self.subTest(query=query), self.assertRaises(AssistantError):
+                navigation_url(url + query)
 
     def test_only_audited_search_post_is_allowed(self):
         url = "https://" + SITE + SEARCH_PATH

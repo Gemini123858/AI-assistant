@@ -229,7 +229,7 @@ class Store:
             record = {"schema_version": 1, "id": key, "request": request, "portal": portal,
                       "mode": mode, "memory": memory, "limits": limits, "status": "queued",
                       "created_at": now_iso(), "updated_at": now_iso(), "cancel_requested": False,
-                      "calls": 0, "steps": 0, "pages": [], "errors": [], "result": None,
+                      "calls": 0, "steps": 0, "pages": [], "actions": [], "errors": [], "result": None,
                       "note": "仅限公开招聘查询；不登录、不投递。"}
             self._write_json(self._task_path(key), record)
             return record
@@ -241,6 +241,8 @@ class Store:
                 raise AssistantError("任务不存在。", 404)
             record = self._read_json(path)
             try:
+                # Existing v0.2 records predate browser action transcripts.
+                record.setdefault("actions", [])
                 if (record.get("id") != key or record.get("status") not in
                         {"queued", "running", "completed", "partial", "failed", "cancelled", "interrupted"}
                         or record.get("portal") != "bytedance_experienced"
@@ -272,6 +274,25 @@ class Store:
                     text_field(page["url"], "页面地址", 2000)
                     text_field(page["text"], "页面正文", 16000)
                     text_field(page["title"], "页面标题", 300, True)
+                    text_field(page["fetched_at"], "页面获取时间", 80)
+                    if type(page.get("ready", True)) is not bool:
+                        raise ValueError("invalid readiness")
+                    elements = page.get("elements", [])
+                    if not isinstance(elements, list) or len(elements) > 80:
+                        raise ValueError("invalid elements")
+                    for element in elements:
+                        text_field(element["id"], "元素编号", 80)
+                        text_field(element["label"], "元素标签", 200, True)
+                        if not isinstance(element["actions"], list) or set(element["actions"]) - {"click", "fill"}:
+                            raise ValueError("invalid capabilities")
+                if not isinstance(record["actions"], list) or len(record["actions"]) > record["steps"]:
+                    raise ValueError("invalid actions")
+                for action in record["actions"]:
+                    if (type(action["step"]) is not int or not 1 <= action["step"] <= record["steps"]
+                            or action["tool"] not in {"open_link", "observe_page", "click_element", "fill_field", "scroll_page"}
+                            or action["status"] not in {"running", "success", "incomplete", "failed", "interrupted"}
+                            or not isinstance(action["arguments"], dict)):
+                        raise ValueError("invalid action")
                 if record["result"] is not None and not isinstance(record["result"], dict):
                     raise ValueError("invalid result")
             except (KeyError, TypeError, ValueError, AssistantError):
@@ -286,7 +307,7 @@ class Store:
 
     def update_task(self, key, **changes):
         # Read-modify-write under one lock: cancellation cannot be lost by a worker.
-        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "errors", "result", "note"}
+        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "actions", "errors", "result", "note"}
         if set(changes) - allowed:
             raise AssistantError("不能修改任务身份或已授权上下文。", 500)
         with self._mutex:

@@ -175,7 +175,17 @@ function taskCard(task) {
   const top = node("div", "card-top");
   top.append(node("h3", "", task.request), node("span", "tag", names[task.status] || "未知"));
   card.append(top, node("p", "reason", task.note), node("p", "caption",
-    `已读取 ${task.pages.length} 页 · ${task.steps} 次导航 · 模型尝试 ${task.calls}/${task.limits.calls} · ${formatTime(task.created_at)}`));
+    `已保存 ${task.pages.length} 份页面观察 · ${task.steps} 次浏览器动作 · 模型尝试 ${task.calls}/${task.limits.calls} · ${formatTime(task.created_at)}`));
+  if (task.actions?.length) {
+    const actions = node("details", "task-actions");
+    actions.append(node("summary", "", "查看浏览器动作记录"));
+    const labels = { open_link: "打开链接", observe_page: "观察页面", click_element: "点击元素", fill_field: "填写搜索框", scroll_page: "滚动页面" };
+    const states = { running: "执行中", success: "成功", incomplete: "内容未验证", failed: "失败", interrupted: "已中止，结果未验证" };
+    for (const action of task.actions) {
+      actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error ? " · " + action.error : ""}`));
+    }
+    card.append(actions);
+  }
   if (task.result) {
     card.append(node("p", "summary-text", task.result.summary), node("p", "notice", task.result.coverage));
     for (const job of task.result.jobs) {
@@ -191,11 +201,11 @@ function taskCard(task) {
     if (task.result.questions.length) card.append(node("p", "notice", "需要你补充：" + task.result.questions.join("；")));
   }
   for (const error of task.errors) card.append(node("p", "notice", "未覆盖：" + error.url + " · " + error.error));
-  const evidence = node("details");
+  const evidence = node("details", "task-pages");
   evidence.append(node("summary", "", "查看已访问页面及保存的正文"));
   for (const page of task.pages) {
     const row = node("p");
-    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}`));
+    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}${page.ready === false ? " · 内容尚未验证" : ""}`));
     evidence.append(row);
   }
   const view = node("button", "quiet", "载入保存的正文");
@@ -206,6 +216,7 @@ function taskCard(task) {
       evidence.append(node("h3", "", page.id + " · " + page.title),
         node("p", "caption", `${formatTime(page.fetched_at)}${page.text_truncated ? " · 正文已截断，覆盖不完整" : ""}`),
         node("pre", "task-evidence", page.text));
+      if (page.ready === false) evidence.append(node("p", "notice", page.read_error || "界面观察不等于有效岗位详情。"));
     }
   }));
   evidence.append(view);
@@ -229,9 +240,14 @@ async function loadTasks() {
   clearTimeout(taskPoll);
   const data = await api("/api/tasks");
   const open = new Set([...$("task-list").querySelectorAll(".task-card")]
-    .filter((card) => card.querySelector("details")?.open).map((card) => card.dataset.taskId));
+    .filter((card) => card.querySelector("details.task-pages")?.open).map((card) => card.dataset.taskId));
+  const openActions = new Set([...$("task-list").querySelectorAll(".task-card")]
+    .filter((card) => card.querySelector("details.task-actions")?.open).map((card) => card.dataset.taskId));
   const cards = data.tasks.map(taskCard);
-  cards.forEach((card) => { card.querySelector("details").open = open.has(card.dataset.taskId); });
+  cards.forEach((card) => {
+    card.querySelector("details.task-pages").open = open.has(card.dataset.taskId);
+    if (card.querySelector("details.task-actions")) card.querySelector("details.task-actions").open = openActions.has(card.dataset.taskId);
+  });
   $("task-list").replaceChildren(...cards);
   if (!data.tasks.length) $("task-list").append(node("div", "empty-state", "尚未发起网页任务。后台不会自行启动查询或分析。"));
   if (data.tasks.some((task) => ["queued", "running"].includes(task.status))) {

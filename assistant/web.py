@@ -84,6 +84,8 @@ def create_app(config=None, model=None, browser_factory=None):
         if not detail:
             safe["pages"] = [{key: page[key] for key in ("id", "url", "title", "kind", "fetched_at")}
                              for page in task["pages"]]
+            for brief, page in zip(safe["pages"], task["pages"]):
+                brief["ready"] = page.get("ready", True)
         return safe
 
     @app.get("/api/tasks")
