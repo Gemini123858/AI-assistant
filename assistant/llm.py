@@ -1,4 +1,4 @@
-"""Small Chat Completions client. No tools, mail sending, or automatic retries."""
+"""Chat Completions client; browser tools are opt-in, never available to normal chat."""
 
 import json
 from datetime import datetime
@@ -48,27 +48,28 @@ class APIModel:
         self.config = config
         self.opener = build_opener(NoRedirect())
 
-    def complete(self, messages):
+    def _request(self, messages, tools=None, timeout=None):
         body = {"model": self.config.model, "messages": messages, "stream": False,
-                "max_tokens": self.config.max_tokens, "response_format": {"type": "json_object"},
+                "max_tokens": self.config.max_tokens,
                 **self.config.extra_body}
+        if tools is None:
+            body["response_format"] = {"type": "json_object"}
+        else:
+            body.update(tools=tools, tool_choice="required")
         request = Request(self.config.base_url.rstrip("/") + "/chat/completions",
                           data=json.dumps(body, ensure_ascii=False).encode(),
                           headers={"Content-Type": "application/json",
                                    "Authorization": "Bearer " + self.config.api_key}, method="POST")
         try:
-            with self.opener.open(request, timeout=self.config.timeout) as response:
+            with self.opener.open(request, timeout=timeout or self.config.timeout) as response:
                 raw = response.read(2_000_001)
             if len(raw) > 2_000_000:
                 raise AssistantError("模型响应过大，未保存分析结果。", 502)
             envelope = json.loads(raw)
             choice = envelope["choices"][0]
-            if choice.get("finish_reason") != "stop":
+            if choice.get("finish_reason") not in ({"stop"} if tools is None else {"stop", "tool_calls"}):
                 raise AssistantError("模型输出未正常结束，可能被额度截断；请调整输出额度后显式重试。", 502)
-            result = json.loads(choice["message"]["content"])
-            if not isinstance(result, dict):
-                raise ValueError("expected JSON object")
-            return result
+            return choice["message"]
         except HTTPError as exc:
             # Do not log the upstream body or request: they can contain secrets.
             raise AssistantError(f"模型服务返回 HTTP {exc.code}。请检查模型、凭据、额度及 API 配置。", 502) from None
@@ -76,6 +77,43 @@ class APIModel:
             raise AssistantError("模型连接失败或超时；未自动重试，请检查网络后手动重试。", 502) from None
         except (ValueError, TypeError, KeyError, IndexError):
             raise AssistantError("模型返回格式无效，需要 JSON 对象；未自动重试。", 502) from None
+
+    def complete(self, messages):
+        try:
+            result = json.loads(self._request(messages)["content"])
+            if not isinstance(result, dict):
+                raise ValueError("expected object")
+            return result
+        except (ValueError, TypeError, KeyError):
+            raise AssistantError("模型返回格式无效，需要 JSON 对象；未自动重试。", 502) from None
+
+    def complete_tools(self, messages, tools, timeout=None):
+        return validate_tool_message(self._request(messages, tools, timeout))
+
+
+def validate_tool_message(message):
+    """Validate the protocol, not permission to execute any proposed function."""
+    try:
+        calls = message["tool_calls"]
+        if not isinstance(calls, list) or not 1 <= len(calls) <= 4:
+            raise ValueError("invalid calls")
+        checked, seen = [], set()
+        for call in calls:
+            key, function = call["id"], call["function"]
+            if (call.get("type") != "function" or not isinstance(key, str) or not key
+                    or len(key) > 200 or key in seen):
+                raise ValueError("invalid tool id")
+            name, arguments = function["name"], function["arguments"]
+            if (not isinstance(name, str) or not name or len(name) > 80
+                    or not isinstance(arguments, str) or len(arguments) > 20000
+                    or not isinstance(json.loads(arguments), dict)):
+                raise ValueError("invalid tool arguments")
+            seen.add(key)
+            checked.append({"id": key, "type": "function",
+                            "function": {"name": name, "arguments": arguments}})
+        return {"role": "assistant", "content": None, "tool_calls": checked}
+    except (ValueError, TypeError, KeyError):
+        raise AssistantError("模型工具调用格式无效，未执行动作、未自动重试。", 502) from None
 
 
 class DemoModel:

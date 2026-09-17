@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 
 from assistant.config import Config
 from assistant.errors import AssistantError
-from assistant.llm import APIModel, DemoModel, NoRedirect
+from assistant.llm import APIModel, DemoModel, NoRedirect, validate_tool_message
 
 
 def response(content=None, finish="stop"):
@@ -75,3 +75,20 @@ class ModelTests(unittest.TestCase):
         values = dotenv_values(Path(__file__).parents[1] / ".env.example")
         # Boolean assertion: never display the offending secret on failure.
         self.assertTrue(not values.get("ASSISTANT_API_KEY"), "公开模板不能包含真实 Key。")
+
+    def test_tools_are_explicitly_opt_in_and_keep_native_call_ids(self):
+        message = {"tool_calls": [{"id": "call-1", "type": "function", "function": {
+            "name": "open_link", "arguments": '{"link_id":"p1-l1"}'}}]}
+        envelope = {"choices": [{"finish_reason": "tool_calls", "message": message}]}
+        with patch.object(self.model.opener, "open", return_value=io.BytesIO(json.dumps(envelope).encode())) as opened:
+            result = self.model.complete_tools([], [{"type": "function"}])
+        body = json.loads(opened.call_args.args[0].data)
+        self.assertEqual(body["tool_choice"], "required")
+        self.assertNotIn("response_format", body)
+        self.assertEqual(result["tool_calls"][0]["id"], "call-1")
+
+    def test_malformed_tools_cannot_execute(self):
+        for message in ({}, {"tool_calls": []}, {"tool_calls": [{"id": "x", "type": "function", "function": {
+                "name": "open_link", "arguments": "[]"}}]}):
+            with self.subTest(message=message), self.assertRaises(AssistantError):
+                validate_tool_message(message)

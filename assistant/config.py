@@ -22,6 +22,9 @@ class Config:
     daily_calls: int = 30
     timezone: str = "Asia/Shanghai"
     extra_body: dict = field(default_factory=dict)
+    browser_calls: int = 12
+    browser_seconds: int = 300
+    browser_dns: str = "system"
 
     @classmethod
     def from_env(cls):
@@ -39,6 +42,9 @@ class Config:
                 daily_calls=int(os.getenv("ASSISTANT_DAILY_CALLS", "30")),
                 timezone=os.getenv("ASSISTANT_TIMEZONE", "Asia/Shanghai"),
                 extra_body=json.loads(os.getenv("ASSISTANT_LLM_EXTRA_BODY", "{}")),
+                browser_calls=int(os.getenv("ASSISTANT_BROWSER_CALLS", "12")),
+                browser_seconds=int(os.getenv("ASSISTANT_BROWSER_SECONDS", "300")),
+                browser_dns=os.getenv("ASSISTANT_BROWSER_DNS", "system"),
             )
         except (ValueError, TypeError) as exc:
             raise AssistantError("环境变量配置格式错误，请检查整数及 EXTRA_BODY JSON。") from exc
@@ -58,6 +64,10 @@ class Config:
             raise AssistantError("模型名不能为空，超时必须为 1～300 秒。")
         if not 128 <= self.max_tokens <= 16384 or not 1 <= self.daily_calls <= 10000:
             raise AssistantError("输出额度必须为 128～16384，日调用额度必须为 1～10000。")
+        if not 1 <= self.browser_calls <= 30 or not 30 <= self.browser_seconds <= 600:
+            raise AssistantError("网页任务调用上限必须为 1～30，耗时上限必须为 30～600 秒。")
+        if self.browser_dns not in {"system", "google"}:
+            raise AssistantError("ASSISTANT_BROWSER_DNS 只能为 system 或 google。")
         if (not isinstance(self.extra_body, dict)
                 or set(self.extra_body) - {"thinking", "reasoning_effort", "temperature"}):
             raise AssistantError("EXTRA_BODY 仅允许 thinking、reasoning_effort、temperature 参数。")

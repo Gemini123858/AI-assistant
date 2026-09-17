@@ -69,7 +69,7 @@ class Store:
         self._lock_file = None
         self._closed = False
         for directory in (self.root, self.root / "messages", self.root / "memory",
-                          self.root / "memory" / "history"):
+                          self.root / "memory" / "history", self.root / "tasks"):
             if directory.is_symlink():
                 raise AssistantError("数据目录不能是符号链接。", 500)
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -217,6 +217,85 @@ class Store:
             self._recover_memory()
             return {kind: self._read_text(self.root / "memory" / f"{kind}.md")
                     for kind in ("profile", "rules")}
+
+    def _task_path(self, key):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
+            raise AssistantError("任务标识无效。")
+        return self.root / "tasks" / f"{key}.json"
+
+    def create_task(self, request, portal, mode, memory, limits):
+        with self._mutex:
+            key = uuid.uuid4().hex
+            record = {"schema_version": 1, "id": key, "request": request, "portal": portal,
+                      "mode": mode, "memory": memory, "limits": limits, "status": "queued",
+                      "created_at": now_iso(), "updated_at": now_iso(), "cancel_requested": False,
+                      "calls": 0, "steps": 0, "pages": [], "errors": [], "result": None,
+                      "note": "仅限公开招聘查询；不登录、不投递。"}
+            self._write_json(self._task_path(key), record)
+            return record
+
+    def get_task(self, key):
+        with self._mutex:
+            path = self._task_path(key)
+            if not path.exists():
+                raise AssistantError("任务不存在。", 404)
+            record = self._read_json(path)
+            try:
+                if (record.get("id") != key or record.get("status") not in
+                        {"queued", "running", "completed", "partial", "failed", "cancelled", "interrupted"}
+                        or record.get("portal") != "bytedance_experienced"
+                        or record.get("mode") not in {"api", "demo"}
+                        or not isinstance(record.get("pages"), list)
+                        or not isinstance(record.get("errors"), list)
+                        or type(record.get("cancel_requested")) is not bool):
+                    raise ValueError("invalid envelope")
+                text_field(record["request"], "任务要求", 2000)
+                text_field(record["note"], "任务状态说明", 3000)
+                for kind in ("profile", "rules"):
+                    text_field(record["memory"][kind], "任务记忆", allow_empty=True)
+                for limit, maximum in (("calls", 30), ("seconds", 600), ("steps", 40), ("pages", 30), ("details", 20)):
+                    value = record["limits"][limit]
+                    if type(value) is not int or not 1 <= value <= maximum:
+                        raise ValueError("invalid limit")
+                for counter in ("calls", "steps"):
+                    if type(record[counter]) is not int or not 0 <= record[counter] <= record["limits"][counter]:
+                        raise ValueError("invalid counter")
+                if len(record["pages"]) > record["limits"]["pages"] or len(record["errors"]) > 40:
+                    raise ValueError("invalid coverage")
+                seen = set()
+                for page in record["pages"]:
+                    if (not isinstance(page["id"], str) or not re.fullmatch(r"p[1-9][0-9]?", page["id"])
+                            or page["id"] in seen or page["kind"] not in {"detail", "listing"}
+                            or not isinstance(page["links"], list) or len(page["links"]) > 80):
+                        raise ValueError("invalid page")
+                    seen.add(page["id"])
+                    text_field(page["url"], "页面地址", 2000)
+                    text_field(page["text"], "页面正文", 16000)
+                    text_field(page["title"], "页面标题", 300, True)
+                if record["result"] is not None and not isinstance(record["result"], dict):
+                    raise ValueError("invalid result")
+            except (KeyError, TypeError, ValueError, AssistantError):
+                raise AssistantError("任务记录损坏，不会自动覆盖。", 500) from None
+            return record
+
+    def list_tasks(self):
+        with self._mutex:
+            self._ensure_open()
+            records = [self.get_task(path.stem) for path in (self.root / "tasks").glob("*.json")]
+            return sorted(records, key=lambda item: item["created_at"], reverse=True)
+
+    def update_task(self, key, **changes):
+        # Read-modify-write under one lock: cancellation cannot be lost by a worker.
+        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "errors", "result", "note"}
+        if set(changes) - allowed:
+            raise AssistantError("不能修改任务身份或已授权上下文。", 500)
+        with self._mutex:
+            record = self.get_task(key)
+            if record["cancel_requested"] and changes.get("status") == "completed":
+                changes.update(status="cancelled", result=None, note="完成前收到取消请求；证据保留，结果未发布。")
+            record.update(changes, updated_at=now_iso())
+            self._write_json(self._task_path(key), record)
+            return record
 
     def update_memory(self, kind, content, append=False):
         if kind not in {"profile", "rules"}:
