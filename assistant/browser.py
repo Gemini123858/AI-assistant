@@ -7,12 +7,10 @@ import json
 import re
 import socket
 import time
-from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import build_opener, Request
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 
 from .errors import AssistantError
 from .storage import now_iso
-from .llm import NoRedirect
 from .browser_network import PublicHTTPSProxy
 
 
@@ -86,8 +84,14 @@ def normalize_domain(value):
 
 
 class BrowserScope:
-    """Immutable task authority. Page content cannot add hosts or write capabilities."""
-    def __init__(self, start_url=ENTRY, domains=None, resource_domains=None, read_post_urls=None, blocked_urls=None, read_exceptions=None):
+    """Immutable reading authority; host restrictions are optional, writes are not."""
+    def __init__(self, start_url=ENTRY, domains=None, resource_domains=None, read_post_urls=None, blocked_urls=None, read_exceptions=None, public_web=None):
+        if public_web is not None and not isinstance(public_web, bool):
+            raise AssistantError("public_web 必须为布尔值，只控制公开阅读范围，不授予写入权限。", 400)
+        # Missing in historical records: keep their exact-host authority and
+        # serialized shape. New tasks explicitly opt into public-web reading.
+        self.public_web = public_web is True
+        self._public_web_explicit = public_web is not None
         if not isinstance(start_url, str):
             raise AssistantError("起始 URL 必须为 HTTPS 文本地址。", 400)
         try:
@@ -100,7 +104,7 @@ class BrowserScope:
         self.resource_domains = frozenset(resources)
         # Check authority before risk heuristics: a confirmed exception must be
         # available when validating a start URL that was previously blocked.
-        self.start_url = request_url(start_url, self.domains)
+        self.start_url = request_url(start_url, None if self.public_web else self.domains)
         if read_post_urls is not None and (not isinstance(read_post_urls, list) or len(read_post_urls) > 20):
             raise AssistantError("只读 POST 接口必须为不超过20项的完整 HTTPS URL 列表。", 400)
         urls = set()
@@ -120,10 +124,12 @@ class BrowserScope:
             try:
                 parsed = urlsplit(value)
                 if (not isinstance(value, str) or len(value) > 2000 or any(ord(c) < 32 for c in value)
-                        or parsed.scheme != "https" or parsed.hostname not in self.resource_domains
+                        or parsed.scheme != "https" or not parsed.hostname
+                        or (not self.public_web and parsed.hostname not in self.resource_domains)
                         or parsed.port not in (None, 443) or parsed.username or parsed.password
                         or parsed.query or parsed.fragment):
                     raise ValueError()
+                normalize_domain(parsed.hostname)
                 blocked.add(urlunsplit(("https", parsed.hostname, parsed.path or "/", "", "")))
             except (ValueError, TypeError, AttributeError):
                 raise AssistantError("禁止访问 URL 必须在任务域内，不含查询参数、片段或凭据；按整个接口路径阻断。", 400) from None
@@ -143,7 +149,7 @@ class BrowserScope:
                     or kind not in {"document", "xhr", "fetch"}):
                 raise AssistantError("阅读豁免只接受精确 GET/HEAD/POST 文档或数据请求。", 400)
             hosts = self.domains if method == "POST" or kind == "document" else self.resource_domains
-            url = request_url(entry["url"], hosts)
+            url = request_url(entry["url"], None if self.public_web else hosts)
             if urlsplit(url).fragment or write_query(urlsplit(url).query) or blocked_url(url, self):
                 raise AssistantError("阅读豁免不能覆盖查询操作、凭据或用户显式禁止路径，也不能带片段。", 400)
             normalized = {"url": url, "method": method, "resource_type": kind}
@@ -160,6 +166,8 @@ class BrowserScope:
     def as_dict(self):
         result = {"start_url": self.start_url, "domains": sorted(self.domains),
                   "resource_domains": sorted(self.resource_domains)}
+        if self._public_web_explicit:
+            result["public_web"] = self.public_web
         if self.read_post_urls:
             result["read_post_urls"] = sorted(self.read_post_urls)
         if self.blocked_urls:
@@ -214,19 +222,24 @@ def element_actions(info, url, scope=None):
 
 
 def request_url(value, hosts):
-    """Authority/shape checks only; never grant authority via an exception."""
+    """HTTPS/host shape; None means public-web scope, not unchecked networking."""
     try:
         if not isinstance(value, str):
             raise ValueError()
         url = urlsplit(value)
         if (len(value) > 2000 or any(ord(c) < 32 for c in value)
-                or url.scheme != "https" or url.hostname not in hosts or url.port not in (None, 443)
+                or url.scheme != "https" or not url.hostname
+                or (hosts is not None and url.hostname not in hosts) or url.port not in (None, 443)
                 or url.username or url.password):
             raise ValueError("outside read scope")
+        normalize_domain(url.hostname)
         # A trailing slash and fragment affect relative URLs and SPA navigation.
         return urlunsplit(("https", url.hostname, url.path or "/", url.query, url.fragment))
-    except (ValueError, TypeError, AttributeError):
-        raise AssistantError("链接格式无效或超出任务授权域，不可用阅读豁免放行。", 403) from None
+    except (AssistantError, ValueError, TypeError, AttributeError):
+        reason = "链接必须为不含凭据的公开域名 HTTPS 地址（443端口）；不接受本机/内网域名或IP地址。"
+        if hosts is not None:
+            reason += "限定网站模式下还须在任务域内。"
+        raise AssistantError(reason, 403) from None
 
 
 def navigation_url(value, scope=None):
@@ -235,7 +248,7 @@ def navigation_url(value, scope=None):
         error = AssistantError(denial["reason"], 403)
         error.policy = denial
         raise error
-    return request_url(value, scope.domains if scope else {SITE})
+    return request_url(value, None if scope and scope.public_web else scope.domains if scope else {SITE})
 
 
 def is_detail(url):
@@ -300,6 +313,8 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
         domains = scope.domains if scope else {SITE}
         resources = scope.resource_domains if scope else {SITE}
         hosts = domains if resource_type == "document" or method == "POST" else resources
+        if scope and scope.public_web:
+            hosts = None
         if method in {"GET", "HEAD"} and resource_type in STATIC_RESOURCE_TYPES:
             # Browser-reported subresources, not a URL-extension or CDN whitelist.
             # The transport separately validates and pins every host's public IPs.
@@ -328,7 +343,10 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
                 return denied("path_keyword", "路径疑似账号/业务操作（仅启发式，可能误伤）；可核实后添加本任务精确阅读豁免并重新发起。", True)
         return None
     except (AssistantError, ValueError, TypeError, AttributeError, RecursionError, UnicodeError):
-        return denied("authority", "链接无效或超出任务域；不能由阅读豁免扩大范围。")
+        reason = "链接格式或主机不符合公开 HTTPS 阅读要求。"
+        if not (scope and scope.public_web):
+            reason += "当前为限定网站模式，目标也须在任务域内；新建任务可选择公网阅读。"
+        return denied("authority", reason)
 
 
 def request_binding(url, method, resource_type, post_data=None, content_type=""):
@@ -346,23 +364,9 @@ def allowed_request(url, method, resource_type, post_data=None, scope=None, cont
 
 
 def public_addresses(host, mode="system"):
-    """Resolve once and return only public literal IPs, rejecting mixed answers."""
-    if mode == "google":
-        # Explicit opt-in, fixed DNS endpoint. No user-provided resolver/host.
-        request = Request("https://dns.google/resolve?" + urlencode({
-                          "name": host, "type": "A", "edns_client_subnet": "0.0.0.0/0"}),
-                          headers={"Accept": "application/dns-json"})
-        with build_opener(NoRedirect()).open(request, timeout=5) as response:
-            raw = response.read(64001)
-        if len(raw) > 64000:
-            raise AssistantError("DNS 响应过大，已拒绝访问。", 502)
-        answer = json.loads(raw)
-        if answer.get("Status") != 0:
-            raise AssistantError("公开 DNS 解析失败。", 502)
-        ips = {item["data"] for item in answer.get("Answer", []) if item.get("type") == 1}
-    else:
-        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        ips = {address[4][0] for address in addresses}
+    """System DNS only. Legacy mode arguments never invoke external DoH."""
+    addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    ips = {address[4][0] for address in addresses}
     if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
         raise AssistantError("域名解析到非公开地址，已拒绝。请核对 DNS/代理解析；尚不能确定底层原因。", 403)
     return sorted(ips, key=lambda ip: (":" in ip, ip))
@@ -385,7 +389,7 @@ def resolver_rules(hosts, mode="system", check=lambda: None):
 class JobBrowser:
     def __init__(self, check, dns_mode="system", scope=None):
         self.check = check
-        self.dns_mode = dns_mode
+        self.dns_mode = "system"
         self.scope = scope or BrowserScope()
         self.playwright = self.browser = self.context = self.page = None
         self.blocked = 0
@@ -406,6 +410,7 @@ class JobBrowser:
     def diagnostics(self):
         connection_errors = self._transport.failures() if self._transport else []
         return {"network_errors": self.network_errors[-12:], "policy_blocks": self.policy_blocks[-12:],
+                "dns_mode": self.dns_mode,
                 "connection_errors": connection_errors,
                 "internal_errors": self.internal_errors[-5:],
                 "pending_data_requests": list(self._pending_data.values())[-12:],
@@ -424,8 +429,7 @@ class JobBrowser:
             return False
 
     def _request_started(self, request):
-        if (request.resource_type in {"xhr", "fetch"}
-                and urlsplit(request.url).hostname in self.scope.domains and self.permitted(request)):
+        if request.resource_type in {"xhr", "fetch"} and self.permitted(request):
             target = self.target(request.url)
             self._pending_data[id(request)] = {"target": target, "method": request.method}
             self.data_errors.pop(target, None)
@@ -444,6 +448,8 @@ class JobBrowser:
             self.browser = self.playwright.chromium.launch(
                 headless=True, channel="chromium",
                 proxy=self._transport.settings,
+                # Playwright already disables background networking/component
+                # updates. The transport also rejects unregistered connections.
                 args=["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
             self.context = self.browser.new_context(service_workers="block", accept_downloads=False,
                                                     locale="zh-CN", permissions=[])
@@ -491,6 +497,8 @@ class JobBrowser:
     def _route(self, route):
         request = route.request
         if self.permitted(request):
+            if self._transport:
+                self._transport.allow_host(urlsplit(request.url).hostname)
             route.continue_()
         else:
             self.blocked += 1
@@ -542,6 +550,9 @@ class JobBrowser:
                                  if k.lower() == "content-type"), "")
             denial = request_denial(target, method, kind, event["request"].get("postData"), self.scope, content_type)
             permitted = denial is None
+            if permitted and self._transport:
+                # Redirect hops bypass Playwright's route handler.
+                self._transport.allow_host(urlsplit(target).hostname)
             if not permitted:
                 self.policy_blocks.append({"target": self.target(target), "type": kind,
                                            "method": method, **denial,

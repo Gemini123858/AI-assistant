@@ -111,7 +111,8 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
                                        "seconds": config.browser_seconds,
                                        "effective_calls": min(config.browser_calls, max(0, config.daily_calls - store.usage(service.day())["calls"]))},
                        capabilities={"auto_collect": mail.enabled, "browser_vision": config.browser_vision,
-                       "browser_tasks": config.mode == "api", "browser_scope": "task_authorized_public_domains",
+                       "browser_tasks": config.mode == "api", "browser_scope": "public_https_reading",
+                       "browser_dns": "system",
                        "push": False, "send_email": False, "automatic_memory": mail.enabled})
 
     @app.get("/api/mail")
@@ -210,6 +211,9 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
                            **previous["scope"]}
             else:
                 payload.update(public_request=previous["public_request"], **previous["scope"])
+        # A same-scope API restart must never silently broaden old authority.
+        # The UI offers a new, explicitly confirmed public-reading task instead.
+        payload.setdefault("public_web", False)
         return jsonify(task=public_task(tasks.start(payload))), 202
 
     @app.get("/api/messages")

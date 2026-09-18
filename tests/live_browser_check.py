@@ -205,7 +205,7 @@ def controlled_browser_factory(scenario):
 
 def main():
     parser = argparse.ArgumentParser(description="Explicit paid Kimi/browser integration check")
-    parser.add_argument("--dns", choices=["system", "google"], default="system")
+    parser.add_argument("--dns", choices=["system"], default="system")
     parser.add_argument("--calls", type=int, choices=range(1, 201), required=True,
                         help="Explicit authorized total attempt cap (1–200); no default paid budget")
     parser.add_argument("--task-calls", type=int, choices=range(1, 201),

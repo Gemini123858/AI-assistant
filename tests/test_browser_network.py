@@ -14,6 +14,7 @@ class BrowserNetworkTests(unittest.TestCase):
         proxy.resolve, proxy.normalize = resolve, normalize_domain
         proxy._lock, proxy._stop = threading.Lock(), threading.Event()
         proxy._addresses, proxy._failures = {}, []
+        proxy._allowed_hosts = set()
         return proxy
 
     def test_tunnel_connects_to_checked_literal_ip_and_reuses_pinned_addresses(self):
@@ -27,6 +28,7 @@ class BrowserNetworkTests(unittest.TestCase):
 
     def test_mixed_dns_answers_are_rejected_before_any_upstream_connection(self):
         proxy = self.proxy(public_addresses)
+        proxy.allow_host("cdn.example")
         client = Mock()
         client.recv.return_value = b"CONNECT cdn.example:443 HTTP/1.1\r\n\r\n"
         answers = [(2, 1, 6, "", (ip, 443)) for ip in ("8.8.8.8", "127.0.0.1")]
@@ -40,6 +42,7 @@ class BrowserNetworkTests(unittest.TestCase):
     def test_connect_has_no_auth_challenge_or_origin_credentials(self):
         resolve = Mock()
         proxy = self.proxy(resolve)
+        proxy.allow_host("cdn.example")
         client = Mock()
         client.recv.side_effect = [b"CONNECT cdn.example:443 HTTP/1.1\r\n\r\n", b""]
         upstream = Mock()
@@ -51,6 +54,18 @@ class BrowserNetworkTests(unittest.TestCase):
         upstream.close.assert_called_once()
         proxy._server = Mock(server_address=("127.0.0.1", 12345))
         self.assertEqual(set(proxy.settings), {"server", "bypass"})
+
+    def test_unregistered_background_connect_does_not_resolve_or_pollute_task_errors(self):
+        resolve = Mock()
+        proxy = self.proxy(resolve)
+        client = Mock()
+        client.recv.return_value = b"CONNECT www.google.com:443 HTTP/1.1\r\n\r\n"
+        with patch.object(proxy, "_connect") as connect:
+            proxy._handle(client)
+        resolve.assert_not_called()
+        connect.assert_not_called()
+        self.assertEqual(proxy.failures(), [])
+        self.assertIn(b"502", client.sendall.call_args.args[0])
 
     def test_connection_failure_can_try_another_checked_ip(self):
         proxy = self.proxy(Mock(return_value=["8.8.8.8", "8.8.4.4"]))

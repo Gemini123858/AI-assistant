@@ -60,18 +60,19 @@
         <p class="muted">由 Kimi 自主浏览、检索和恢复失败操作，再结合私人条件分析已读证据。</p>
         <form id="task-form">
           <label>起始 URL<input id="task-url" type="url" required value="https://jobs.bytedance.com/experienced/position" maxlength="2000"></label>
-          <p class="caption">页面所需脚本、样式、图片和字体自动加载，不需要识别或填写 CDN 域名。</p>
-          <details><summary>高级：额外访问范围与限制（一般无需填写）</summary>
-            <label>额外授权访问域（可选，逗号分隔）<input id="task-domains" placeholder="需要访问其他网站时使用；起始网站自动授权"></label>
-            <label>额外只读数据域（可选）<input id="task-resources" placeholder="仅用于跨域 GET 数据接口，不需要填写静态资源域"></label>
+          <p class="caption">默认可浏览任务相关的公网 HTTPS 页面，自动处理跳转、子域和页面依赖，不需要填写域名。只使用系统 DNS，不调用 Google DNS。</p>
+          <details><summary>高级：可选阅读限制（一般无需填写）</summary>
+            <label><input id="task-limit-domains" type="checkbox"> 仅限指定网站（默认关闭；开启后跨网站跳转可能被拒绝）</label>
+            <label>限定模式的额外访问域（逗号分隔）<input id="task-domains" placeholder="仅开启限定网站模式时生效；起始网站自动加入"></label>
+            <label>限定模式的额外只读数据域<input id="task-resources" placeholder="仅开启限定网站模式时生效；允许 GET 数据，不授权导航或 POST"></label>
             <label>每行一个精确 HTTPS URL，不带查询参数<textarea id="task-blocked-urls" rows="2" placeholder="例如：https://example.com/api/risky-operation；该路径的所有查询参数和请求方法均阻断。"></textarea></label>
-            <p class="caption">访问域内正常 GET/POST 默认允许，跨域静态资源自动加载，额外数据域只授权 GET 数据、不授权页面导航或 POST。统一拦截明显账号/写入操作、凭据和文件上传，不检查网站专用端点或响应字段。</p>
+            <p class="caption">公网阅读模式下正常 GET/POST 和跨域资源默认允许。两种模式均拦截明显账号/写入操作、凭据、文件上传和非公网地址；阅读启发式不能证明所有请求无副作用，不检查网站专用端点或响应字段。</p>
             <label>本任务精确阅读豁免（JSON数组，可从拦截记录填入）<textarea id="task-read-exceptions" rows="3" placeholder='[{"url":"https://example.com/wiki/delete","method":"GET","resource_type":"document"}]'></textarea></label>
             <p class="caption">仅在核实为阅读后确认。绑定完整URL（含查询参数）、方法、请求类型；POST还绑定正文SHA256和Content-Type。不能覆盖域范围、显式禁令、凭据、文件或写入正文；不授权实际写操作。</p>
           </details>
           <label>公开任务目标（必填，浏览与回答围绕此目标）<textarea id="task-public-request" rows="4" required maxlength="2000" placeholder="例如：查找此网站的计算机相关岗位，进入具体岗位查看职责和要求，给出名称、地点、要求及来源。不要只写注意事项；不要填私人信息。"></textarea></label>
           <label for="task-request">私人筛选条件（可选，仅在分析时提供）<textarea id="task-request" rows="2" maxlength="2000" placeholder="例如：结合我的画像比较技能差距；个人经历或不希望发送网站的条件放在这里，不要把查询目标只写在这里。"></textarea></label>
-          <label><input id="task-public-confirm" type="checkbox" required> 我确认公开目标可用于网站检索，允许匿名读取指定网站及自动加载页面资源，不授权登录、发送、上传或业务提交；如填写高级范围/豁免，已核实其用途。接受匿名浏览风险，查询策略由模型决定。</label>
+          <label><input id="task-public-confirm" type="checkbox" required> 我确认公开目标可用于网站检索，允许匿名读取任务相关的公网 HTTPS 网页、数据和资源（开启限定模式则遵守指定范围）；不授权登录、发送、上传或业务提交。如填写阅读豁免，已核实其用途。接受匿名浏览风险，查询策略由模型决定。</label>
           <button id="task-button" type="submit" class="primary">开始读取与分析</button>
           <p class="caption">公开目标始终传给模型，无需重复填写。私人条件与画像只在关闭网站动作后的分析阶段提供。任务共享日额度；只用于匿名可信公开查询，不授权登录、发送、上传或提交。</p>
           <p id="task-availability" class="caption"></p>

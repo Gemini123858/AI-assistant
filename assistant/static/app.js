@@ -181,7 +181,7 @@ function sourceLink(url, label, domains = ["jobs.bytedance.com"]) {
   let target;
   try { target = new URL(url); } catch (_) { return link; }
   // A stored/model-produced link is still untrusted; never render javascript: URLs.
-  if (target.protocol === "https:" && domains.includes(target.hostname) && (!target.port || target.port === "443") && !target.username && !target.password) {
+  if (target.protocol === "https:" && (domains === null || domains.includes(target.hostname)) && (!target.port || target.port === "443") && !target.username && !target.password) {
     link.href = target.href;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
@@ -195,11 +195,12 @@ function taskCard(task) {
   const names = { queued: "待运行", running: "运行中", completed: "已完成", partial: "部分完成",
     failed: "失败", cancelled: "已取消", interrupted: "中断" };
   const top = node("div", "card-top");
-  const domains = task.scope?.domains || ["jobs.bytedance.com"];
+  const domains = task.scope?.public_web ? null : task.scope?.domains || ["jobs.bytedance.com"];
   top.append(node("h3", "", task.request), node("span", "tag", names[task.status] || "未知"));
   card.append(top, node("p", "reason", task.note), node("p", "caption",
     `已保存 ${task.pages.length} 份页面观察 · 动作 ${task.steps}/${task.limits.steps} · 模型 ${task.calls}/${task.limits.calls} · ${task.phase === "analysis" ? "私人分析（无网站动作）" : "公开浏览"} · ${formatTime(task.created_at)}`));
-  if (task.scope) card.append(node("p", "caption", "授权访问域：" + domains.join("、")));
+  if (task.scope) card.append(node("p", "caption", domains === null ?
+    "阅读范围：任务相关的公网 HTTPS 网页与数据（不授权外部写入）" : "限定访问域：" + domains.join("、")));
   if (task.public_request) card.append(node("p", "caption", "公开任务目标：" + task.public_request));
   if (task.private_conditions) card.append(node("p", "caption", "私人筛选条件：" + task.private_conditions));
   if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "历史 POST 授权记录（新策略不再依赖）：" + task.scope.read_post_urls.join("、")));
@@ -211,6 +212,7 @@ function taskCard(task) {
     button.addEventListener("click", () => {
       const scope = task.scope;
       $("task-url").value = scope.start_url;
+      $("task-limit-domains").checked = !scope.public_web;
       $("task-domains").value = scope.domains.join(", ");
       $("task-resources").value = scope.resource_domains.join(", ");
       $("task-blocked-urls").value = (scope.blocked_urls || []).join("\n");
@@ -303,9 +305,24 @@ function taskCard(task) {
   evidence.append(view);
   card.append(evidence);
   const active = ["queued", "running"].includes(task.status);
-  const button = node("button", "quiet", active ? "取消任务" : "重新发起（重新计费）");
+  const oldScope = task.scope && !Object.hasOwn(task.scope, "public_web");
+  const button = node("button", "quiet", active ? "取消任务" : oldScope ? "按新阅读策略重新发起" : "重新发起（重新计费）");
   button.disabled = active && task.cancel_requested;
   button.addEventListener("click", () => working(button, async () => {
+    if (!active && oldScope) {
+      $("task-url").value = task.scope.start_url;
+      $("task-limit-domains").checked = false;
+      $("task-domains").value = "";
+      $("task-resources").value = "";
+      $("task-blocked-urls").value = (task.scope.blocked_urls || []).join("\n");
+      $("task-read-exceptions").value = JSON.stringify(task.scope.read_exceptions || [], null, 2);
+      $("task-public-request").value = task.public_request;
+      $("task-request").value = task.private_conditions ?? (task.request !== task.public_request ? task.request : "");
+      $("task-public-confirm").checked = false;
+      $("task-form").scrollIntoView({ behavior: "smooth" });
+      toast("已填入新任务并关闭旧域名白名单；请检查目标并确认开始。旧记录不变，尚未调用 API。");
+      return;
+    }
     if (!active && !window.confirm("将创建新任务、使用当前画像并重新调用 API；旧记录保留。是否继续？")) return;
     await api(`/api/tasks/${task.id}/${active ? "cancel" : "restart"}`, "POST", {});
     await loadTasks();
@@ -344,6 +361,7 @@ $("task-form").addEventListener("submit", (event) => {
     const domains = [...new Set([start.hostname, ...splitDomains("task-domains")])];
     await api("/api/tasks", "POST", { goal: $("task-public-request").value,
       private_conditions: $("task-request").value, start_url: start.href,
+      public_web: !$("task-limit-domains").checked,
       domains, resource_domains: splitDomains("task-resources"),
       read_exceptions: JSON.parse($("task-read-exceptions").value.trim() || "[]"),
       blocked_urls: $("task-blocked-urls").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
@@ -486,6 +504,7 @@ function mailCard(record) {
       const browse = node("button", "quiet", "到网页任务确认此链接");
       browse.addEventListener("click", () => {
         $("task-url").value = link.url;
+        $("task-limit-domains").checked = false;
         $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = ""; $("task-read-exceptions").value = "";
         $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
         $("task-request").value = "";

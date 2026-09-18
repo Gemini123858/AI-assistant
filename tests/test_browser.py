@@ -1,4 +1,3 @@
-import io
 import json
 import socket
 import unittest
@@ -17,6 +16,42 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_public_reading_supports_cross_host_pages_data_and_redirects(self):
+        scope = BrowserScope("https://m-catalog.example/", public_web=True)
+        desktop = "https://catalog.example/positions"
+        self.assertEqual(navigation_url(desktop, scope), desktop)
+        self.assertTrue(allowed_request("https://data-other.example/query", "POST", "xhr", '{"keyword":"软件"}', scope))
+        self.assertTrue(allowed_request("https://other.example/docs", "GET", "document", scope=scope))
+        for url, method, kind, body in (
+                ("https://other.example/api/delete", "POST", "xhr", '{}'),
+                ("https://other.example/query", "POST", "xhr", '{"password":"synthetic"}'),
+                ("https://127.0.0.1/", "GET", "document", None),
+                ("https://service.local/", "GET", "document", None),
+                ("https://other.example/", "DELETE", "xhr", None)):
+            self.assertFalse(allowed_request(url, method, kind, body, scope))
+        browser = JobBrowser(lambda: None, scope=scope)
+        browser._transport, browser._cdp = Mock(), Mock()
+        browser._continue_response({"request": {"url": scope.start_url, "method": "GET"},
+            "resourceType": "Document", "responseStatusCode": 302,
+            "responseHeaders": [{"name": "Location", "value": desktop}]}, "redirect")
+        browser._transport.allow_host.assert_called_once_with("catalog.example")
+        browser._cdp.send.assert_called_once_with("Fetch.continueRequest", {"requestId": "redirect"})
+        route = Mock(request=SimpleNamespace(url=desktop, method="GET", resource_type="document", post_data=None, headers={}))
+        browser._route(route)
+        route.continue_.assert_called_once()
+
+    def test_public_scope_roundtrip_and_explicit_deny_keep_legacy_scope_unchanged(self):
+        legacy = BrowserScope("https://catalog.example/").as_dict()
+        self.assertNotIn("public_web", legacy)
+        self.assertEqual(BrowserScope(**legacy).as_dict(), legacy)
+        self.assertFalse(allowed_request("https://other.example/", "GET", "document", scope=BrowserScope(**legacy)))
+        scope = BrowserScope("https://catalog.example/", public_web=True,
+                             blocked_urls=["https://other.example/blocked"])
+        self.assertEqual(BrowserScope(**scope.as_dict()).as_dict(), scope.as_dict())
+        self.assertFalse(allowed_request("https://other.example/blocked?x=1", "GET", "document", scope=scope))
+        limited = BrowserScope("https://catalog.example/", public_web=False)
+        self.assertEqual(BrowserScope(**limited.as_dict()).as_dict(), limited.as_dict())
+
     def test_proxy_auth_failure_is_internal_not_a_retryable_network_outage(self):
         from playwright.sync_api import Error as PlaywrightError
         browser = JobBrowser(lambda: None, scope=BrowserScope("https://catalog.example"))
@@ -336,17 +371,18 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertIn("MAP " + SITE + " 8.8.8.8", rules)
         self.assertIn("MAP * ~NOTFOUND", rules)
 
-    def test_opt_in_doh_uses_fixed_endpoint_and_still_rejects_private_answers(self):
+    def test_legacy_google_option_uses_system_dns_and_still_rejects_private_answers(self):
+        from assistant.config import Config
+        config = Config(browser_dns="google")
+        config.validate()
+        self.assertEqual(config.browser_dns, "system")
+        self.assertEqual(JobBrowser(lambda: None, dns_mode="google").dns_mode, "system")
         for ip, allowed in (("8.8.8.8", True), ("127.0.0.1", False)):
-            envelope = {"Status": 0, "Answer": [{"type": 1, "data": ip}]}
-            response = io.BytesIO(json.dumps(envelope).encode())
-            with patch("assistant.browser.build_opener") as opener:
-                opener.return_value.open.return_value = response
+            answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))]
+            with patch("assistant.browser.socket.getaddrinfo", return_value=answers) as resolve:
                 if allowed:
                     resolver_rules({SITE}, "google")
                 else:
                     with self.assertRaises(AssistantError):
                         resolver_rules({SITE}, "google")
-                request = opener.return_value.open.call_args.args[0]
-                self.assertTrue(request.full_url.startswith("https://dns.google/resolve?"))
-                self.assertNotIn("Authorization", request.headers)
+                resolve.assert_called_once_with(SITE, 443, type=socket.SOCK_STREAM)

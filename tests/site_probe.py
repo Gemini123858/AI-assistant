@@ -133,7 +133,7 @@ class DiagnosticBrowser(JobBrowser):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dns", choices=["system", "google"], default="system")
+    parser.add_argument("--dns", choices=["system"], default="system")
     parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--snapshot", action="store_true",
                         help="Save anonymous screenshots to ignored data/site-probe")
@@ -151,7 +151,7 @@ def main():
             raise AssistantError("官网探测达到90秒上限。")
 
     factory = DiagnosticBrowser if args.diagnostics or args.snapshot else JobBrowser
-    with factory(check, args.dns, scope=BrowserScope(ENTRY, resource_domains=list(ASSET_HOSTS))) as browser:
+    with factory(check, args.dns, scope=BrowserScope(ENTRY, public_web=True)) as browser:
         if isinstance(browser, DiagnosticBrowser):
             browser.snapshot = args.snapshot
         listing_url = "https://jobs.bytedance.com/experienced/position"

@@ -17,6 +17,7 @@ class PublicHTTPSProxy:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._addresses, self._failures = {}, []
+        self._allowed_hosts = set()
         owner = self
 
         class Handler(socketserver.BaseRequestHandler):
@@ -40,6 +41,12 @@ class PublicHTTPSProxy:
     def failures(self):
         with self._lock:
             return [dict(item) for item in self._failures[-12:]]
+
+    def allow_host(self, host):
+        """Register an approved page request before it reaches the transport."""
+        host = self.normalize(host)
+        with self._lock:
+            self._allowed_hosts.add(host)
 
     def clear_failures(self):
         with self._lock:
@@ -95,6 +102,14 @@ class PublicHTTPSProxy:
             if method != "CONNECT" or port != "443" or version not in {"HTTP/1.0", "HTTP/1.1"}:
                 raise AssistantError("连接层仅允许 HTTPS 443 隧道。", 403)
             host = self.normalize(raw_host)
+            with self._lock:
+                allowed = host in self._allowed_hosts
+            if not allowed:
+                # Chromium can initiate background/preconnect traffic unrelated
+                # to a routed page request. Do not resolve it or call it a task
+                # failure. Actual requests register before continue/redirect.
+                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                return
             upstream = self._connect(host)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             established = True

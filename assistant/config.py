@@ -93,7 +93,10 @@ class Config:
                 or not 1 <= self.browser_steps <= 500):
             raise AssistantError("网页任务调用上限必须为 1～200，耗时为 30～3600 秒，动作为 1～500 步。")
         if self.browser_dns not in {"system", "google"}:
-            raise AssistantError("ASSISTANT_BROWSER_DNS 只能为 system 或 google。")
+            raise AssistantError("ASSISTANT_BROWSER_DNS 使用 system；旧 google 值只保留配置兼容。")
+        # User requested system DNS only. Old .env files must not cause either
+        # startup failures or unexpected calls to Google DNS.
+        self.browser_dns = "system"
         if (not isinstance(self.extra_body, dict)
                 or set(self.extra_body) - {"thinking", "reasoning_effort", "temperature"}):
             raise AssistantError("EXTRA_BODY 仅允许 thinking、reasoning_effort、temperature 参数。")

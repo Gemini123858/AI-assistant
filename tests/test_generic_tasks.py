@@ -217,14 +217,23 @@ class GenericTaskTests(unittest.TestCase):
         self.assertIn("loop_warning", task["actions"][-1])
         self.assertEqual(task["actions"][-1]["remaining"]["steps"], 115)
 
-    def test_public_task_domains_are_immutable_and_cross_domain_errors_are_recoverable(self):
+    def test_limited_task_domains_are_immutable_and_cross_domain_errors_are_recoverable(self):
         self.runner([call("open_url", {"url": "https://foreign.example/info"}), call("finish_task", result())])
-        task = self.start_generic()
+        initial = self.tasks.start({"goal": "公开信息查询", "start_url": LIST, "public_web": False})
+        self.tasks.wait(timeout=10)
+        task = self.store.get_task(initial["id"])
         self.assertEqual(task["status"], "completed")
         self.assertEqual(FixtureBrowser.reads, [LIST])
         self.assertEqual(task["scope"]["domains"], [SITE])
         with self.assertRaises(AssistantError):
             self.store.update_task(task["id"], scope={"domains": ["foreign.example"]})
+
+    def test_new_tasks_default_to_public_reading_without_changing_their_goal(self):
+        model = self.runner([call("open_url", {"url": "https://other.example/info"}), call("finish_task", result())])
+        task = self.start_generic()
+        self.assertTrue(task["scope"]["public_web"])
+        self.assertEqual(FixtureBrowser.reads, [LIST, "https://other.example/info"])
+        self.assertEqual(json.loads(model.calls[-1][1]["content"])["task_goal"], task["public_request"])
 
     def test_numbered_local_source_can_be_read_during_private_analysis(self):
         model = self.runner([call("analyze_results", {}),
