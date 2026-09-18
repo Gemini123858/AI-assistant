@@ -244,6 +244,7 @@ function taskCard(task) {
       for (const item of action.network_errors || []) actions.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
       for (const item of action.connection_errors || []) actions.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
       if (action.loop_warning) actions.append(node("p", "caption", action.loop_warning));
+      if (action.streak_warning) actions.append(node("p", "notice", action.streak_warning));
       if (action.remaining) actions.append(node("p", "caption", `动作结束时剩余：模型 ${action.remaining.calls} 次 / 动作 ${action.remaining.steps} 步 / 时间 ${action.remaining.seconds} 秒`));
     }
     card.append(actions);

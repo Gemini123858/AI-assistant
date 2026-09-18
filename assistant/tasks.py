@@ -28,14 +28,15 @@ task_goal是用户确认可用于网站检索的公开目标；此阶段没有�
 区分主动拦截与真实网络错误；一次超时或图片/遥测失败不等于整个网络不可用。
 权限拦截不能靠原样刷新/等待/重启解除；根据具体rule/reason选择范围内替代路径或报告待授权操作，不把所有正文为空都解释为网络故障。
 internal且retryable=false表示程序/连接配置异常，勿反复重启、换检索词或让用户填写网站账号；报告具体诊断并交付已有成果/停止。
+连续动作失败会被程序计数：收到 streak_warning 必须改变策略、换入口或 finish_task 报告；连续失败达到上限将被强制停止，不要硬撑。
 必要页面/脚本/读取接口持续不可达时，报告实际目标、错误、尝试及未知根因，用 finish_task 停止。
 只使用系统DNS，不自行调整DNS/代理；不绕过后果边界或将失败页面判为零结果。公网阅读模式下普通跨域不是越权，仍须服务task_goal。
 需要结合私人条件筛选时调用 analyze_results，切换到只有本地证据/结束工具的分析阶段。
 可用 read_source 读取已保存正文的编号行；事实结论引用 ready=true 的来源，未读内容不能引用。
 长文档可先 search_source 找关键词片段，再 read_source 扩展范围，不需要凭记忆猜行号。
 ready 表示当前正文快照可取得，不保证所有组件加载完毕；结合 body_stable、控件和诊断判断覆盖，不把加载提示当零结果。
-授权访问域内的正常 POST 不再要求站点/端点白名单；统一禁令仍拦截明显写入、账号操作、凭据、文件上传和用户禁止路径，不得绕过。
-普通文章路径/标题的动作词不代表执行操作。path_keyword拒绝可向用户提出精确read_exception，只有用户能在新任务中确认；模型不能自行扩大豁免。阅读豁免不覆盖域、公网、显式禁令、凭据、操作正文或mutation。
+网站自己发起的 GET 数据请求不做路径词判断；POST 只按末段动作词（如/jobs/apply）与正文闸（凭据/mutation/文件/操作选择器）判断，键名和命名空间是数据不是操作。不得利用这一点构造或诱导写入。
+普通文章路径/标题的动作词不代表执行操作。path_keyword拒绝不可重试，可把反馈中的 policy.read_exception 原样写进 stop_reason/questions 请用户在新任务中确认；模型不能自行扩大豁免。阅读豁免不覆盖域、公网、显式禁令、凭据、操作正文或mutation。
 pending_data_requests/data_errors/data_responses仅说明实际传输状态，不验证任何网站的业务响应格式。即使HTTP成功且ready=true，也必须看到任务需要的具体正文，不能将空框架、加载中或业务报错当成查询完成/零结果。
 finish_task findings/jobs 使用 page_id 和 line_start/line_end，程序取原文/岗位标题；不必重写标题或画像原文。
 jobs 的 title_line 可指定实际岗位名称所在行；页面标题若只是栏目/导航名，必须定位岗位名，不把栏目名当岗位名称。
@@ -329,6 +330,7 @@ class Tasks:
         last_result_error = None
         links, failed_targets, repetitions = {}, set(), {}
         recent_sources = []
+        failure_streak = 0
 
         def check():
             if self.store.get_task(key)["cancel_requested"]:
@@ -398,6 +400,7 @@ class Tasks:
                     "remaining": budget(), **(browser.diagnostics() if hasattr(browser, "diagnostics") else {})}
 
         def perform(name, arguments, action):
+            nonlocal failure_streak
             check()
             if task["steps"] >= task["limits"]["steps"]:
                 raise TaskStopped("partial", "达到浏览动作总上限；证据保留，未追加调用。")
@@ -426,6 +429,7 @@ class Tasks:
                                     connection_errors=result.get("connection_errors", [])[-3:])
                 else:
                     item.update(status="success")
+                failure_streak = 0
                 self.store.update_task(key, actions=task["actions"])
             except (AssistantError, PlaywrightError) as error:
                 if isinstance(error, PlaywrightError):
@@ -438,9 +442,21 @@ class Tasks:
                 if result["kind"] in {"network", "page_loading"}:
                     failed_targets.add(target)
                 self.store.update_task(key, actions=task["actions"], errors=task["errors"])
+                failure_streak += 1
             if repetitions[signature] >= 3:
                 result = {**result, "loop_warning": "连续相同动作无明显进展；请改变策略、说明重试理由或停止。"}
                 item["loop_warning"] = result["loop_warning"]
+            if failure_streak >= 5:
+                self.store.update_task(key, actions=task["actions"])
+                raise TaskStopped("partial" if task["pages"] else "failed",
+                    "连续5个动作失败（含不同目标或错误分类）；证据与诊断已保留，程序强制停止以避免空耗预算。"
+                    "请核对拦截 policy 规则或连接诊断，修正后重新发起。")
+            if failure_streak >= 3:
+                result = {**result, "streak_warning":
+                    f"已连续{failure_streak}个动作失败；不要原样重试同类失败：核对错误分类与 policy 规则，"
+                    f"换范围内入口或检索策略，或立即 finish_task 报告 partial/failed 与具体 stop_reason；"
+                    f"再连续失败{5 - failure_streak}次程序将强制停止。"}
+                item["streak_warning"] = result["streak_warning"]
             item["remaining"] = budget()
             if name == "take_screenshot" and not result.get("failed"):
                 item["screenshot"] = result["screenshot"]

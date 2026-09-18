@@ -375,9 +375,9 @@ class GenericScopeTests(unittest.TestCase):
                          "https://docs.example/catalog?q=图神经网络&city=上海&page=88")
         self.assertTrue(allowed_request("https://docs.example/app.js", "GET", "script", scope=scope))
         self.assertTrue(allowed_request("https://docs.example/api/preferences", "GET", "xhr", scope=scope))
-        for url, kind in (("https://foreign.example/app.js", "script"),
-                          ("https://" + SITE + "/api/v1/common/setting", "xhr")):
-            self.assertFalse(allowed_request(url, "GET", kind, scope=scope))
+        # Browser-reported static subresources load from any public host (transport
+        # pins each host's public IPs); only xhr/fetch stay inside the scope.
+        self.assertFalse(allowed_request("https://" + SITE + "/api/v1/common/setting", "GET", "xhr", scope=scope))
         self.assertFalse(allowed_request("https://docs.example/api/save", "POST", "fetch", "{}", scope))
 
     def test_invalid_authority_and_credentials_never_become_scope(self):

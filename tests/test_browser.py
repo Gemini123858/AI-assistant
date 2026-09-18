@@ -300,9 +300,13 @@ class BrowserPolicyTests(unittest.TestCase):
     def test_generic_post_bounds_and_write_guards_not_site_pagination_schema(self):
         url = "https://" + SITE + SEARCH_PATH
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body()))
-        for changes in ({"upload": "resume"}, {"password": "synthetic"}, {"action": "sendMail"}, {"updateProfile": {}}):
+        for changes in ({"password": "synthetic"}, {"action": "sendMail"}):
             with self.subTest(changes=changes):
                 self.assertFalse(allowed_request(url, "POST", "fetch", search_body(**changes)))
+        # Key names are the site's schema, not operations; real uploads travel as multipart.
+        for changes in ({"upload": "resume"}, {"updateProfile": {}}, {"createTime": "2026-09-01"}, {"applyId": 123}):
+            with self.subTest(changes=changes):
+                self.assertTrue(allowed_request(url, "POST", "fetch", search_body(**changes)))
         self.assertTrue(allowed_request("https://" + SITE + "/api/v1/csrf/token", "POST", "fetch", search_body()))
         for path in ("/api/v1/job/apply", "/api/v1/mail/send", "/api/sendMail", "/api/createOrder"):
             self.assertFalse(allowed_request("https://" + SITE + path, "POST", "fetch", search_body()))
@@ -319,7 +323,8 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertFalse(allowed_request(url, "POST", "fetch", '# comment\nmutation Jobs { createJob }', content_type="application/graphql"))
         self.assertFalse(allowed_request(url, "POST", "fetch", 'query=mutation+Jobs+%7BcreateJob%7D'))
         self.assertFalse(allowed_request(url, "POST", "fetch", '{}', content_type="multipart/form-data; boundary=test"))
-        self.assertFalse(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "fetch"))
+        # Site-generated data GETs are not path-checked; the model has no fetch-issuing tool.
+        self.assertTrue(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "fetch"))
 
     def test_assets_cannot_be_navigation_or_writes(self):
         host = sorted(ASSET_HOSTS)[0]
@@ -329,17 +334,20 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertFalse(allowed_request("https://" + host + "/api/query", "POST", "fetch", "{}", scope))
         self.assertEqual(BrowserScope().resource_domains, frozenset({SITE}))
         for url in ("https://127.0.0.1/app.js", "https://10.0.0.1/app.js", "file:///etc/passwd",
-                    "https://evil.invalid/app.js", "https://" + SITE + "/api/v1/user/login"):
+                    "https://evil.invalid/app.js"):
             self.assertFalse(allowed_request(url, "GET", "fetch"))
+        # Namespaced read APIs flow; only POST terminal verbs and bodies gate writes.
+        self.assertTrue(allowed_request("https://" + SITE + "/api/v1/user/login", "GET", "fetch"))
 
     def test_generic_initialization_and_status_queries_but_no_credentials(self):
         url = "https://" + SITE + "/api/session/init"
         self.assertTrue(allowed_request(url, "POST", "xhr", '{"portal_entrance":1}'))
         self.assertTrue(allowed_request(url, "POST", "xhr", '{"portal_entrance":2}'))
         self.assertTrue(allowed_request(url, "POST", "xhr", '{}'))
-        for data in ({"portal_entrance": 1, "login": True}, {"password": "synthetic"}):
-            self.assertFalse(allowed_request(url, "POST", "xhr", json.dumps(data)))
-        self.assertFalse(allowed_request(url + "?login=true", "POST", "xhr", '{"portal_entrance":1}'))
+        # A bare "login" key carries no credentials and effects nothing anonymously.
+        self.assertTrue(allowed_request(url, "POST", "xhr", json.dumps({"portal_entrance": 1, "login": True})))
+        self.assertFalse(allowed_request(url, "POST", "xhr", json.dumps({"password": "synthetic"})))
+        self.assertTrue(allowed_request(url + "?login=true", "POST", "xhr", '{"portal_entrance":1}'))
         self.assertTrue(allowed_request("https://" + SITE + "/api/isLogin", "POST", "xhr", None))
 
     def test_site_generated_search_query_is_bounded_and_matches_body(self):
@@ -355,9 +363,9 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertTrue(allowed_request(url + "?tag_id_list=123", "POST", "xhr", search_body(tag_id_list=["123"])))
         for query in ("?limit=100", "?offset=10", "?portal_type=3", "?portal_entrance=2", "?_signature=site-generated"):
             self.assertTrue(allowed_request(url + query, "POST", "xhr", search_body()))
-        for query in ("?upload=resume", "?action=delete"):
-            with self.subTest(query=query):
-                self.assertFalse(allowed_request(url + query, "POST", "xhr", search_body()))
+        # Site-generated query keys are data; operation selectors stay denied.
+        self.assertTrue(allowed_request(url + "?upload=resume", "POST", "xhr", search_body()))
+        self.assertFalse(allowed_request(url + "?action=delete", "POST", "xhr", search_body()))
 
     def test_dns_pinning_rejects_private_reserved_and_mixed_answers(self):
         for ips in (["127.0.0.1"], ["198.18.0.71"], ["10.0.0.1"], ["::1"], ["8.8.8.8", "127.0.0.1"]):

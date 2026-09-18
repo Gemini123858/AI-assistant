@@ -150,7 +150,10 @@ class BrowserScope:
                 raise AssistantError("阅读豁免只接受精确 GET/HEAD/POST 文档或数据请求。", 400)
             hosts = self.domains if method == "POST" or kind == "document" else self.resource_domains
             url = request_url(entry["url"], None if self.public_web else hosts)
-            if urlsplit(url).fragment or write_query(urlsplit(url).query) or blocked_url(url, self):
+            # Mirror the per-surface predicate used when the binding is granted.
+            query_risk = (operation_query if method == "POST" or kind in {"xhr", "fetch"}
+                          else write_query)(urlsplit(url).query)
+            if urlsplit(url).fragment or query_risk or blocked_url(url, self):
                 raise AssistantError("阅读豁免不能覆盖查询操作、凭据或用户显式禁止路径，也不能带片段。", 400)
             normalized = {"url": url, "method": method, "resource_type": kind}
             if method == "POST":
@@ -266,11 +269,23 @@ def graphql_mutation(value):
     return bool(re.search(r"(?:^|\n)\s*mutation\b[\s\S]*\{", value, re.I))
 
 
-def write_query(query):
-    return any(risky_name(key) or CREDENTIAL_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key))
+def operation_query(query):
+    """Credentials, RPC selectors and GraphQL mutations; plain keys are data."""
+    return any(CREDENTIAL_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key))
                or key.lower() in {"action", "operation", "op", "cmd"} and risky_name(value)
                or key.lower() in {"query", "mutation"} and graphql_mutation(value)
                for key, value in parse_qsl(query, keep_blank_values=True))
+
+
+def write_query(query):
+    return (any(risky_name(key) for key, _ in parse_qsl(query, keep_blank_values=True))
+            or operation_query(query))
+
+
+def terminal_verb_path(path):
+    """Only the last path segment can be the operation; earlier ones are namespaces."""
+    terminal = unquote(path).rstrip("/").rsplit("/", 1)[-1]
+    return risky_name("/" + terminal)
 
 
 def read_post_body(body, content_type=""):
@@ -282,14 +297,17 @@ def read_post_body(body, content_type=""):
         data = json.loads(body)
     except (ValueError, RecursionError):
         try:
-            return bool(parse_qsl(body, strict_parsing=True)) and not write_query(body)
+            return bool(parse_qsl(body, strict_parsing=True)) and not operation_query(body)
         except ValueError:
             return (any(kind in content_type.lower() for kind in ("text/plain", "application/graphql"))
                     and not graphql_mutation(body)
                     and not re.search(r"Content-Disposition:|filename\s*=", body, re.I))
     def writes(value):
+        # Key names are the site's schema, not operations: createTime/updateTime/
+        # applyId are ordinary read fields. Values of operation selectors and
+        # credential/mutation keys are the actual risk.
         if isinstance(value, dict):
-            return any(risky_name(key) or CREDENTIAL_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key))
+            return any(CREDENTIAL_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key))
                        or key.lower() == "mutation"
                        or key.lower() in {"operation", "action", "op", "cmd"} and isinstance(item, str) and risky_name(item)
                        or key.lower() == "query" and isinstance(item, str) and graphql_mutation(item)
@@ -322,7 +340,16 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
         url = request_url(url, hosts)
         if blocked_url(url, scope):
             return denied("explicit_deny", "命中用户显式禁止路径；需用户移除禁令，阅读豁免无效。")
-        if write_query(parsed.query):
+        # Who generates the request decides how much of the URL is policy surface.
+        # Documents are model-chosen; subresources and site-generated data
+        # requests are not something the model can craft.
+        if method in {"GET", "HEAD"} and resource_type in {"document"} | STATIC_RESOURCE_TYPES:
+            query_risk = write_query(parsed.query)
+        elif method == "POST" or resource_type in {"xhr", "fetch"}:
+            query_risk = operation_query(parsed.query)
+        else:
+            query_risk = False
+        if query_risk:
             return denied("query_operation", "查询参数包含账号/操作或凭据风险；阅读豁免不能覆盖。")
         if method not in {"GET", "HEAD", "POST"}:
             return denied("method", "请求方法不属于公开读取能力。")
@@ -333,10 +360,11 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
                 or not read_post_body(post_data, content_type)):
             return denied("body", "POST正文含写入/凭据/mutation、文件类型、无效格式或超出大小限制；不可豁免。")
         path_risk = False
-        if resource_type in {"document", "xhr", "fetch"}:
-            path_risk = risky_name(parsed.path)
-            if method in {"GET", "HEAD"} and resource_type == "document":
-                path_risk = bool(NAV_ACTION_PATH.search(unquote(parsed.path)))
+        if method in {"GET", "HEAD"} and resource_type == "document":
+            path_risk = bool(NAV_ACTION_PATH.search(unquote(parsed.path)))
+        elif method == "POST" and resource_type in {"document", "xhr", "fetch"}:
+            # /api/apply/jobs is a namespace; only /jobs/apply is an operation.
+            path_risk = terminal_verb_path(parsed.path)
         if path_risk:
             binding = request_binding(url, method, resource_type, post_data, content_type)
             if binding not in getattr(scope, "read_exceptions", ()):
@@ -680,6 +708,20 @@ class JobBrowser:
                 return {"url": self.scope.start_url, "title": "", "text": "", "links": [], "elements": [],
                         "kind": "page", "ready": False, "fetched_at": now_iso(), "text_truncated": False,
                         "read_error": "尚未成功导航，可打开授权 URL 或报告停止。", **self.diagnostics()}
+            if self.page.url.startswith("chrome-error:"):
+                # Chromium replaced the page with its own error view (blocked
+                # redirect, failed navigation). Report the real cause from
+                # policy/transport diagnostics instead of rejecting the
+                # chrome-error URL itself.
+                blocks = "; ".join(item["target"] + " · " + item.get("rule", "") + " · " + item["reason"]
+                                   for item in self.policy_blocks[-3:])
+                failures = "; ".join(item["target"] + " · " + item["reason"]
+                                     for item in (self._transport.failures() if self._transport else [])[-3:])
+                detail = blocks or failures or "见 network_errors。"
+                return {"url": self.scope.start_url, "title": "", "text": "", "links": [], "elements": [],
+                        "kind": "page", "ready": False, "fetched_at": now_iso(), "text_truncated": False,
+                        "read_error": "导航未成功（可能被权限拦截或连接失败）：" + detail +
+                        "若是重定向目标越域，可换范围内入口或由用户扩大范围。", **self.diagnostics()}
             url = navigation_url(self.page.url, self.scope)
             deadline = time.monotonic() + wait_seconds
             previous, stable = "", 0
@@ -768,8 +810,9 @@ class JobBrowser:
             connection_errors = self._transport.failures() if self._transport else []
             if not ready and blocked_loads:
                 errors.insert(0, "正文尚未取得；程序拦截：" + "; ".join(
-                    item["target"] + " · " + item["reason"] for item in blocked_loads[-3:]) +
-                    "。原样刷新/等待不能解除权限拦截；请报告具体边界或换范围内入口。")
+                    item["target"] + " · " + item.get("rule", "") + " · " + item["reason"]
+                    for item in blocked_loads[-3:]) +
+                    "。原样刷新/等待不能解除权限拦截；path_keyword 可在核实只读后请用户加精确阅读豁免，其他规则请换范围内入口。")
             elif not ready and connection_errors:
                 errors.insert(0, "正文尚未取得；连接诊断：" + "; ".join(
                     item["target"] + " · " + item["reason"] for item in connection_errors[-3:]))
