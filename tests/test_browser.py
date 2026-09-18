@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from assistant.browser import (SITE, BrowserScope, JobBrowser, allowed_request,
+from assistant.browser import (SITE, BrowserScope, JobBrowser, BrowserError, allowed_request,
                                element_actions, navigation_url, resolver_rules, is_detail, request_denial)
 from .browser_fixtures import SEARCH_PATH, ASSET_HOSTS
 from assistant.errors import AssistantError
@@ -17,6 +17,40 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_proxy_auth_failure_is_internal_not_a_retryable_network_outage(self):
+        from playwright.sync_api import Error as PlaywrightError
+        browser = JobBrowser(lambda: None, scope=BrowserScope("https://catalog.example"))
+        browser.page = Mock(url="about:blank")
+        browser._transport = Mock()
+        browser._transport.failures.return_value = []
+        browser.page.goto.side_effect = PlaywrightError("net::ERR_INVALID_AUTH_CREDENTIALS at https://catalog.example/?token=PRIVATE_SENTINEL")
+        with self.assertRaises(BrowserError) as caught:
+            browser.read(browser.scope.start_url)
+        self.assertEqual(caught.exception.kind, "internal")
+        self.assertFalse(caught.exception.retryable)
+        self.assertNotIn("PRIVATE_SENTINEL", str(caught.exception))
+        request = SimpleNamespace(url=browser.scope.start_url, method="GET", resource_type="document",
+                                  post_data=None, headers={}, failure="net::ERR_INVALID_AUTH_CREDENTIALS",
+                                  frame=browser.page.main_frame)
+        browser._http_status(SimpleNamespace(request=request, status=407))
+        browser._network_failure(request)
+        self.assertFalse(browser.network_errors)
+        self.assertTrue(browser.internal_errors)
+        browser.page.goto.side_effect = None
+        browser.page.goto.return_value = SimpleNamespace(status=407)
+        with self.assertRaises(BrowserError) as caught:
+            browser.read(browser.scope.start_url)
+        self.assertEqual(caught.exception.kind, "internal")
+        self.assertFalse(caught.exception.retryable)
+
+    def test_refresh_of_blank_page_explains_missing_navigation_not_domain_denial(self):
+        browser = JobBrowser(lambda: None)
+        browser.page = SimpleNamespace(url="about:blank")
+        with self.assertRaises(BrowserError) as caught:
+            browser.refresh()
+        self.assertEqual(caught.exception.kind, "interaction")
+        self.assertIn("重新打开任务URL", str(caught.exception))
+
     def test_static_dependencies_need_no_domain_list_but_grant_no_other_access(self):
         scope = BrowserScope("https://catalog.example/")
         url = "https://cdn-unlisted.example/assets/bundle?version=2"

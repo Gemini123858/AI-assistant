@@ -401,6 +401,7 @@ class JobBrowser:
         self.policy_blocks = []
         self._document_ok = False
         self._transport = None
+        self._proxy_auth_failed = False
 
     def diagnostics(self):
         connection_errors = self._transport.failures() if self._transport else []
@@ -555,6 +556,12 @@ class JobBrowser:
             code = request.failure or "unknown"
             if code == "net::ERR_BLOCKED_BY_CLIENT":
                 return
+            if code in {"net::ERR_INVALID_AUTH_CREDENTIALS", "net::ERR_PROXY_AUTH_UNSUPPORTED",
+                        "net::ERR_PROXY_AUTH_REQUESTED"} and self._transport:
+                self._proxy_auth_failed = True
+                self.internal_errors.append("浏览器连接认证异常：" + code +
+                    "；内部隧道不要求密码，请检查运行版本/代理配置；不是普通网络超时，勿原样循环重试。")
+                return
             if self._transport and any(item["kind"] == "permission" and
                     item["target"] == urlsplit(request.url).hostname for item in self._transport.failures()):
                 return  # Public-IP enforcement is a policy denial, not a network outage.
@@ -568,6 +575,11 @@ class JobBrowser:
         request = response.request
         if request.resource_type == "document" and request.frame == self.page.main_frame:
             self._document_ok = response.status < 400
+        if response.status == 407 and self._transport:
+            self._proxy_auth_failed = True
+            self.internal_errors.append("代理认证异常（HTTP 407）；当前内部隧道不要求密码，" +
+                "请检查运行版本/代理配置，不要将它当作网站登录要求或普通网络超时。")
+            return
         if (response.status >= 400 and request.resource_type in {"document", "script", "xhr", "fetch"}
                 and self.permitted(request)):
             self.network_errors.append({"target": self.target(request.url), "type": request.resource_type,
@@ -609,21 +621,32 @@ class JobBrowser:
         self._document_ok = False
         try:
             response = self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            if response is not None and response.status == 407 and self._transport:
+                raise BrowserError("代理认证异常（HTTP 407）；当前内部隧道不要求密码，" +
+                    "请检查运行版本/代理配置；不是普通网络超时。", "internal", False)
             if response is None and not same_document or response is not None and response.status >= 400:
                 raise BrowserError("页面返回错误 HTTP 状态，未视为有效内容。", "page_loading")
             self._document_ok = True
             return self.observe(wait_seconds=5)
         except AssistantError:
             raise
-        except (PlaywrightError, OSError, ValueError):
+        except (PlaywrightError, OSError, ValueError) as error:
             if self._transport and any(item["kind"] == "permission" and
                     item["target"] == urlsplit(url).hostname for item in self._transport.failures()):
                 raise BrowserError("域名的公网地址验证被拒绝；不是网站网络故障，详情见连接诊断。", "permission", False, 403) from None
             if any(item["type"] == "document" for item in self.policy_blocks) and not self.network_errors:
                 raise BrowserError("导航/重定向被任务权限阻断，不是网络不可达。", "permission", False, 403) from None
             if self.internal_errors:
-                raise BrowserError(self.internal_errors[-1], "internal") from None
-            raise BrowserError("页面导航失败或超时；模型可根据诊断选择重试或停止。", "network") from None
+                raise BrowserError(self.internal_errors[-1], "internal", not self._proxy_auth_failed) from None
+            # Preserve the actual browser error without copying the raw URL,
+            # query tokens, or credentials from Playwright's exception text.
+            code = re.search(r"net::ERR_[A-Z0-9_]+", str(error))
+            if code and code.group(0) in {"net::ERR_INVALID_AUTH_CREDENTIALS", "net::ERR_PROXY_AUTH_UNSUPPORTED",
+                                         "net::ERR_PROXY_AUTH_REQUESTED"} and self._transport:
+                raise BrowserError("浏览器连接认证异常：" + code.group(0) +
+                    "；内部隧道不要求密码，请检查运行版本/代理配置，不要原样循环重试。", "internal", False) from None
+            detail = code.group(0) if code else "导航等待超时" if isinstance(error, PlaywrightError) and "Timeout" in str(error) else "连接或导航失败"
+            raise BrowserError("页面导航失败：" + detail + "；结合连接诊断选择恢复或停止，根因未确定。", "network") from None
 
     def _clear_elements(self):
         for handle, _ in self._elements.values():
@@ -832,6 +855,8 @@ class JobBrowser:
         return self.observe()
 
     def refresh(self):
+        if self.page.url == "about:blank" or self.page.url.startswith("chrome-error:"):
+            raise BrowserError("尚无可刷新的成功页面；请重新打开任务URL，而不是刷新空白/错误页。", "interaction", False, 409)
         return self.read(self.page.url)
 
     def back(self):

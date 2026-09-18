@@ -1,8 +1,5 @@
 """Private HTTPS tunnels: connect only to resolved public IPs, keep TLS in Chromium."""
 
-import base64
-import hmac
-import secrets
 import select
 import socket
 import socketserver
@@ -20,9 +17,6 @@ class PublicHTTPSProxy:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._addresses, self._failures = {}, []
-        self.username, self.password = "browser", secrets.token_urlsafe(32)
-        self._authorization = "Basic " + base64.b64encode(
-            f"{self.username}:{self.password}".encode()).decode()
         owner = self
 
         class Handler(socketserver.BaseRequestHandler):
@@ -41,7 +35,6 @@ class PublicHTTPSProxy:
     @property
     def settings(self):
         return {"server": f"http://127.0.0.1:{self._server.server_address[1]}",
-                "username": self.username, "password": self.password,
                 "bypass": "<-loopback>"}
 
     def failures(self):
@@ -94,12 +87,9 @@ class PublicHTTPSProxy:
                     return
             header, _, initial_data = header.partition(b"\r\n\r\n")
             lines = header.decode("ascii").split("\r\n")
-            fields = dict(line.split(":", 1) for line in lines[1:] if ":" in line)
-            authorization = next((value.strip() for key, value in fields.items()
-                                  if key.lower() == "proxy-authorization"), "")
-            if not hmac.compare_digest(authorization, self._authorization):
-                client.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="browser"\r\nContent-Length: 0\r\n\r\n')
-                return
+            # This task-local public-IP relay has no account authority. Avoid
+            # an HTTP auth challenge and Playwright's origin-wide credentials;
+            # no auth coordination with the response interception is needed.
             method, authority, version = lines[0].split()
             raw_host, port = authority.rsplit(":", 1)
             if method != "CONNECT" or port != "443" or version not in {"HTTP/1.0", "HTTP/1.1"}:
