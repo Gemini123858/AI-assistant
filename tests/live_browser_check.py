@@ -23,6 +23,18 @@ from assistant.tasks import TASK_SYSTEM, TOOLS, Tasks, validate_result
 PROFILE = "合成测试画像（不是用户事实）：会 Python，有机器学习课程项目。其他学历、经验、地点偏好和可入职时间未知。"
 
 
+def browser_preflight():
+    """Check the executable before spending any paid calls; no network access."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True, channel="chromium",
+                                          args=["--no-proxy-server"])
+        try:
+            print("Chromium preflight passed:", browser.version, flush=True)
+        finally:
+            browser.close()
+
+
 class TracedModel:
     """Private synthetic-test diagnostics only; never capture credentials/headers."""
     def __init__(self, service):
@@ -199,6 +211,8 @@ def main():
                         help="Optional task cap inside the SAME cumulative run budget")
     parser.add_argument("--run-id", help="Reuse one synthetic test directory and cumulative budget across scenarios")
     parser.add_argument("--scenario", choices=["jobs", "docs", "recover", "network-stop", "vision"], default="jobs")
+    parser.add_argument("--job-urls", nargs=2,
+                        help="Focused jobs check using two already observed public detail URLs, without a new search")
     parser.add_argument("--popup-check", action="store_true",
                         help="Spend one of the SAME call budget on a synthetic promotion with real Kimi")
     parser.add_argument("--review-id", help="Review an existing synthetic run ID; --calls is its CUMULATIVE cap")
@@ -210,6 +224,15 @@ def main():
         parser.error("复核需要合法合成测试标识，不能同时运行推广检查。")
     if args.run_id and (not re.fullmatch(r"[a-f0-9]{32}", args.run_id) or args.review_id):
         parser.error("run-id 需要合法合成测试标识，不能与 review-id 混用。")
+    if args.job_urls and (args.scenario != "jobs" or args.review_id):
+        parser.error("job-urls 仅用于独立岗位详情测试。")
+    if args.job_urls:
+        from assistant.browser import BrowserScope, navigation_url
+        scope = BrowserScope(args.job_urls[0])
+        for url in args.job_urls:
+            navigation_url(url, scope)
+    if not args.review_id:
+        browser_preflight()
     config.data_dir = Path("data/live-browser-check") / (args.review_id or args.run_id or uuid.uuid4().hex)
     if args.review_id and not config.data_dir.is_dir():
         parser.error("合成测试记录不存在，不会创建空复核记录。")
@@ -239,11 +262,15 @@ def main():
                            "public_request": "合成测试：查询算法研究/实习岗位，自主选择检索策略，至少尝试一个组合查询（例如算法 实习），必要时调整查询。访问第二页及至少两份不同详情；不登录、不投递。读取后 analyze_results 再结束。",
                            "request": "这是合成测试。请查询算法研究/实习岗位，读取至少两份岗位详情。"
                                       "结合合成画像列出潜在匹配或待确认项，给出原文依据和缺失条件；不登录、不投递。"
-                                      f"最多{config.browser_calls}次模型调用，留一次用于 finish_task；区分入口成功和后续失败，不笼统声称全部访问失败。"}
+                                      f"最多{config.browser_calls}次模型调用，提前收尾并保留来源定位及纠正余量；区分入口成功和后续失败，不笼统声称全部访问失败。"}
         factory = None
+        if args.job_urls:
+            payload = {"start_url": args.job_urls[0],
+                       "public_request": "读取下列两份已观察到的公开岗位详情，完成后 analyze_results 结合合成画像分析；不要求重新搜索或翻页，不登录、不投递：" + "\n".join(args.job_urls),
+                       "request": "结合合成画像逐项说明这两份岗位的技能交集、硬性条件与优先项，未知条件保留。请给出实际岗位名称和可核查引用，不能把正式岗位直接等同必须有工作经验。"}
         if args.scenario == "docs":
             payload = {"start_url": "https://docs.python.org/3/library/urllib.parse.html",
-                       "public_request": "查询 Python 官方 urllib.parse 文档：urljoin 如何解析相对 URL？访问该文档的至少一个相关链接，记录实际来源，不访问其他域。用 findings 引用编号行，不需要画像分析。",
+                       "public_request": "查询 Python 官方 urllib.parse 文档：urljoin 如何解析相对 URL，基准 URL 的尾部斜线有何影响，以及绝对 URL 输入有哪些安全注意项？访问该文档的至少一个相关链接，记录实际来源，不访问其他域。用 findings 引用编号行，不需要画像分析。",
                        "request": "解释相对 URL 的尾部斜线差异及 urljoin 的安全注意项，只引用实际读取的来源。"}
         elif args.scenario in {"recover", "network-stop", "vision"}:
             from .browser_generic_smoke import START

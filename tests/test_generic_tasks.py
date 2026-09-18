@@ -80,6 +80,22 @@ class GenericTaskTests(unittest.TestCase):
         self.assertIn("ERR_ADDRESS_UNREACHABLE", json.dumps(model.calls[0], ensure_ascii=False))
         self.assertEqual(task["result"]["findings"][0]["quote"], "岗位列表")
 
+    def test_local_search_is_compact_and_survives_context_trimming(self):
+        search = call("search_source", {"page_id": "p1", "query": "岗位"})
+        model = self.runner([search, call("finish_task", result())])
+        delegate = model.complete_tools
+        def with_long_history(messages, tools, timeout=None):
+            if not model.calls:
+                messages.insert(1, {"role": "user", "content": "合成长上下文" * 30000})
+            return delegate(messages, tools, timeout)
+        with patch.object(model, "complete_tools", side_effect=with_long_history):
+            task = self.start_generic()
+        self.assertEqual(task["status"], "completed")
+        context = json.loads(model.calls[1][1]["content"])
+        self.assertEqual(context["recent_sources"][0]["numbered_lines"], [{"line": 1, "text": "岗位列表"}])
+        self.assertNotIn("elements", context["recent_sources"][0])
+        self.assertNotIn("links", context["recent_sources"][0])
+
     def test_failed_homepage_can_be_bypassed_without_homepage_workflow(self):
         self.runner([call("open_url", {"url": LIST}), call("finish_task", result())])
         self.tasks.browser_factory = RecoveringBrowser
@@ -241,6 +257,14 @@ class GenericTaskTests(unittest.TestCase):
         self.assertEqual(checked["jobs"][0]["title"], page["title"])
         self.assertEqual(checked["jobs"][0]["job_evidence"], "熟悉 Python")
         self.assertEqual(checked["jobs"][0]["profile_evidence"], [])
+        page["title"] = "招聘栏目"
+        page["text"] = "招聘栏目\n实际岗位名称\n熟悉 Python"
+        output["jobs"][0].update(title_line=2, line_start=3, line_end=3)
+        checked = validate_result(output, {"pages": [page], "memory": {"profile": "会 Python"}})
+        self.assertEqual(checked["jobs"][0]["title"], "实际岗位名称")
+        output["jobs"][0]["title_line"] = 4
+        with self.assertRaises(AssistantError):
+            validate_result(output, {"pages": [page], "memory": {"profile": "会 Python"}})
 
     def test_saved_source_keyword_search_returns_numbered_evidence_without_navigation(self):
         model = self.runner([call("analyze_results", {}),

@@ -14,11 +14,19 @@ from assistant.config import Config
 from assistant.errors import AssistantError
 from assistant.service import Service
 from assistant.storage import Store
-from .live_browser_check import PROFILE, TracedModel, controlled_browser_factory, review_saved, scenario_passed
+from .live_browser_check import PROFILE, TracedModel, browser_preflight, controlled_browser_factory, review_saved, scenario_passed
 from .test_tasks import DETAIL, ScriptModel, call, final_result
 
 
 class SavedReviewTests(unittest.TestCase):
+    def test_browser_preflight_checks_and_closes_browser_without_model_calls(self):
+        with patch("playwright.sync_api.sync_playwright") as factory, redirect_stdout(io.StringIO()):
+            runtime = factory.return_value.__enter__.return_value
+            browser_preflight()
+            runtime.chromium.launch.assert_called_once_with(headless=True, channel="chromium",
+                                                            args=["--no-proxy-server"])
+            runtime.chromium.launch.return_value.close.assert_called_once()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "data"

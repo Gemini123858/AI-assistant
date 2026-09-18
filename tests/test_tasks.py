@@ -259,7 +259,7 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(len(task["pages"]), 4)
         self.assertEqual([action["tool"] for action in task["actions"]],
                          ["open_url", "open_link", "observe_page", "fill_field", "scroll_page", "open_link"])
-        self.assertEqual([tool["function"]["name"] for tool in model.tools[-1]], ["read_source", "search_source", "finish_task"])
+        self.assertEqual([tool["function"]["name"] for tool in model.tools[-1]], ["finish_task"])
         self.assertNotIn("search_jobs", [tool["function"]["name"] for tool in model.tools[0]])
 
     def test_entire_group_validated_before_any_action(self):
