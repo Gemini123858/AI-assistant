@@ -5,8 +5,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from assistant.browser import (ASSET_HOSTS, CSRF_PATH, SEARCH_PATH, SITE, JobBrowser,
-                               allowed_request, element_actions, navigation_url, resolver_rules)
+from assistant.browser import (ASSET_HOSTS, CSRF_PATH, SEARCH_PATH, SITE, HONOR_SITE,
+                               HONOR_ASSET_HOSTS, BrowserScope, JobBrowser,
+                               allowed_request, element_actions, navigation_url, resolver_rules,
+                               honor_page_read, is_detail)
 from assistant.errors import AssistantError
 
 
@@ -16,6 +18,65 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_honor_audited_reads_are_not_blanket_post_or_navigation_grants(self):
+        tenant = "SU60ee9e002f9d247b98da489e"
+        origin = "https://" + HONOR_SITE
+        scope = BrowserScope(origin + "/" + tenant + "/mc/position/campus")
+        self.assertTrue(HONOR_ASSET_HOSTS <= scope.resource_domains)
+        for path, body in (("config/get", None), ("isLogin", ""),
+                           ("suite/config/home/navigation", None),
+                           ("positionInfo/listPosition", '{"postKey":"任意公开查询"}'),
+                           ("positionInfo/listSearchTerm/linkage", '{}'),
+                           ("positionInfo/listPositionDetail", '{"postId":"observed"}')):
+            with self.subTest(path=path):
+                url = origin + "/wecruit/" + path + "/" + tenant
+                self.assertTrue(allowed_request(url, "POST", "xhr", body, scope))
+                self.assertTrue(allowed_request(url + "?iSaJAx=isAjax&request_locale=zh_CN", "POST", "xhr", body, scope))
+                self.assertFalse(allowed_request(url, "POST", "document", body, scope))
+                self.assertFalse(allowed_request(url.replace(HONOR_SITE, "foreign.example"), "POST", "xhr", body, scope))
+        for path in ("collect/position/create", "user/info/detail", "positionInfo/deliver", "positionInfo/listPosition/extra"):
+            self.assertFalse(allowed_request(origin + "/wecruit/" + path + "/" + tenant, "POST", "xhr", '{}', scope))
+        url = origin + "/wecruit/positionInfo/listPosition/" + tenant
+        for body in ('{"action":"delete"}', '{"upload":"x"}', 'mutation { delete }', 'x' * 65537):
+            self.assertFalse(allowed_request(url, "POST", "xhr", body, scope))
+        self.assertFalse(allowed_request(url, "POST", "xhr", '{}', BrowserScope()))
+        with self.assertRaises(AssistantError):
+            navigation_url("https://as.alipayobjects.com/", scope)
+
+    def test_honor_list_and_detail_response_validation_and_retry(self):
+        origin = "https://" + HONOR_SITE
+        tenant = "SU60ee9e002f9d247b98da489e"
+        browser = JobBrowser(lambda: None, scope=BrowserScope(origin))
+        url = origin + "/wecruit/positionInfo/listPosition/" + tenant
+        self.assertEqual(honor_page_read(origin + "/" + tenant + "/mc/position/campus"), "listPosition")
+        self.assertTrue(is_detail(origin + "/" + tenant + "/mc/detail?postId=observed&recruitType=campus"))
+        self.assertFalse(is_detail(origin + "/" + tenant + "/mc/position/campus"))
+        for body in ({"state": "500", "data": {}}, {"state": "200", "data": {}}, []):
+            browser._response(SimpleNamespace(url=url, status=200, json=lambda: body))
+            self.assertNotIn("listPosition", browser._honor_verified)
+            self.assertTrue(browser.response_errors)
+        # A verified empty array is a real zero-result response, not a blank UI.
+        good = {"state": "200", "data": {"pageForm": {"pageData": []}}}
+        browser._response(SimpleNamespace(url=url, status=200, json=lambda: good))
+        self.assertIn("listPosition", browser._honor_verified)
+        self.assertFalse(browser.response_errors)
+        browser._response(SimpleNamespace(url=url, status=503))
+        self.assertNotIn("listPosition", browser._honor_verified)
+        detail = url.replace("listPosition/", "listPositionDetail/")
+        browser._response(SimpleNamespace(url=detail, status=200, json=lambda: {"state": 200, "data": {"postName": "软件工程师"}}))
+        self.assertIn("listPositionDetail", browser._honor_verified)
+
+    def test_honor_inflight_request_invalidates_previous_read_proof(self):
+        browser = JobBrowser(lambda: None, scope=BrowserScope("https://" + HONOR_SITE))
+        browser._honor_verified.add("listPosition")
+        route = Mock()
+        route.request = SimpleNamespace(url="https://" + HONOR_SITE + "/wecruit/positionInfo/listPosition/SU60ee9e002f9d247b98da489e",
+                                        method="POST", resource_type="xhr", post_data='{}')
+        browser._route(route)
+        self.assertNotIn("listPosition", browser._honor_verified)
+        self.assertIn("listPosition", browser._honor_seen)
+        route.continue_.assert_called_once()
+
     def test_decorative_label_change_does_not_stale_but_write_change_still_denied(self):
         browser = JobBrowser(lambda: None)
         url = "https://" + SITE + "/experienced/position"

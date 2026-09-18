@@ -24,11 +24,44 @@ ASSET_HOSTS = {
 }
 SEARCH_PATH = "/api/v1/search/job/posts"
 CSRF_PATH = "/api/v1/csrf/token"
+HONOR_SITE = "career.honor.com"
+# Audited from the official anonymous recruitment frontend. These are query
+# capabilities, not a blanket /wecruit/ grant or a model-chosen action sequence.
+HONOR_ASSET_HOSTS = {"as.alipayobjects.com", "at.alicdn.com", "wecruit-cdn.hotjob.cn"}
+HONOR_READ_POST = re.compile(
+    r"/wecruit/(?:suite/config/home/navigation|config/get|isLogin|"
+    r"positionInfo/(?:listSearchTerm(?:/linkage)?|listPosition|listPositionDetail))"
+    r"/SU[0-9a-f]{24}/?")
+
+
+def honor_job_read(url):
+    parsed = urlsplit(url)
+    if parsed.hostname != HONOR_SITE:
+        return None
+    match = re.fullmatch(r"/wecruit/positionInfo/(listPosition|listPositionDetail)/SU[0-9a-f]{24}/?", parsed.path)
+    return match.group(1) if match else None
+
+
+def honor_page_read(url):
+    parsed = urlsplit(url)
+    if parsed.hostname != HONOR_SITE:
+        return None
+    if re.fullmatch(r"/SU[0-9a-f]{24}/(?:mc|pc)/position/(?:campus|social)/?", parsed.path):
+        return "listPosition"
+    if re.fullmatch(r"/SU[0-9a-f]{24}/(?:mc|pc)/detail/?", parsed.path):
+        return "listPositionDetail"
+    return None
+
+
 READ_API = re.compile(r"/(?:api/v1/(?:common/setting|ip/location|website/agent/config|"
                       r"config/job/filters/[0-9]+|job/posts/[0-9]+)|people-suite/next-sdk/api/notice)/?")
 
 # Fixed, read-only DOM inspection code. Models never supply selectors or JavaScript.
-ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,summary,[role="button"],[role="tab"],[role="menuitem"],[role="link"],[role="checkbox"],[tabindex],[class*="pagination"] li'
+ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,summary,[onclick],[role="button"],[role="tab"],[role="menuitem"],[role="link"],[role="checkbox"],[tabindex],[class*="pagination"] li'
+# Read declared React click handlers without executing them or exposing props.
+CLICKABLE_INFO = r"""e => !!e.onclick || Object.keys(e).some(k =>
+    /^(?:__reactProps\$|__reactEventHandlers\$)/.test(k) &&
+    e[k] && typeof e[k].onClick === 'function')"""
 ELEMENT_INFO = """e => {
     const visible = !!e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
     const parent = e.closest('[role="search"], [class*="search" i]');
@@ -89,6 +122,8 @@ class BrowserScope:
         resources = set(self.domains)
         if SITE in self.domains:
             resources.update(ASSET_HOSTS)
+        if HONOR_SITE in self.domains:
+            resources.update(HONOR_ASSET_HOSTS)
         resources.update(normalize_domain(item) for item in (resource_domains or []))
         self.resource_domains = frozenset(resources)
         self.start_url = navigation_url(start_url, self)
@@ -171,7 +206,8 @@ def navigation_url(value, scope=None):
 
 
 def is_detail(url):
-    return bool(re.fullmatch(r"/experienced/position/[0-9]+/detail", urlsplit(url).path))
+    return (bool(re.fullmatch(r"/experienced/position/[0-9]+/detail", urlsplit(url).path))
+            or honor_page_read(url) == "listPositionDetail")
 
 
 def write_query(query):
@@ -219,6 +255,11 @@ def allowed_request(url, method, resource_type, post_data=None, scope=None):
                 return True
         if scope and parsed.hostname in scope.domains:
             navigation_url(url, scope)
+            if (parsed.hostname == HONOR_SITE and method == "POST"
+                    and resource_type in {"xhr", "fetch"}
+                    and HONOR_READ_POST.fullmatch(parsed.path)):
+                # Navigation/config/status queries legitimately have no body.
+                return post_data in (None, "") or read_post_body(post_data)
             endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
             if (method == "POST" and resource_type in {"xhr", "fetch", "document"}
                     and endpoint in scope.read_post_urls):
@@ -305,6 +346,8 @@ class JobBrowser:
         self.policy_blocks = []
         self._document_ok = False
         self._search_seen = False
+        self._honor_verified = set()
+        self._honor_seen = set()
 
     def diagnostics(self):
         return {"network_errors": self.network_errors[-12:], "policy_blocks": self.policy_blocks[-12:],
@@ -374,6 +417,10 @@ class JobBrowser:
     def _route(self, route):
         request = route.request
         if allowed_request(request.url, request.method, request.resource_type, request.post_data, self.scope):
+            kind = honor_job_read(request.url)
+            if kind:
+                self._honor_seen.add(kind)
+                self._honor_verified.discard(kind)
             route.continue_()
         else:
             self.blocked += 1
@@ -383,6 +430,8 @@ class JobBrowser:
             self.policy_blocks = self.policy_blocks[-50:]
             if urlsplit(request.url).path == SEARCH_PATH:
                 self.read_errors.append("岗位检索请求超出已验证范围，未报告为零岗位。")
+            if honor_job_read(request.url):
+                self.read_errors.append("必要岗位读取 POST 被权限策略阻断；不是零岗位或网络故障。")
             route.abort()
 
     def _redirect_response(self, event):
@@ -445,6 +494,28 @@ class JobBrowser:
 
     def _response(self, response):
         parsed = urlsplit(response.url)
+        kind = honor_job_read(response.url)
+        if kind:
+            self._honor_seen.add(kind)
+            self._honor_verified.discard(kind)
+            try:
+                body = response.json() if response.status == 200 else None
+                data = body.get("data") if isinstance(body, dict) else None
+                valid = (isinstance(body, dict) and str(body.get("state")) == "200"
+                         and isinstance(data, dict))
+                if kind == "listPosition":
+                    valid = (valid and isinstance(data.get("pageForm"), dict)
+                             and isinstance(data["pageForm"].get("pageData"), list))
+                else:
+                    valid = valid and bool(data.get("postName"))
+                if valid:
+                    self._honor_verified.add(kind)
+                    self.response_errors.pop(parsed.path, None)
+                else:
+                    self.response_errors[parsed.path] = f"荣耀岗位读取响应未验证（HTTP {response.status}）；不能视为零岗位。"
+            except Exception:
+                self.response_errors[parsed.path] = "荣耀岗位读取接口响应未能验证；不能视为零岗位。"
+            return
         if parsed.hostname != SITE:
             return
         path = parsed.path
@@ -472,7 +543,7 @@ class JobBrowser:
 
     def _finished(self, request):
         parsed = urlsplit(request.url)
-        if (parsed.hostname == SITE and
+        if (honor_job_read(request.url) or parsed.hostname == SITE and
                 (parsed.path == SEARCH_PATH or re.fullmatch(r"/api/v1/job/posts/[0-9]+", parsed.path))):
             response = request.response()
             if response is not None:
@@ -487,6 +558,8 @@ class JobBrowser:
         self.response_errors = {}
         self.search_verified = False
         self._search_seen = False
+        self._honor_verified.clear()
+        self._honor_seen.clear()
         self.network_errors = []
         self.policy_blocks = []
         before = urlsplit(self.page.url)
@@ -541,12 +614,19 @@ class JobBrowser:
                     useful = useful and "职位要求" in text
                 if self._search_seen:
                     useful = useful and self.search_verified
+                if urlsplit(url).hostname == HONOR_SITE:
+                    page_read = honor_page_read(url)
+                    required = self._honor_seen | ({page_read} if page_read else set())
+                    useful = useful and required <= self._honor_verified
                 stable = stable + 1 if useful and text == previous else 0
                 if stable >= 2:
                     break
                 previous = text
                 self.page.wait_for_timeout(300)
             errors = [*self.read_errors, *self.response_errors.values()]
+            required = honor_page_read(url)
+            if required and required not in self._honor_verified and not errors:
+                errors.append("页面框架已打开，但必要岗位读取 POST 尚未验证；不能视为零岗位。")
             # A failed hydration/analytics script need not invalidate already
             # rendered article text. Keep failures visible; ready covers only
             # the current text snapshot, not interactive completeness.
@@ -574,12 +654,22 @@ class JobBrowser:
             self._observation += 1
             self._element_url = final
             elements = []
-            for handle in self.page.query_selector_all(ELEMENT_SELECTOR):
+            candidates = self.page.evaluate_handle("""selector => {
+                const declared = """ + CLICKABLE_INFO + """;
+                return Array.from(document.querySelectorAll('*')).filter(e =>
+                    e.matches(selector) || declared(e));
+            }""", ELEMENT_SELECTOR)
+            try:
+                handles = list(candidates.get_properties().values())
+            finally:
+                candidates.dispose()
+            for handle in handles:
                 if len(elements) >= 200:
                     handle.dispose()
                     continue
                 try:
                     info = handle.evaluate(ELEMENT_INFO)
+                    info["clickable"] = handle.evaluate(CLICKABLE_INFO)
                 except PlaywrightError:
                     try:
                         handle.dispose()
@@ -623,8 +713,10 @@ class JobBrowser:
         handle, expected = self._elements[identity]
         try:
             actual = handle.evaluate(ELEMENT_INFO)
+            actual["clickable"] = handle.evaluate(CLICKABLE_INFO)
             critical = ("connected", "tag", "role", "href", "type", "name", "form", "form_method", "form_action")
             if (not actual.get("connected") or any(actual.get(k) != expected.get(k) for k in critical)
+                    or (expected.get("clickable") and not actual.get("clickable"))
                     or navigation_url(self.page.url, self.scope) != self._element_url):
                 raise AssistantError("元素已变化，请重新观察页面，未执行动作。", 409)
             if action not in element_actions(actual, navigation_url(self.page.url, self.scope), self.scope):
@@ -706,6 +798,8 @@ class JobBrowser:
         self.check()
         self.network_errors, self.policy_blocks, self.read_errors, self.response_errors = [], [], [], {}
         self._search_seen, self.search_verified = False, False
+        self._honor_verified.clear()
+        self._honor_seen.clear()
         response = self.page.go_back(wait_until="domcontentloaded", timeout=20000)
         if response is None or response.status >= 400:
             raise BrowserError("返回页面失败，可观察当前页面或改用 URL。", "page_loading")

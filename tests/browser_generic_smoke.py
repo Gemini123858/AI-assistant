@@ -3,7 +3,7 @@
 from urllib.parse import urlsplit
 from unittest.mock import patch
 
-from assistant.browser import BrowserScope, JobBrowser, allowed_request
+from assistant.browser import BrowserScope, JobBrowser, allowed_request, HONOR_SITE
 from assistant.errors import AssistantError
 
 
@@ -15,7 +15,12 @@ HTML = """<!doctype html><html lang="zh"><h1>公开资料目录</h1>
 <label><input type="checkbox">仅开放资料</label></div>
 <a href="/articles/graph">图结构资料</a><form method="post" action="/api/save"><input placeholder="姓名"><button>保存</button></form>
 <button type="button" onclick="fetch('/api/save',{method:'POST',body:'{}'})">发送</button>
-<script>fetch('https://127.0.0.1/private');fetch('/api/save',{method:'POST',body:'{}'});</script></html>"""
+<div id="react-card">React 无角色资料卡片</div><div onclick="location.href='/articles/graph'">原生无角色卡片</div>
+<script>fetch('https://127.0.0.1/private');fetch('/api/save',{method:'POST',body:'{}'});
+const card=document.querySelector('#react-card');
+card['__reactProps$synthetic']={onClick:()=>location.href='/articles/graph'};
+card.addEventListener('click',card['__reactProps$synthetic'].onClick);
+</script></html>"""
 
 
 class LocalBrowser(JobBrowser):
@@ -53,6 +58,19 @@ def element(page, label):
     return next(e for e in page["elements"] if e["label"] == label)
 
 
+class HonorResponseBrowser(JobBrowser):
+    def _route(self, route):
+        request = route.request
+        if not allowed_request(request.url, request.method, request.resource_type, request.post_data, self.scope):
+            return super()._route(route)
+        if request.method == "POST":
+            route.fulfill(status=200, content_type="application/json", body=self.response_body)
+        else:
+            route.fulfill(status=200, content_type="text/html; charset=utf-8", body="""<h1>职位列表框架</h1>
+<script>fetch('/wecruit/positionInfo/listPosition/SU60ee9e002f9d247b98da489e',
+{method:'POST',body:'{}'}).then(r=>r.json());</script>""")
+
+
 def main():
     scope = BrowserScope(START)
     with patch("assistant.browser.resolver_rules", return_value="MAP * ~NOTFOUND"):
@@ -61,6 +79,10 @@ def main():
             assert first["ready"] and first["kind"] == "page"
             assert browser.blocked >= 2
             assert not first["network_errors"], "policy blocks must not become network failures"
+            assert browser.click(element(first, "React 无角色资料卡片")["id"])["ready"]
+            first = browser.read(START)
+            assert browser.click(element(first, "原生无角色卡片")["id"])["url"] == DETAIL
+            first = browser.read(START)
             search_id = element(first, "搜索资料")["id"]
             browser.page.locator('input[type="search"]').evaluate("e=>e.placeholder='搜索资料（已更新）'")
             first = browser.fill(search_id, "公开查询", False)
@@ -106,6 +128,13 @@ def main():
                     assert getattr(error, "kind", None) == "permission"
                 assert any("重定向" in p["reason"] for p in browser.policy_blocks), "redirect response was not guarded"
                 assert not any(e["code"] == "net::ERR_BLOCKED_BY_CLIENT" for e in browser.network_errors)
+        honor = "https://" + HONOR_SITE + "/SU60ee9e002f9d247b98da489e/mc/position/campus"
+        with HonorResponseBrowser(lambda: None, scope=BrowserScope(honor)) as browser:
+            browser.response_body = '{"state":"500","data":{}}'
+            failed = browser.read(honor)
+            assert not failed["ready"] and "不能视为零岗位" in failed["read_error"]
+            browser.response_body = '{"state":"200","data":{"pageForm":{"pageData":[]}}}'
+            assert browser.refresh()["ready"], "A valid empty list must be distinguishable from failed reads"
     print("Offline generic Chromium passed: second-site DOM, free search/Enter, select/check, back/refresh/wait, screenshot, blank observation, redirect and write boundaries.")
 
 
