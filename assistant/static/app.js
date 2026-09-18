@@ -238,6 +238,9 @@ function taskCard(task) {
     const states = { running: "执行中", success: "动作已执行", incomplete: "正文尚不可读", failed: "失败", interrupted: "已中止，结果未验证" };
     for (const action of task.actions) {
       actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error_kind ? " · " + action.error_kind : ""}${action.error ? " · " + action.error : ""}`));
+      if (action.read_error) actions.append(node("p", "notice", action.read_error));
+      for (const item of action.network_errors || []) actions.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
+      for (const item of action.connection_errors || []) actions.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
       if (action.loop_warning) actions.append(node("p", "caption", action.loop_warning));
       if (action.remaining) actions.append(node("p", "caption", `动作结束时剩余：模型 ${action.remaining.calls} 次 / 动作 ${action.remaining.steps} 步 / 时间 ${action.remaining.seconds} 秒`));
     }
@@ -268,6 +271,7 @@ function taskCard(task) {
     card.append(node("p", "notice", `历史失败/恢复线索${error.step ? "（步骤" + error.step + "）" : ""}：${error.kind || "读取失败"} · ${error.url} · ${error.error}`));
     for (const item of error.network_errors || []) card.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
     for (const item of error.policy_blocks || []) card.append(node("p", "caption", `主动拦截（不是网络故障）：${item.target} · ${item.reason}`));
+    for (const item of error.connection_errors || []) card.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
   }
   const evidence = node("details", "task-pages");
   evidence.append(node("summary", "", "查看已访问页面及保存的正文"));
@@ -288,6 +292,7 @@ function taskCard(task) {
       if (page.content_note) evidence.append(node("p", "caption", page.content_note));
       if (page.read_warning) evidence.append(node("p", "notice", page.read_warning));
       for (const item of page.network_errors || []) evidence.append(node("p", "caption", `网络失败：${item.target} · ${item.code}`));
+      for (const item of page.connection_errors || []) evidence.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
       for (const item of page.policy_blocks || []) {
         evidence.append(node("p", "caption", `主动拦截：${item.target} · ${item.rule || "历史规则"} · ${item.reason}`));
         const button = exceptionButton(item);

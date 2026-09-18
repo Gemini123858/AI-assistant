@@ -17,6 +17,22 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_static_dependencies_need_no_domain_list_but_grant_no_other_access(self):
+        scope = BrowserScope("https://catalog.example/")
+        url = "https://cdn-unlisted.example/assets/bundle?version=2"
+        for kind in ("script", "stylesheet", "image", "font", "media"):
+            for method in ("GET", "HEAD"):
+                self.assertTrue(allowed_request(url, method, kind, scope=scope))
+            self.assertFalse(allowed_request(url, "POST", kind, '{}', scope))
+            self.assertFalse(allowed_request(url.replace("https:", "http:"), "GET", kind, scope=scope))
+            self.assertFalse(allowed_request(url.replace("cdn-unlisted.example", "127.0.0.1"), "GET", kind, scope=scope))
+        for kind in ("document", "xhr", "fetch"):
+            self.assertFalse(allowed_request(url, "GET", kind, scope=scope))
+        restricted = BrowserScope(scope.start_url, resource_domains=["cdn-unlisted.example"],
+                                  blocked_urls=["https://cdn-unlisted.example/assets/bundle"])
+        self.assertFalse(allowed_request(url, "GET", "script", scope=restricted))
+        self.assertFalse(allowed_request(url + "&action=delete", "GET", "script", scope=scope))
+
     def test_action_themed_articles_and_link_titles_are_readable(self):
         scope = BrowserScope("https://catalog.example/")
         for path in ("/docs/create-react-app", "/blog/how-to-delete-facebook-account", "/wiki/Edit"):

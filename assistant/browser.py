@@ -13,10 +13,12 @@ from urllib.request import build_opener, Request
 from .errors import AssistantError
 from .storage import now_iso
 from .llm import NoRedirect
+from .browser_network import PublicHTTPSProxy
 
 
 SITE = "jobs.bytedance.com"
 ENTRY = "https://jobs.bytedance.com/experienced/"
+STATIC_RESOURCE_TYPES = frozenset({"script", "stylesheet", "image", "font", "media"})
 # Fixed, read-only DOM inspection code. Models never supply selectors or JavaScript.
 ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,summary,[onclick],[role="button"],[role="tab"],[role="menuitem"],[role="link"],[role="checkbox"],[tabindex],[class*="pagination"] li'
 # Read declared React click handlers without executing them or exposing props.
@@ -298,6 +300,10 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
         domains = scope.domains if scope else {SITE}
         resources = scope.resource_domains if scope else {SITE}
         hosts = domains if resource_type == "document" or method == "POST" else resources
+        if method in {"GET", "HEAD"} and resource_type in STATIC_RESOURCE_TYPES:
+            # Browser-reported subresources, not a URL-extension or CDN whitelist.
+            # The transport separately validates and pins every host's public IPs.
+            hosts = {normalize_domain(parsed.hostname)}
         url = request_url(url, hosts)
         if blocked_url(url, scope):
             return denied("explicit_deny", "命中用户显式禁止路径；需用户移除禁令，阅读豁免无效。")
@@ -305,7 +311,7 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
             return denied("query_operation", "查询参数包含账号/操作或凭据风险；阅读豁免不能覆盖。")
         if method not in {"GET", "HEAD", "POST"}:
             return denied("method", "请求方法不属于公开读取能力。")
-        if resource_type not in {"document", "xhr", "fetch", "script", "stylesheet", "image", "font"}:
+        if resource_type not in {"document", "xhr", "fetch"} | STATIC_RESOURCE_TYPES:
             return denied("resource_type", "资源类型不属于公开读取能力。")
         if method == "POST" and (resource_type not in {"document", "xhr", "fetch"}
                 or any(kind in content_type.lower() for kind in ("multipart/", "application/octet-stream"))
@@ -339,29 +345,35 @@ def allowed_request(url, method, resource_type, post_data=None, scope=None, cont
     return request_denial(url, method, resource_type, post_data, scope, content_type) is None
 
 
+def public_addresses(host, mode="system"):
+    """Resolve once and return only public literal IPs, rejecting mixed answers."""
+    if mode == "google":
+        # Explicit opt-in, fixed DNS endpoint. No user-provided resolver/host.
+        request = Request("https://dns.google/resolve?" + urlencode({
+                          "name": host, "type": "A", "edns_client_subnet": "0.0.0.0/0"}),
+                          headers={"Accept": "application/dns-json"})
+        with build_opener(NoRedirect()).open(request, timeout=5) as response:
+            raw = response.read(64001)
+        if len(raw) > 64000:
+            raise AssistantError("DNS 响应过大，已拒绝访问。", 502)
+        answer = json.loads(raw)
+        if answer.get("Status") != 0:
+            raise AssistantError("公开 DNS 解析失败。", 502)
+        ips = {item["data"] for item in answer.get("Answer", []) if item.get("type") == 1}
+    else:
+        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        ips = {address[4][0] for address in addresses}
+    if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+        raise AssistantError("域名解析到非公开地址，已拒绝。请核对 DNS/代理解析；尚不能确定底层原因。", 403)
+    return sorted(ips, key=lambda ip: (":" in ip, ip))
+
+
 def resolver_rules(hosts, mode="system", check=lambda: None):
-    """Pin approved hosts to public IPs for this fresh browser, avoiding DNS TOCTOU."""
+    """Legacy fixed-host helper; runtime uses dynamic public-IP HTTPS tunnels."""
     rules = []
     for host in sorted(hosts):
         check()
-        if mode == "google":
-            # Explicit opt-in, fixed DNS endpoint. No user-provided resolver/host.
-            request = Request("https://dns.google/resolve?" + urlencode({
-                              "name": host, "type": "A", "edns_client_subnet": "0.0.0.0/0"}),
-                              headers={"Accept": "application/dns-json"})
-            with build_opener(NoRedirect()).open(request, timeout=5) as response:
-                raw = response.read(64001)
-            if len(raw) > 64000:
-                raise AssistantError("DNS 响应过大，已拒绝访问。", 502)
-            answer = json.loads(raw)
-            if answer.get("Status") != 0:
-                raise AssistantError("公开 DNS 解析失败。", 502)
-            ips = {item["data"] for item in answer.get("Answer", []) if item.get("type") == 1}
-        else:
-            addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-            ips = {address[4][0] for address in addresses}
-        if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
-            raise AssistantError("授权域名解析到非公开地址，已拒绝。请核对 DNS/代理解析；尚不能确定底层原因。", 403)
+        ips = public_addresses(host, mode)
         # Chromium resolver rules support bracketed IPv6; prefer IPv4 where available.
         chosen = sorted(ips, key=lambda ip: (":" in ip, ip))[0]
         if ":" in chosen:
@@ -388,9 +400,12 @@ class JobBrowser:
         self.internal_errors = []
         self.policy_blocks = []
         self._document_ok = False
+        self._transport = None
 
     def diagnostics(self):
+        connection_errors = self._transport.failures() if self._transport else []
         return {"network_errors": self.network_errors[-12:], "policy_blocks": self.policy_blocks[-12:],
+                "connection_errors": connection_errors,
                 "internal_errors": self.internal_errors[-5:],
                 "pending_data_requests": list(self._pending_data.values())[-12:],
                 "data_responses": self.data_responses[-12:], "data_errors": list(self.data_errors.values())[-12:]}
@@ -422,19 +437,13 @@ class JobBrowser:
     def __enter__(self):
         try:
             from playwright.sync_api import sync_playwright
-            try:
-                rules = resolver_rules(self.scope.resource_domains, self.dns_mode, self.check)
-            except AssistantError as error:
-                if error.status == 403:
-                    raise
-                raise BrowserError(str(error), "network") from None
-            except (OSError, ValueError):
-                raise BrowserError("公开域名解析或 DNS 连接失败；可重启浏览器或报告停止。", "network") from None
+            self.check()
+            self._transport = PublicHTTPSProxy(lambda host: public_addresses(host, self.dns_mode), normalize_domain)
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(
                 headless=True, channel="chromium",
-                args=["--host-resolver-rules=" + rules, "--disable-quic",
-                      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--no-proxy-server"])
+                proxy=self._transport.settings,
+                args=["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
             self.context = self.browser.new_context(service_workers="block", accept_downloads=False,
                                                     locale="zh-CN", permissions=[])
             self.context.route("**/*", self._route)
@@ -474,6 +483,9 @@ class JobBrowser:
                 self.playwright.stop()
             except Exception:
                 pass
+        if self._transport is not None:
+            self._transport.close()
+            self._transport = None
 
     def _route(self, route):
         request = route.request
@@ -543,6 +555,9 @@ class JobBrowser:
             code = request.failure or "unknown"
             if code == "net::ERR_BLOCKED_BY_CLIENT":
                 return
+            if self._transport and any(item["kind"] == "permission" and
+                    item["target"] == urlsplit(request.url).hostname for item in self._transport.failures()):
+                return  # Public-IP enforcement is a policy denial, not a network outage.
             self.network_errors.append({"target": self.target(request.url), "type": request.resource_type,
                                         "code": code[:100]})
             self.network_errors = self.network_errors[-50:]
@@ -587,6 +602,8 @@ class JobBrowser:
         self.data_responses.clear()
         self.network_errors = []
         self.policy_blocks = []
+        if self._transport:
+            self._transport.clear_failures()
         before = urlsplit(self.page.url)
         same_document = (before._replace(fragment="") == urlsplit(url)._replace(fragment="") and self._document_ok)
         self._document_ok = False
@@ -599,6 +616,9 @@ class JobBrowser:
         except AssistantError:
             raise
         except (PlaywrightError, OSError, ValueError):
+            if self._transport and any(item["kind"] == "permission" and
+                    item["target"] == urlsplit(url).hostname for item in self._transport.failures()):
+                raise BrowserError("域名的公网地址验证被拒绝；不是网站网络故障，详情见连接诊断。", "permission", False, 403) from None
             if any(item["type"] == "document" for item in self.policy_blocks) and not self.network_errors:
                 raise BrowserError("导航/重定向被任务权限阻断，不是网络不可达。", "permission", False, 403) from None
             if self.internal_errors:
@@ -709,6 +729,18 @@ class JobBrowser:
                                             "filter" if info["filter"] else "pagination" if info["pagination"] else "page",
                                  "restriction": "未知或可能写入的控件；需核实副作用/单独授权" if not actions else None})
                 self._elements[identity] = (handle, info)
+            blocked_loads = [item for item in self.policy_blocks if item["type"] in
+                             STATIC_RESOURCE_TYPES | {"document", "xhr", "fetch"}]
+            connection_errors = self._transport.failures() if self._transport else []
+            if not ready and blocked_loads:
+                errors.insert(0, "正文尚未取得；程序拦截：" + "; ".join(
+                    item["target"] + " · " + item["reason"] for item in blocked_loads[-3:]) +
+                    "。原样刷新/等待不能解除权限拦截；请报告具体边界或换范围内入口。")
+            elif not ready and connection_errors:
+                errors.insert(0, "正文尚未取得；连接诊断：" + "; ".join(
+                    item["target"] + " · " + item["reason"] for item in connection_errors[-3:]))
+            elif not ready and not text.strip() and self._document_ok:
+                errors.insert(0, "主文档已返回，但可见正文为空；结合脚本/数据请求诊断判断，不等于零结果。")
             return {"url": final, "title": title[:300], "text": window,
                     "text_start": text_start, "total_characters": len(text),
                     "text_truncated": text_start > 0 or len(text) > text_start + text_length,
@@ -811,6 +843,8 @@ class JobBrowser:
         navigation_url(history["entries"][index]["url"], self.scope)
         self.check()
         self.network_errors, self.policy_blocks, self.read_errors = [], [], []
+        if self._transport:
+            self._transport.clear_failures()
         self.data_errors.clear()
         self._pending_data.clear()
         self.data_responses.clear()
