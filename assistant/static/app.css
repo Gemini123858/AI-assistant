@@ -47,7 +47,7 @@ input::placeholder,textarea::placeholder { color:#939d96; }
 .section-heading { display:flex; align-items:center; justify-content:space-between; margin:25px 0 15px; gap:10px; }
 .count { font-size:11px; background:#e9ede7; padding:2px 7px; border-radius:5px; margin-left:6px; }
 .message-list { display:grid; gap:13px; }
-.message-card { background:white; border:1px solid var(--line); border-radius:13px; padding:19px; scroll-margin:20px; }
+.message-card { background:white; border:1px solid var(--line); border-radius:13px; padding:19px; scroll-margin:20px; min-width:0; overflow-wrap:anywhere; }
 .card-top { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
 .card-title { display:flex; align-items:center; gap:9px; font-size:12px; color:var(--muted); }
 .card-title label { margin:0; display:flex; align-items:center; gap:6px; }

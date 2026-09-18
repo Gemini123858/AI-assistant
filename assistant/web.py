@@ -131,6 +131,12 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
             raise AssistantError("请先启用同步并建立新邮件基线。", 409)
         return jsonify(**mail.sync())
 
+    @app.post("/api/mail/latest")
+    def mail_latest():
+        if body() != {"confirm": True}:
+            raise AssistantError("读取最新一封已有邮件需要明确确认，不会批量导入历史。")
+        return jsonify(mail=mail.read_latest())
+
     @app.post("/api/mail/triage")
     def mail_triage():
         if body():

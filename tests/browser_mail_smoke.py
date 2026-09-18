@@ -45,12 +45,19 @@ def main():
                     page.locator("#source-dialog[open]").wait_for()
                     assert "我正在找实习" in page.locator("#source-body").inner_text()
                     page.locator("#close-dialog").click()
+                    page.locator("#mail-list .message-card").first.evaluate("""e => {
+                        const link = document.createElement('p'); link.className = 'caption';
+                        link.textContent = 'https://public.example/' + 'a'.repeat(200); e.append(link);
+                    }""")
                     output = Path("data/browser-check")
                     output.mkdir(parents=True, exist_ok=True)
                     page.screenshot(path=str(output/"v03-mail-desktop.png"))
                     page.set_viewport_size({"width": 390, "height": 844})
                     page.screenshot(path=str(output/"v03-mail-mobile.png"))
                     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    with page.expect_response(lambda r: r.url.endswith("/api/mail/latest") and r.status == 200):
+                        page.locator("#mail-latest").click()
                     page.locator("#logout-button").click()
                     page.wait_for_url("**/login")
                     assert page.request.get(f"http://127.0.0.1:{server.server_port}/api/mail").status == 401

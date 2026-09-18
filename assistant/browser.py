@@ -547,7 +547,12 @@ class JobBrowser:
                 previous = text
                 self.page.wait_for_timeout(300)
             errors = [*self.read_errors, *self.response_errors.values()]
-            required_failures = [error for error in self.network_errors if error["type"] in {"document", "script"}]
+            # A failed hydration/analytics script need not invalidate already
+            # rendered article text. Keep failures visible; ready covers only
+            # the current text snapshot, not interactive completeness.
+            required_failures = [error for error in self.network_errors if error["type"] == "document"]
+            script_warning = "部分脚本加载失败；当前正文可读取，不保证交互组件或全部内容完整。" if any(
+                error["type"] == "script" for error in self.network_errors) else None
             ready = bool(useful and not errors and not required_failures and not self.internal_errors)
             if text_start > len(text):
                 raise AssistantError("正文偏移超过页面长度，请调整 text_start。")
@@ -600,7 +605,7 @@ class JobBrowser:
                     "links": list(safe.values())[:200],
                     "fetched_at": now_iso(), "kind": "detail" if is_detail(final) else "page",
                     "blocked_requests": self.blocked, "elements": elements, "ready": ready,
-                    "body_stable": stable >= 2, **self.diagnostics(),
+                    "body_stable": stable >= 2, "resource_warning": script_warning, **self.diagnostics(),
                     "read_error": None if ready else (errors[0] if errors else
                         "正文/必要资源或读取接口尚未验证；可等待、刷新或换入口，不能判为零结果。")}
         except AssistantError:

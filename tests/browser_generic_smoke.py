@@ -30,6 +30,11 @@ class LocalBrowser(JobBrowser):
             route.fulfill(status=302, headers={"Location": "https://foreign.example/private"}, body="")
         elif path == "/blank":
             route.fulfill(status=200, content_type="text/html", body="<html><body></body></html>")
+        elif path == "/broken.js":
+            route.abort("failed")
+        elif path == "/static-article":
+            route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                          body='<h1>静态文章</h1><p>已渲染公开正文</p><script src="/broken.js"></script>')
         elif path == "/api/catalog":
             route.fulfill(status=200, content_type="application/json", body='{"title":"公开 SPA 资料已加载"}')
         elif path == "/spa":
@@ -89,6 +94,9 @@ def main():
             assert not blank["ready"] and blank["text"] == "" and "read_error" in blank
             spa = browser.read("https://catalog.example/spa")
             assert spa["ready"] and not spa["body_stable"] and "公开 SPA 资料已加载" in spa["text"]
+            article = browser.read("https://catalog.example/static-article")
+            assert article["ready"] and "已渲染公开正文" in article["text"]
+            assert article["resource_warning"] and any(e["type"] == "script" for e in article["network_errors"])
             browser.hover(element(browser.read(START), "图结构资料")["id"])
             browser.escape()
             for path in ("/redirect", "/foreign"):

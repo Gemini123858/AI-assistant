@@ -107,6 +107,19 @@ class MailTests(unittest.TestCase):
         self.assertEqual(self.mail.state()["uidvalidity"], 123)
         self.assertEqual(self.mail.records(), [])
 
+    def test_explicit_latest_import_does_not_read_other_bodies_or_move_baseline(self):
+        self.mail.sync()
+        baseline = self.mail.state()
+        self.imap.uids = [3, 7, 10]
+        record = self.mail.read_latest()
+        self.assertEqual(record["uid"], 10)
+        self.assertIn("我正在找实习", record["text"])
+        self.assertEqual(self.mail.state(), baseline)
+        self.assertEqual(len(self.mail.records()), 1)
+        fetched = [c for c in self.imap.commands if c[0] == "FETCH"]
+        self.assertTrue(all(c[1] == "10" and "BODY.PEEK" in c[-1] for c in fetched))
+        self.assertEqual(self.model.calls, [])
+
     def test_header_triage_neither_reads_body_nor_exports_credentials(self):
         import json
         key = self.new_mail()
@@ -200,6 +213,7 @@ class MailAuthTests(unittest.TestCase):
                 self.assertNotIn(TOKEN, page)
                 self.assertEqual(client.post("/login", data={"token": TOKEN}).status_code, 403)
                 self.assertEqual(client.post("/login", data={"token": TOKEN, "csrf_token": csrf}).status_code, 302)
+                self.assertEqual(client.post("/api/mail/latest", json={}, headers={"X-CSRF-Token": csrf}).status_code, 400)
                 self.assertEqual(client.get("/api/mail").status_code, 200)
                 client.post("/api/logout", json={}, headers={"X-CSRF-Token": csrf})
                 self.assertEqual(client.get("/api/memory").status_code, 401)

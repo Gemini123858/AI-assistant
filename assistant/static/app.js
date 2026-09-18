@@ -464,6 +464,7 @@ async function loadMail() {
   $("mail-status").textContent = status.enabled ? `${status.started ? "新邮件同步已启用" : "尚未启用；不会读取历史"} · 检查间隔 ${status.poll_seconds} 秒 · ${status.error || "后台不调用模型"}` : "未配置：在私有 .env 填写 QQ_IMAP_USER、QQ_IMAP_AUTH_CODE 和 ASSISTANT_ACCESS_TOKEN，重启后启用。不要把授权码贴到网页/聊天。";
   $("mail-start").disabled = !status.enabled || status.started;
   $("mail-sync").disabled = !status.enabled || !status.started;
+  $("mail-latest").disabled = !status.enabled;
   $("mail-triage").disabled = !status.enabled;
   $("mail-count").textContent = `已保存 ${data.total} 封；显示最近100封，不含启用前历史。`;
   $("mail-list").replaceChildren(...data.mails.map(mailCard));
@@ -488,5 +489,10 @@ for (const [id, path] of [["mail-start", "start"], ["mail-sync", "sync"], ["mail
     await api(`/api/mail/${path}`, "POST", {}); await Promise.all([loadMail(), loadStatus()]);
   }));
 }
+$("mail-latest").addEventListener("click", () => working($("mail-latest"), async () => {
+  if (!window.confirm("只读导入收件箱最新一封邮件（可能是历史邮件），不自动调用模型、不改变新邮件同步基线。继续？")) return;
+  await api("/api/mail/latest", "POST", {confirm: true});
+  await loadMail();
+}));
 $("mail-refresh").addEventListener("click", () => working($("mail-refresh"), loadMail));
 $("logout-button")?.addEventListener("click", async () => { await api("/api/logout", "POST", {}); window.location.assign("/login"); });

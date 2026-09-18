@@ -80,7 +80,7 @@
     <section id="mail-panel" class="tasks-workspace" hidden>
       <div class="panel"><h2>QQ 邮箱 · 新邮件工作台</h2><p id="mail-status" class="notice">读取配置…</p>
         <p class="caption">首次启用跳过已有邮件，只同步之后进入 INBOX 的邮件头。读取正文使用只读 IMAP，不标已读、不移动或删除；每60秒左右检查新邮件。初筛建议不删除邮件，任何邮件仍可细读。</p>
-        <div class="form-actions"><button id="mail-start" class="primary">启用同步（仅之后的新邮件）</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-triage" class="quiet">初筛新邮件（调用模型）</button><button id="mail-refresh" class="quiet">刷新</button></div>
+        <div class="form-actions"><button id="mail-start" class="primary">启用同步（仅之后的新邮件）</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-latest" class="quiet">导入最新一封已有邮件</button><button id="mail-triage" class="quiet">初筛新邮件（调用模型）</button><button id="mail-refresh" class="quiet">刷新</button></div>
         <p class="caption">目前默认手动分析。邮件文字会发送给已配置模型；自己发送的邮件可能包含多人聊天，不默认全是你的事实。附件未识别，链接访问另行确认范围。</p>
       </div>
       <div class="section-heading"><h2>重要事件表</h2></div><div id="mail-events" class="panel table-scroll"></div>
