@@ -29,6 +29,7 @@ Cookie 提示优先拒绝可选项/仅必要；业务同意和访问验证不能
 长文档可先 search_source 找关键词片段，再 read_source 扩展范围，不需要凭记忆猜行号。
 ready 表示当前正文快照可取得，不保证所有组件加载完毕；结合 body_stable、控件和诊断判断覆盖，不把加载提示当零结果。
 授权访问域内的正常 POST 不再要求站点/端点白名单；统一禁令仍拦截明显写入、账号操作、凭据、文件上传和用户禁止路径，不得绕过。
+普通文章路径/标题的动作词不代表执行操作。path_keyword拒绝可向用户提出精确read_exception，只有用户能在新任务中确认；模型不能自行扩大豁免。阅读豁免不覆盖域、公网、显式禁令、凭据、操作正文或mutation。
 pending_data_requests/data_errors/data_responses仅说明实际传输状态，不验证任何网站的业务响应格式。即使HTTP成功且ready=true，也必须看到任务需要的具体正文，不能将空框架、加载中或业务报错当成查询完成/零结果。
 finish_task findings/jobs 使用 page_id 和 line_start/line_end，程序取原文/岗位标题；不必重写标题或画像原文。
 jobs 的 title_line 可指定实际岗位名称所在行；页面标题若只是栏目/导航名，必须定位岗位名，不把栏目名当岗位名称。
@@ -245,7 +246,7 @@ class Tasks:
                                        note="进程中断；未自动继续，可显式重新发起（重新计费）。")
 
     def start(self, payload):
-        allowed = {"request", "public_request", "start_url", "domains", "resource_domains", "read_post_urls", "blocked_urls"}
+        allowed = {"request", "public_request", "start_url", "domains", "resource_domains", "read_post_urls", "blocked_urls", "read_exceptions"}
         if not isinstance(payload, dict) or "request" not in payload or set(payload) - allowed:
             raise AssistantError("任务接受要求、公开查询说明、起始 URL 和授权域，不接受写入权限。")
         request = text_field(payload["request"], "任务要求", 2000)
@@ -255,7 +256,7 @@ class Tasks:
             if field in payload and (not isinstance(payload[field], list) or len(payload[field]) > 20):
                 raise AssistantError("授权域必须为不超过20项的完整域名列表。")
         scope = BrowserScope(payload.get("start_url", ENTRY), payload.get("domains"), payload.get("resource_domains"),
-                             payload.get("read_post_urls"), payload.get("blocked_urls"))
+                             payload.get("read_post_urls"), payload.get("blocked_urls"), payload.get("read_exceptions"))
         config = self.service.config
         if config.mode != "api" and self.browser_factory is JobBrowser:
             raise AssistantError("真实网页任务需要 API 模式；演示模式不伪造查询。", 409)
@@ -368,6 +369,7 @@ class Tasks:
             return {"failed": True, "error": str(error), "kind": getattr(error, "kind",
                     "permission" if error.status == 403 else "validation" if error.status == 400 else "interaction"),
                     "retryable": getattr(error, "retryable", error.status != 403), "url": target or scope.start_url,
+                    "policy": getattr(error, "policy", None),
                     "root_cause_verified": False,
                     "diagnostic_note": "这些是执行层观测，不是底层根因诊断；ERR_ADDRESS_UNREACHABLE 不证明 DNS 失败、域名不存在或服务器下线。若没有额外证据，请明确写根因未确定。",
                     "remaining": budget(), **(browser.diagnostics() if hasattr(browser, "diagnostics") else {})}

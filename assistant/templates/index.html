@@ -65,10 +65,12 @@
           <details><summary>高级：禁止访问的接口或页面（可选）</summary>
             <label>每行一个精确 HTTPS URL，不带查询参数<textarea id="task-blocked-urls" rows="2" placeholder="例如：https://example.com/api/risky-operation；该路径的所有查询参数和请求方法均阻断。"></textarea></label>
             <p class="caption">访问域内正常 GET/POST 默认允许，统一拦截明显账号/写入操作、凭据和文件上传。不检查网站专用端点或响应字段。额外资源域仍只授权静态资源/GET。</p>
+            <label>本任务精确阅读豁免（JSON数组，可从拦截记录填入）<textarea id="task-read-exceptions" rows="3" placeholder='[{"url":"https://example.com/wiki/delete","method":"GET","resource_type":"document"}]'></textarea></label>
+            <p class="caption">仅在核实为阅读后确认。绑定完整URL（含查询参数）、方法、请求类型；POST还绑定正文SHA256和Content-Type。不能覆盖域范围、显式禁令、凭据、文件或写入正文；不授权实际写操作。</p>
           </details>
           <label>可发送网站的公开查询说明<textarea id="task-public-request" rows="3" required maxlength="4000" placeholder="例如：查找上海的图神经网络研究实习岗位。不要填姓名、联系方式或私人经历。"></textarea></label>
           <label for="task-request">查询要求<textarea id="task-request" rows="4" required maxlength="2000" placeholder="例如：查询算法相关岗位，优先上海或杭州。结合我已保存的画像，列出可能匹配的岗位、差距和待确认信息。"></textarea></label>
-          <label><input id="task-public-confirm" type="checkbox" required> 我确认公开说明可用于网站检索，授权访问域内公开 GET/POST 与资源域 GET，接受匿名浏览的通用黑名单策略；未命中不保证无副作用，查询策略由模型决定。</label>
+          <label><input id="task-public-confirm" type="checkbox" required> 我确认公开说明可用于网站检索，授权访问域内公开 GET/POST 与资源域 GET，已核实填写的阅读豁免，接受匿名浏览风险；未命中不保证无副作用，查询策略由模型决定。</label>
           <button id="task-button" type="submit" class="primary">开始读取与分析</button>
           <p class="caption">查询要求与画像只用于关闭网站动作后的分析。任务共享日调用额度；只用于匿名可信公开查询，不授权登录、发送、上传或提交。黑名单不能识别所有隐蔽写入，请勿用于账号或高风险事务。</p>
           <p id="task-availability" class="caption"></p>

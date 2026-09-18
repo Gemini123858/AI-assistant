@@ -14,6 +14,7 @@ HTML = """<!doctype html><html lang="zh"><h1>公开资料目录</h1>
 <div class="filters"><label>城市<select aria-label="城市"><option value="all">全部</option><option value="sh">上海</option></select></label>
 <label><input type="checkbox">仅开放资料</label></div>
 <a href="/articles/graph">图结构资料</a><form method="post" action="/api/save"><input placeholder="姓名"><button>保存</button></form>
+<a href="/blog/how-to-delete-facebook-account" onclick="document.body.textContent='不应执行文章链接监听器';return false">如何删除账号</a>
 <button type="button" onclick="fetch('/api/save',{method:'POST',body:'{}'})">发送</button>
 <div id="react-card">React 无角色资料卡片</div><div onclick="location.href='/articles/graph'">原生无角色卡片</div>
 <script>fetch('https://127.0.0.1/private');fetch('/api/save',{method:'POST',body:'{}'});
@@ -50,6 +51,8 @@ setInterval(()=>document.querySelector('#clock').textContent=String(Date.now()),
 </script>""")
         elif path == "/articles/graph":
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<h1>图结构资料</h1><p>公开方法说明</p>")
+        elif path in {"/docs/create-react-app", "/blog/how-to-delete-facebook-account", "/wiki/Edit", "/wiki/delete"}:
+            route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<h1>纯阅读文章</h1><p>这是正文，不执行业务操作。</p>")
         else:
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body=HTML)
 
@@ -79,6 +82,11 @@ def main():
             assert first["ready"] and first["kind"] == "page"
             assert browser.blocked >= 2
             assert not first["network_errors"], "policy blocks must not become network failures"
+            article = browser.click(element(first, "如何删除账号")["id"])
+            assert article["ready"] and "纯阅读文章" in article["text"]
+            for path in ("/docs/create-react-app", "/wiki/Edit"):
+                assert browser.read("https://catalog.example" + path)["ready"]
+            first = browser.read(START)
             assert browser.click(element(first, "React 无角色资料卡片")["id"])["ready"]
             first = browser.read(START)
             assert browser.click(element(first, "原生无角色卡片")["id"])["url"] == DETAIL
@@ -128,6 +136,9 @@ def main():
                     assert getattr(error, "kind", None) == "permission"
                 assert any("重定向" in p["reason"] for p in browser.policy_blocks), "redirect response was not guarded"
                 assert not any(e["code"] == "net::ERR_BLOCKED_BY_CLIENT" for e in browser.network_errors)
+        exception = {"url": "https://catalog.example/wiki/delete", "method": "GET", "resource_type": "document"}
+        with LocalBrowser(lambda: None, scope=BrowserScope(exception["url"], read_exceptions=[exception])) as browser:
+            assert browser.read(exception["url"])["ready"]
         start = "https://catalog.example/public-list"
         with GenericResponseBrowser(lambda: None, scope=BrowserScope(start)) as browser:
             browser.response_status, browser.response_body = 503, '{}'

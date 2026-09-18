@@ -41,7 +41,11 @@ async function api(path, method = "GET", payload) {
   const response = await fetch(path, options);
   const data = await response.json();
   if (response.status === 401) { window.location.assign("/login"); throw new Error("请登录。"); }
-  if (!response.ok) throw new Error(data.error || "请求失败");
+  if (!response.ok) {
+    const error = new Error(data.error || "请求失败");
+    error.policy = data.policy;
+    throw error;
+  }
   return data;
 }
 
@@ -50,7 +54,23 @@ async function working(button, action) {
   button.disabled = true;
   button.textContent = "处理中…";
   try { await action(); }
-  catch (error) { toast(error.message, true); }
+  catch (error) {
+    if (error.policy?.overridable && error.policy.read_exception) {
+      const field = $("task-read-exceptions");
+      try {
+        const entries = JSON.parse(field.value.trim() || "[]");
+        if (Array.isArray(entries)) {
+          const entry = error.policy.read_exception;
+          if (!entries.some((other) => JSON.stringify(other) === JSON.stringify(entry))) entries.push(entry);
+          field.value = JSON.stringify(entries, null, 2);
+          field.closest("details").open = true;
+          $("task-public-confirm").checked = false;
+          error.message += " 已填入候选阅读豁免，尚未放行；请核实后重新确认。";
+        }
+      } catch (_) { /* Preserve the user's invalid JSON; never grant silently. */ }
+    }
+    toast(error.message, true);
+  }
   finally { button.disabled = false; button.textContent = label; }
 }
 
@@ -182,6 +202,33 @@ function taskCard(task) {
   if (task.scope) card.append(node("p", "caption", "授权访问域：" + domains.join("、")));
   if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "历史 POST 授权记录（新策略不再依赖）：" + task.scope.read_post_urls.join("、")));
   if (task.scope?.blocked_urls?.length) card.append(node("p", "caption", "禁止访问路径：" + task.scope.blocked_urls.join("、")));
+  if (task.scope?.read_exceptions?.length) card.append(node("p", "caption", `本任务精确阅读豁免：${task.scope.read_exceptions.length} 项（不覆盖硬边界）`));
+  function exceptionButton(policy) {
+    if (!policy?.overridable || !policy.read_exception) return null;
+    const button = node("button", "quiet", "填入阅读豁免（需核实后重新发起）");
+    button.addEventListener("click", () => {
+      const scope = task.scope;
+      $("task-url").value = scope.start_url;
+      $("task-domains").value = scope.domains.join(", ");
+      $("task-resources").value = scope.resource_domains.join(", ");
+      $("task-blocked-urls").value = (scope.blocked_urls || []).join("\n");
+      const entries = [...(scope.read_exceptions || []), policy.read_exception];
+      $("task-read-exceptions").value = JSON.stringify(entries.filter((entry, index) =>
+        entries.findIndex((other) => JSON.stringify(other) === JSON.stringify(entry)) === index), null, 2);
+      $("task-read-exceptions").closest("details").open = true;
+      $("task-public-request").value = task.public_request;
+      $("task-request").value = task.request;
+      $("task-public-confirm").checked = false;
+      $("task-form").scrollIntoView({ behavior: "smooth" });
+      toast("已填入新任务，尚未放行。请核实具体URL、方法及POST正文摘要后重新确认。");
+    });
+    return button;
+  }
+  for (const error of task.errors || []) {
+    const button = exceptionButton(error.policy);
+    if (button) card.append(node("p", "notice", error.policy.reason),
+      node("pre", "task-evidence", JSON.stringify(error.policy.read_exception, null, 2)), button);
+  }
   if (task.actions?.length) {
     const actions = node("details", "task-actions");
     actions.append(node("summary", "", "查看浏览器动作记录"));
@@ -239,7 +286,11 @@ function taskCard(task) {
       if (page.content_note) evidence.append(node("p", "caption", page.content_note));
       if (page.read_warning) evidence.append(node("p", "notice", page.read_warning));
       for (const item of page.network_errors || []) evidence.append(node("p", "caption", `网络失败：${item.target} · ${item.code}`));
-      for (const item of page.policy_blocks || []) evidence.append(node("p", "caption", `主动拦截：${item.target} · ${item.reason}`));
+      for (const item of page.policy_blocks || []) {
+        evidence.append(node("p", "caption", `主动拦截：${item.target} · ${item.rule || "历史规则"} · ${item.reason}`));
+        const button = exceptionButton(item);
+        if (button) evidence.append(node("pre", "task-evidence", JSON.stringify(item.read_exception, null, 2)), button);
+      }
     }
   }));
   evidence.append(view);
@@ -287,6 +338,7 @@ $("task-form").addEventListener("submit", (event) => {
     await api("/api/tasks", "POST", { request: $("task-request").value,
       public_request: $("task-public-request").value, start_url: start.href,
       domains, resource_domains: splitDomains("task-resources"),
+      read_exceptions: JSON.parse($("task-read-exceptions").value.trim() || "[]"),
       blocked_urls: $("task-blocked-urls").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
     toast("已发起公开网页任务，可查看动作、恢复记录或取消。");
     await loadTasks();
@@ -427,7 +479,7 @@ function mailCard(record) {
       const browse = node("button", "quiet", "到网页任务确认此链接");
       browse.addEventListener("click", () => {
         $("task-url").value = link.url;
-        $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = "";
+        $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = ""; $("task-read-exceptions").value = "";
         $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
         $("task-request").value = "整理此链接中的事项、时间和需要做的动作，结合我的画像说明相关性及未知项。";
         $("task-public-confirm").checked = false;

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from assistant.browser import (SITE, BrowserScope, JobBrowser, allowed_request,
-                               element_actions, navigation_url, resolver_rules, is_detail)
+                               element_actions, navigation_url, resolver_rules, is_detail, request_denial)
 from .browser_fixtures import SEARCH_PATH, ASSET_HOSTS
 from assistant.errors import AssistantError
 
@@ -17,6 +17,66 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
+    def test_action_themed_articles_and_link_titles_are_readable(self):
+        scope = BrowserScope("https://catalog.example/")
+        for path in ("/docs/create-react-app", "/blog/how-to-delete-facebook-account", "/wiki/Edit"):
+            url = "https://catalog.example" + path
+            self.assertEqual(navigation_url(url, scope), url)
+            self.assertTrue(allowed_request(url, "GET", "document", scope=scope))
+            info = {"connected": True, "visible": True, "tag": "a", "role": "link",
+                    "label": "如何删除账号 / delete account", "href": url}
+            self.assertEqual(element_actions(info, scope.start_url, scope), ["click"])
+        self.assertEqual(element_actions({**info, "tag": "button", "href": "", "label": "删除"}, scope.start_url, scope), [])
+        browser = JobBrowser(lambda: None, scope=scope)
+        handle = Mock()
+        handle.evaluate.return_value = info
+        browser._element = Mock(return_value=handle)
+        browser.read = Mock(return_value={"ready": True})
+        browser.click("observed")
+        browser.read.assert_called_once_with(info["href"])
+        handle.click.assert_not_called()
+
+    def test_exact_read_exceptions_are_bound_and_cannot_override_hard_boundaries(self):
+        scope = BrowserScope("https://catalog.example/")
+        url = "https://catalog.example/api/createPreview?locale=zh"
+        denial = request_denial(url, "POST", "xhr", '{"q":"test"}', scope, "application/json")
+        self.assertEqual(denial["rule"], "path_keyword")
+        self.assertTrue(denial["overridable"])
+        entry = denial["read_exception"]
+        granted = BrowserScope(scope.start_url, read_exceptions=[entry])
+        self.assertTrue(allowed_request(url, "POST", "xhr", '{"q":"test"}', granted, "application/json"))
+        for target, method, kind, body, content_type in (
+            (url, "POST", "fetch", '{"q":"test"}', "application/json"),
+            (url, "POST", "xhr", '{"q":"changed"}', "application/json"),
+            (url + "&page=2", "POST", "xhr", '{"q":"test"}', "application/json"),
+            (url, "POST", "xhr", '{"q":"test"}', "text/plain"),
+            (url, "POST", "xhr", '{"password":"synthetic"}', "application/json"),
+            (url, "POST", "xhr", '{"action":"delete"}', "application/json"),
+            (url, "DELETE", "xhr", None, ""),
+            (url.replace("catalog.example", "foreign.example"), "POST", "xhr", '{"q":"test"}', "application/json")):
+            self.assertFalse(allowed_request(target, method, kind, body, granted, content_type))
+        self.assertEqual(BrowserScope(**granted.as_dict()).as_dict(), granted.as_dict())
+        get_url = "https://catalog.example/wiki/delete"
+        with self.assertRaises(AssistantError) as caught:
+            navigation_url(get_url, scope)
+        get_entry = caught.exception.policy["read_exception"]
+        reading = BrowserScope(get_url, read_exceptions=[get_entry])
+        self.assertEqual(navigation_url(get_url, reading), get_url)
+        self.assertFalse(allowed_request(get_url, "POST", "document", '{}', reading))
+        self.assertFalse(allowed_request(get_url + "?version=2", "GET", "document", scope=reading))
+        with self.assertRaises(AssistantError):
+            BrowserScope(scope.start_url, blocked_urls=[get_url], read_exceptions=[get_entry])
+        browser = JobBrowser(lambda: None, scope=scope)
+        route = Mock()
+        route.request = SimpleNamespace(url=get_url, method="GET", resource_type="document", post_data=None, headers={})
+        browser._route(route)
+        self.assertEqual(browser.policy_blocks[-1]["read_exception"], get_entry)
+        browser._cdp = Mock()
+        browser._continue_response({"request": {"url": get_url + "/redirect", "method": "GET"},
+            "resourceType": "Document", "responseStatusCode": 302,
+            "responseHeaders": [{"name": "Location", "value": get_url + "?version=2"}]}, "redirect")
+        self.assertEqual(browser._cdp.send.call_args.args[0], "Fetch.failRequest")
+
     def test_unknown_posts_follow_same_policy_on_every_authorized_host(self):
         for host in ("catalog.example", "jobs.bytedance.com", "career.honor.com"):
             scope = BrowserScope("https://" + host + "/catalog")
@@ -174,7 +234,7 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertFalse(allowed_request(url, "POST", "fetch", '# comment\nmutation Jobs { createJob }', content_type="application/graphql"))
         self.assertFalse(allowed_request(url, "POST", "fetch", 'query=mutation+Jobs+%7BcreateJob%7D'))
         self.assertFalse(allowed_request(url, "POST", "fetch", '{}', content_type="multipart/form-data; boundary=test"))
-        self.assertFalse(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "script"))
+        self.assertFalse(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "fetch"))
 
     def test_assets_cannot_be_navigation_or_writes(self):
         host = sorted(ASSET_HOSTS)[0]

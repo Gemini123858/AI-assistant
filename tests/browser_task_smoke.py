@@ -120,6 +120,15 @@ def main():
                 page.locator("#task-public-request").fill("合成算法岗位查询")
                 page.locator("#task-public-confirm").check()
                 page.locator("#task-request").fill("合成算法岗位查询")
+                page.locator("#task-url").fill("https://jobs.bytedance.com/wiki/delete")
+                page.locator("#task-button").click()
+                expect(page.locator("#task-read-exceptions")).not_to_have_value("")
+                expect(page.locator("#task-public-confirm")).not_to_be_checked()
+                assert json.loads(page.locator("#task-read-exceptions").input_value())[0]["method"] == "GET"
+                assert not model.calls and page.locator(".task-card").count() == 0
+                page.locator("#task-url").fill(ENTRY)
+                page.locator("#task-read-exceptions").fill("")
+                page.locator("#task-public-confirm").check()
                 page.locator("#task-button").click()
                 expect(page.locator(".task-card .tag").first).to_have_text("已完成", timeout=15000)
                 expect(page.locator(".job-result").last).to_contain_text("会 Python")

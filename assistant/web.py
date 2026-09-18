@@ -58,7 +58,10 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.errorhandler(AssistantError)
     def intentional_error(error):
-        return jsonify(error=str(error)), error.status
+        result = {"error": str(error)}
+        if getattr(error, "policy", None):
+            result["policy"] = error.policy
+        return jsonify(result), error.status
 
     @app.errorhandler(HTTPException)
     def http_error(error):
