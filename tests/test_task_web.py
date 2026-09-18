@@ -42,7 +42,7 @@ class TaskWebTests(unittest.TestCase):
     def test_reads_do_not_start_model_or_browser_and_secrets_are_absent(self):
         self.assertEqual(self.client.get("/api/tasks").json["tasks"], [])
         status = self.client.get("/api/status")
-        self.assertEqual(status.json["version"], "0.2.0")
+        self.assertEqual(status.json["version"], "0.3.0")
         self.assertNotIn("synthetic-never-sent", status.get_data(as_text=True))
         self.assertEqual(self.model.calls, [])
 

@@ -10,8 +10,8 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="个人助手首页"><span class="brand-mark">助</span>个人助手<span class="version">v0.2</span></a>
-    <div class="topbar-right"><span id="mode-badge" class="badge">正在连接</span><span class="local-note">仅本机 · 外部操作只读</span></div>
+    <a class="brand" href="/" aria-label="个人助手首页"><span class="brand-mark">助</span>个人助手<span class="version">v0.3</span></a>
+    <div class="topbar-right"><span id="mode-badge" class="badge">正在连接</span><span class="local-note">仅本机 · 外部操作只读</span>{% if auth_enabled %}<button id="logout-button" class="quiet">退出</button>{% endif %}</div>
   </header>
   <main>
     <section class="intro">
@@ -22,8 +22,9 @@
     <nav class="tabs" aria-label="工作区">
       <button class="tab active" data-tab="notifications" aria-selected="true">通知工作台</button>
       <button class="tab" data-tab="tasks" aria-selected="false">网页任务</button>
+      <button class="tab" data-tab="mail" aria-selected="false">邮箱工作台</button>
       <button class="tab" data-tab="memory" aria-selected="false">画像与规则</button>
-      <span class="roadmap-note">自动采集、主动推送、授权邮件发送：后续版本</span>
+      <span class="roadmap-note">邮件只读同步 · 主动推送/发送后置</span>
     </nav>
     <section id="notifications-panel" class="workspace">
       <div class="feed-column">
@@ -76,13 +77,22 @@
       <div class="section-heading"><div><h2>任务与访问证据</h2><p class="caption">覆盖有限。失败不等于没有岗位，匹配判断也不保证满足招聘条件。</p></div><button id="tasks-refresh" class="quiet">刷新</button></div>
       <div id="task-list" class="message-list" aria-live="polite"></div>
     </section>
+    <section id="mail-panel" class="tasks-workspace" hidden>
+      <div class="panel"><h2>QQ 邮箱 · 新邮件工作台</h2><p id="mail-status" class="notice">读取配置…</p>
+        <p class="caption">首次启用跳过已有邮件，只同步之后进入 INBOX 的邮件头。读取正文使用只读 IMAP，不标已读、不移动或删除；每60秒左右检查新邮件。初筛建议不删除邮件，任何邮件仍可细读。</p>
+        <div class="form-actions"><button id="mail-start" class="primary">启用同步（仅之后的新邮件）</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-triage" class="quiet">初筛新邮件（调用模型）</button><button id="mail-refresh" class="quiet">刷新</button></div>
+        <p class="caption">目前默认手动分析。邮件文字会发送给已配置模型；自己发送的邮件可能包含多人聊天，不默认全是你的事实。附件未识别，链接访问另行确认范围。</p>
+      </div>
+      <div class="section-heading"><h2>重要事件表</h2></div><div id="mail-events" class="panel table-scroll"></div>
+      <div class="section-heading"><h2>新邮件及分析结果</h2><span id="mail-count" class="caption"></span></div><div id="mail-list" class="message-list"></div>
+    </section>
     <section id="memory-panel" class="memory-workspace" hidden>
       <div class="memory-intro"><h2>让判断有自己的上下文。</h2><p class="muted">信息与纠正保存在本机 Markdown 文件，可直接编辑。保存即生效，不修改你的原资料。</p><p class="caption">这里的内容会随分析和问答发送给已配置的模型。不要填写密码、Key 或不适合外发的内容。</p></div>
       <form class="panel memory-form" data-kind="profile"><h3>个人画像</h3><p class="caption">明确的个人信息、当前状态和偏好。推断信息请标明“待核实”。</p><label class="sr-only" for="profile-text">个人画像内容</label><textarea id="profile-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 我目前正在找实习。&#10;- 我希望优先看到需要报名或提交材料的通知。"></textarea><button class="primary" type="submit">保存画像</button></form>
       <form class="panel memory-form" data-kind="rules"><h3>纠正规则</h3><p class="caption">具体、可验证的纠正。规则不能授予助手发送或提交权限。</p><label class="sr-only" for="rules-text">纠正规则内容</label><textarea id="rules-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 不要把报名截止时间当成活动开始时间。"></textarea><button class="primary" type="submit">保存规则</button></form>
     </section>
   </main>
-  <footer>文件持久化 · 原文可追溯 · 当前没有自动采集或主动推送</footer>
+  <footer>文件持久化 · 原文可追溯 · 邮箱按需启用 · 无主动推送或邮件发送</footer>
   <div id="toast" class="toast" role="status" hidden></div>
   <dialog id="source-dialog"><div class="dialog-heading"><h2>通知原文</h2><button id="close-dialog" class="quiet">关闭</button></div><p id="source-meta" class="caption"></p><pre id="source-body"></pre><p id="source-attachments" class="notice"></p><p id="source-id" class="caption"></p></dialog>
 </body>

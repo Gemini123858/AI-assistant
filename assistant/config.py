@@ -27,6 +27,11 @@ class Config:
     browser_steps: int = 120
     browser_vision: bool = False
     browser_dns: str = "system"
+    access_token: str = field(default="", repr=False)
+    qq_imap_user: str = ""
+    qq_imap_auth_code: str = field(default="", repr=False)
+    mail_poll_seconds: int = 60
+    chat_self_names: str = ""
 
     @classmethod
     def from_env(cls):
@@ -49,6 +54,11 @@ class Config:
                 browser_steps=int(os.getenv("ASSISTANT_BROWSER_STEPS", "120")),
                 browser_vision=os.getenv("ASSISTANT_BROWSER_VISION", "false").lower() == "true",
                 browser_dns=os.getenv("ASSISTANT_BROWSER_DNS", "system"),
+                access_token=os.getenv("ASSISTANT_ACCESS_TOKEN", ""),
+                qq_imap_user=os.getenv("QQ_IMAP_USER", ""),
+                qq_imap_auth_code=os.getenv("QQ_IMAP_AUTH_CODE", ""),
+                mail_poll_seconds=int(os.getenv("ASSISTANT_MAIL_POLL_SECONDS", "60")),
+                chat_self_names=os.getenv("ASSISTANT_CHAT_SELF_NAMES", ""),
             )
         except (ValueError, TypeError) as exc:
             raise AssistantError("环境变量配置格式错误，请检查整数及 EXTRA_BODY JSON。") from exc
@@ -56,6 +66,17 @@ class Config:
         return config
 
     def validate(self):
+        if bool(self.qq_imap_user) != bool(self.qq_imap_auth_code):
+            raise AssistantError("QQ_IMAP_USER 和 QQ_IMAP_AUTH_CODE 必须同时配置。")
+        if self.qq_imap_user and (not self.qq_imap_user.lower().endswith("@qq.com")
+                or any(c in self.qq_imap_user for c in '\r\n "')):
+            raise AssistantError("首个邮箱接入仅支持完整 QQ 邮箱地址。")
+        if self.qq_imap_user and len(self.access_token) < 24:
+            raise AssistantError("接入私人邮箱前必须配置至少24字符的 ASSISTANT_ACCESS_TOKEN。")
+        if self.access_token and len(self.access_token) < 24:
+            raise AssistantError("ASSISTANT_ACCESS_TOKEN 至少24字符。")
+        if not 30 <= self.mail_poll_seconds <= 3600:
+            raise AssistantError("邮箱轮询间隔必须为30～3600秒。")
         if self.mode not in {"demo", "api"}:
             raise AssistantError("ASSISTANT_LLM_MODE 只能为 demo 或 api。")
         if self.mode == "api" and not self.api_key.strip():

@@ -40,6 +40,7 @@ async function api(path, method = "GET", payload) {
   }
   const response = await fetch(path, options);
   const data = await response.json();
+  if (response.status === 401) { window.location.assign("/login"); throw new Error("请登录。"); }
   if (!response.ok) throw new Error(data.error || "请求失败");
   return data;
 }
@@ -146,7 +147,7 @@ async function loadStatus() {
   $("model-name").textContent = status.model;
   $("usage").textContent = `今日 API 尝试 ${status.usage.calls} / ${status.daily_limit}`;
   $("mode-notice").textContent = status.mode === "api" ?
-    "真实模型已启用。分析、普通问答和主动发起的网页任务会调用 API，并使用记忆；失败尝试也计入额度。普通问答没有浏览工具，网页任务不登录、不投递。当前没有自动采集、推送或邮件发送。" :
+    "真实模型已启用。明确分析、问答及网页任务调用 API；失败也计入额度。邮箱后台只同步新邮件，不自动分析；普通问答没有浏览工具，网页任务不登录、不投递，没有推送或邮件发送。" :
     "当前为演示模式：只验证界面、文件保存和显式记忆命令，不判断真实相关性或日期。配置 API 后重启，可进行真实分析和问答。";
   $("task-button").disabled = !status.capabilities.browser_tasks;
   const budget = status.browser_budget;
@@ -389,6 +390,7 @@ document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click",
   $("notifications-panel").hidden = tab.dataset.tab !== "notifications";
   $("memory-panel").hidden = tab.dataset.tab !== "memory";
   $("tasks-panel").hidden = tab.dataset.tab !== "tasks";
+  $("mail-panel").hidden = tab.dataset.tab !== "mail";
 }));
 $("refresh-button").addEventListener("click", () => working($("refresh-button"), () => Promise.all([loadMessages(), loadStatus()])));
 $("previous-page").addEventListener("click", async () => { offset = Math.max(0, offset - pageSize); await loadMessages().catch((e) => toast(e.message, true)); });
@@ -397,5 +399,94 @@ $("close-dialog").addEventListener("click", () => $("source-dialog").close());
 
 const current = new Date();
 $("sent-at").value = new Date(current.getTime() - current.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-Promise.all([loadMessages(), loadStatus(), loadTasks(), loadChat(), api("/api/memory").then(refreshMemory)])
+Promise.all([loadMessages(), loadStatus(), loadTasks(), loadChat(), loadMail(), api("/api/memory").then(refreshMemory)])
   .catch((error) => toast(error.message, true));
+
+function mailSource(record) {
+  $("source-meta").textContent = `${record.subject} · 发件人 ${record.sender} · 邮件日期 ${record.date_raw || "未知"} · 同步 ${formatTime(record.synced_at)}`;
+  $("source-body").textContent = record.text || "暂无可读取文字。";
+  $("source-attachments").textContent = `附件未分析：${record.attachments.join("、") || "未发现"}。${record.body_truncated ? "正文超过大小限制，内容不完整。" : "聊天原时间不能由邮件转发日期替代。"}`;
+  $("source-id").textContent = record.id;
+  $("source-dialog").showModal();
+}
+
+function mailCard(record) {
+  const card = node("article", "message-card");
+  card.append(node("h3", "", record.subject), node("p", "caption", `${record.sender || "未知发件人"} · ${record.date_raw || "日期未知"}${record.self_forwarded_candidate ? " · 疑似自己转发（不证明每位发言人是你）" : ""}`));
+  if (record.triage) card.append(node("p", "notice", `${record.triage.decision}：${record.triage.reason}`));
+  if (record.error) card.append(node("p", "notice", record.error));
+  if (record.analysis) {
+    card.append(node("p", "summary-text", record.analysis.summary));
+    card.append(node("p", "caption", `仅分析邮件文字；附件和链接页面尚未覆盖。${record.body_truncated ? "正文受大小限制截断。" : ""}`));
+    for (const text of record.analysis.uncertainties) card.append(node("p", "caption", `待确认：${text}`));
+    for (const link of record.analysis.link_requests) {
+      card.append(node("p", "caption", `建议查看：${link.url}；${link.reason}`));
+      const browse = node("button", "quiet", "到网页任务确认此链接");
+      browse.addEventListener("click", () => {
+        $("task-url").value = link.url;
+        $("task-domains").value = ""; $("task-resources").value = ""; $("task-read-posts").value = "";
+        $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
+        $("task-request").value = "整理此链接中的事项、时间和需要做的动作，结合我的画像说明相关性及未知项。";
+        $("task-public-confirm").checked = false;
+        document.querySelector('[data-tab="tasks"]').click();
+        toast("请检查链接（尤其参数中的私有令牌）和公开说明，确认访问范围后再开始。不会自动访问。");
+      });
+      card.append(browse);
+    }
+  }
+  for (const [index, update] of record.profile_updates.entries()) {
+    card.append(node("p", "notice", `画像${update.applied ? "已补充" : "建议待确认"}：${update.text}；${update.reason}`));
+    card.append(node("p", "caption", `来源：${update.evidence}`));
+    if (!update.applied) {
+      const confirm = node("button", "quiet", "确认属于我并保存画像");
+      confirm.addEventListener("click", () => working(confirm, async () => {
+        await api(`/api/mail/${record.id}/profile/${index}/confirm`, "POST", {});
+        await loadMail(); refreshMemory(await api("/api/memory"));
+      }));
+      card.append(confirm);
+    }
+  }
+  const actions = node("div", "card-actions");
+  const read = node("button", "quiet", "只读查看正文");
+  read.addEventListener("click", () => working(read, async () => mailSource((await api(`/api/mail/${record.id}/read`, "POST", {})).mail)));
+  const analyze = node("button", "primary", record.analysis ? "重新分析（调用模型）" : "细读分析（调用模型）");
+  analyze.addEventListener("click", () => working(analyze, async () => {
+    await api(`/api/mail/${record.id}/analyze`, "POST", {});
+    await Promise.all([loadMail(), loadStatus()]); refreshMemory(await api("/api/memory"));
+  }));
+  actions.append(read, analyze); card.append(actions);
+  return card;
+}
+
+async function loadMail() {
+  const data = await api("/api/mail");
+  const status = data.status;
+  $("mail-status").textContent = status.enabled ? `${status.started ? "新邮件同步已启用" : "尚未启用；不会读取历史"} · 检查间隔 ${status.poll_seconds} 秒 · ${status.error || "后台不调用模型"}` : "未配置：在私有 .env 填写 QQ_IMAP_USER、QQ_IMAP_AUTH_CODE 和 ASSISTANT_ACCESS_TOKEN，重启后启用。不要把授权码贴到网页/聊天。";
+  $("mail-start").disabled = !status.enabled || status.started;
+  $("mail-sync").disabled = !status.enabled || !status.started;
+  $("mail-triage").disabled = !status.enabled;
+  $("mail-count").textContent = `已保存 ${data.total} 封；显示最近100封，不含启用前历史。`;
+  $("mail-list").replaceChildren(...data.mails.map(mailCard));
+  if (!data.mails.length) $("mail-list").append(node("p", "caption", "启用同步后发送一封新测试邮件，再点击同步。"));
+  const table = node("table");
+  const head = node("thead"), row = node("tr");
+  for (const label of ["事项", "重要性 / 相关性", "时间类型 / 时间", "需要做什么", "出处 / 待确认"]) row.append(node("th", "", label));
+  head.append(row); table.append(head);
+  const body = node("tbody");
+  for (const mail of data.mails) for (const event of mail.analysis?.events || []) {
+    const line = node("tr");
+    const kind = { deadline: "截止", event: "活动", other: "其他/未知" }[event.time_kind];
+    for (const value of [event.title, `${event.importance}：${event.relevance}`, `${kind}：${event.normalized || event.time_text || "待确认"}`, event.action || "无需动作", `${mail.subject}\n原文：${event.evidence}\n${event.uncertainties.join("；")}`]) line.append(node("td", "", value));
+    body.append(line);
+  }
+  table.append(body); $("mail-events").replaceChildren(table);
+  if (!body.children.length) $("mail-events").append(node("p", "caption", "分析后显示事件；尚未分析不代表没有重要事项。"));
+}
+
+for (const [id, path] of [["mail-start", "start"], ["mail-sync", "sync"], ["mail-triage", "triage"]]) {
+  $(id).addEventListener("click", () => working($(id), async () => {
+    await api(`/api/mail/${path}`, "POST", {}); await Promise.all([loadMail(), loadStatus()]);
+  }));
+}
+$("mail-refresh").addEventListener("click", () => working($("mail-refresh"), loadMail));
+$("logout-button")?.addEventListener("click", async () => { await api("/api/logout", "POST", {}); window.location.assign("/login"); });

@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · 个人助手</title><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body><main><section class="panel"><h1>私人助手登录</h1><p>请输入本地配置的访问口令，不是邮箱授权码。口令不会发送给模型。</p>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="/login"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>访问口令<input name="token" type="password" required autocomplete="current-password"></label><button class="primary" type="submit">登录</button></form><p class="caption">仅本机使用。远程部署仍需 TLS 和生产服务器。</p></section></main></body></html>

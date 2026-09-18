@@ -14,10 +14,11 @@ def main():
         app = create_app()
     except AssistantError as exc:
         parser.exit(1, f"无法启动：{exc}\n")
-    print(f"个人助手：http://127.0.0.1:{args.port}（仅本机；网页任务只读，无自动采集、推送或邮件发送）")
+    print(f"个人助手：http://127.0.0.1:{args.port}（仅本机；邮箱/网页只读，无邮件发送）")
     try:
         app.run(host="127.0.0.1", port=args.port, debug=False, use_reloader=False, threaded=True)
     finally:
+        app.extensions["mail"].close()
         app.extensions["tasks"].close()
         app.extensions["store"].close()
 

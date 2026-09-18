@@ -100,3 +100,6 @@ dialog pre { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; backgro
 .task-card details { margin-top:12px; }
 @media(max-width:900px) { .workspace { grid-template-columns:1fr; } .chat-panel { position:static; } .chat-history { max-height:400px; } .roadmap-note { display:none; } }
 @media(max-width:560px) { .topbar { padding:0 18px; height:64px; } .local-note { display:none; } main { padding:24px 16px; } .intro { align-items:flex-start; } .status-box { min-width:0; max-width:130px; font-size:11px; } .form-grid,.memory-workspace { grid-template-columns:1fr; } .panel { padding:17px; } .chat-panel { padding:0; } .memory-intro { grid-column:auto; } .source-time { margin-left:0; } .brand { font-size:15px; gap:8px; } .version { font-size:10px; } }
+.table-scroll { overflow-x: auto; }
+.table-scroll table { width: 100%; border-collapse: collapse; min-width: 680px; }
+.table-scroll th, .table-scroll td { text-align: left; vertical-align: top; padding: 12px; border-bottom: 1px solid #e5e7eb; white-space: pre-line; overflow-wrap: anywhere; }
