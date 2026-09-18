@@ -6,9 +6,10 @@ import json
 import re
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlencode
 
-from assistant.browser import ENTRY, SEARCH_PATH, JobBrowser, allowed_request, navigation_url
+from assistant.browser import ENTRY, BrowserScope, JobBrowser, allowed_request, navigation_url
+from .browser_fixtures import ASSET_HOSTS, SEARCH_PATH
 from assistant.errors import AssistantError
 
 
@@ -150,7 +151,7 @@ def main():
             raise AssistantError("官网探测达到90秒上限。")
 
     factory = DiagnosticBrowser if args.diagnostics or args.snapshot else JobBrowser
-    with factory(check, args.dns) as browser:
+    with factory(check, args.dns, scope=BrowserScope(ENTRY, resource_domains=list(ASSET_HOSTS))) as browser:
         if isinstance(browser, DiagnosticBrowser):
             browser.snapshot = args.snapshot
         listing_url = "https://jobs.bytedance.com/experienced/position"
@@ -176,7 +177,8 @@ def main():
             if not search["ready"]:
                 raise AssistantError(search["read_error"], 502)
         else:
-            search = browser.read(browser.search_url("算法", 1))
+            search = browser.read("https://jobs.bytedance.com/experienced/position?" +
+                                  urlencode({"keywords": "算法", "current": 1, "limit": 10}))
         print("search:", search["url"], "safe links:", len(search["links"]), flush=True)
         if not search["ready"]:
             raise AssistantError(search["read_error"], 502)

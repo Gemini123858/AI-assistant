@@ -18,6 +18,7 @@ from assistant.llm import validate_tool_message
 from assistant.service import Service
 from assistant.storage import Store
 from assistant.tasks import TASK_SYSTEM, TOOLS, Tasks, validate_result
+from .browser_fixtures import ASSET_HOSTS
 
 
 PROFILE = "合成测试画像（不是用户事实）：会 Python，有机器学习课程项目。其他学历、经验、地点偏好和可入职时间未知。"
@@ -280,6 +281,9 @@ def main():
             if args.scenario == "vision":
                 config.browser_vision = True
                 payload["public_request"] = "合成匿名网页视觉测试：请先 take_screenshot 查看网页布局，然后用 findings 引用正文描述可见搜索区和筛选区，不填写私人表单或点击发送/保存。"
+        if args.scenario == "jobs":
+            # Explicit resource scope for this fixture, not browser policy.
+            payload["resource_domains"] = sorted(ASSET_HOSTS)
         tasks = Tasks(service, factory)
         print("Private synthetic evidence directory:", str(config.data_dir), flush=True)
         # Locally fulfilled fault/vision sites cannot resolve or reach the Internet.

@@ -5,10 +5,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from assistant.browser import (ASSET_HOSTS, CSRF_PATH, SEARCH_PATH, SITE, HONOR_SITE,
-                               HONOR_ASSET_HOSTS, BrowserScope, JobBrowser,
-                               allowed_request, element_actions, navigation_url, resolver_rules,
-                               honor_page_read, is_detail)
+from assistant.browser import (SITE, BrowserScope, JobBrowser, allowed_request,
+                               element_actions, navigation_url, resolver_rules, is_detail)
+from .browser_fixtures import SEARCH_PATH, ASSET_HOSTS
 from assistant.errors import AssistantError
 
 
@@ -18,64 +17,45 @@ def search_body(**changes):
 
 
 class BrowserPolicyTests(unittest.TestCase):
-    def test_honor_audited_reads_are_not_blanket_post_or_navigation_grants(self):
-        tenant = "SU60ee9e002f9d247b98da489e"
-        origin = "https://" + HONOR_SITE
-        scope = BrowserScope(origin + "/" + tenant + "/mc/position/campus")
-        self.assertTrue(HONOR_ASSET_HOSTS <= scope.resource_domains)
-        for path, body in (("config/get", None), ("isLogin", ""),
-                           ("suite/config/home/navigation", None),
-                           ("positionInfo/listPosition", '{"postKey":"任意公开查询"}'),
-                           ("positionInfo/listSearchTerm/linkage", '{}'),
-                           ("positionInfo/listPositionDetail", '{"postId":"observed"}')):
-            with self.subTest(path=path):
-                url = origin + "/wecruit/" + path + "/" + tenant
-                self.assertTrue(allowed_request(url, "POST", "xhr", body, scope))
-                self.assertTrue(allowed_request(url + "?iSaJAx=isAjax&request_locale=zh_CN", "POST", "xhr", body, scope))
-                self.assertFalse(allowed_request(url, "POST", "document", body, scope))
-                self.assertFalse(allowed_request(url.replace(HONOR_SITE, "foreign.example"), "POST", "xhr", body, scope))
-        for path in ("collect/position/create", "user/info/detail", "positionInfo/deliver", "positionInfo/listPosition/extra"):
-            self.assertFalse(allowed_request(origin + "/wecruit/" + path + "/" + tenant, "POST", "xhr", '{}', scope))
-        url = origin + "/wecruit/positionInfo/listPosition/" + tenant
-        for body in ('{"action":"delete"}', '{"upload":"x"}', 'mutation { delete }', 'x' * 65537):
-            self.assertFalse(allowed_request(url, "POST", "xhr", body, scope))
-        self.assertFalse(allowed_request(url, "POST", "xhr", '{}', BrowserScope()))
+    def test_unknown_posts_follow_same_policy_on_every_authorized_host(self):
+        for host in ("catalog.example", "jobs.bytedance.com", "career.honor.com"):
+            scope = BrowserScope("https://" + host + "/catalog")
+            for body in (None, "", '{}', '[{"q":"delete upload"}]', 'q=删除&locale=zh_CN'):
+                for kind in ("xhr", "fetch", "document"):
+                    self.assertTrue(allowed_request("https://" + host + "/unknown/query?locale=zh", "POST", kind, body, scope))
+            self.assertFalse(allowed_request("https://foreign.example/query", "POST", "xhr", '{}', scope))
+
+    def test_generic_data_transport_errors_retry_and_no_site_response_schema(self):
+        browser = JobBrowser(lambda: None, scope=BrowserScope("https://catalog.example"))
+        request = SimpleNamespace(url="https://catalog.example/api/data", method="POST", resource_type="xhr", post_data='{}', headers={})
+        browser._request_started(request)
+        self.assertTrue(browser.diagnostics()["pending_data_requests"])
+        browser._response(SimpleNamespace(url=request.url, request=request, status=503))
+        self.assertTrue(browser.data_errors)
+        browser._request_started(request)
+        self.assertFalse(browser.data_errors)
+        response = SimpleNamespace(url=request.url, request=request, status=200, json=Mock())
+        browser._response(response)
+        response.json.assert_not_called()
+        self.assertFalse(browser._pending_data)
+        self.assertFalse(browser.data_errors)
+        browser._response(SimpleNamespace(url=request.url, request=Mock(), status=503))
+        self.assertFalse(browser.data_errors, "A stale response cannot invalidate the current navigation")
+
+    def test_custom_denied_paths_override_legacy_grants_and_encoded_query_variants(self):
+        url = "https://catalog.example/api/data"
+        scope = BrowserScope("https://catalog.example/catalog", read_post_urls=[url], blocked_urls=[url])
+        for target in (url, url + "?page=2", url.replace("data", "%64ata")):
+            for method in ("GET", "POST"):
+                self.assertFalse(allowed_request(target, method, "fetch", '{}', scope))
+            with self.assertRaises(AssistantError):
+                navigation_url(target, scope)
+        self.assertEqual(BrowserScope(**scope.as_dict()).as_dict(), scope.as_dict())
+        encoded = BrowserScope("https://catalog.example/catalog", blocked_urls=["https://catalog.example/api/%64ata%3Fpath"])
+        self.assertEqual(BrowserScope(**encoded.as_dict()).as_dict(), encoded.as_dict())
+        self.assertFalse(allowed_request("https://catalog.example/api/data%3Fpath?x=1", "POST", "fetch", '{}', encoded))
         with self.assertRaises(AssistantError):
-            navigation_url("https://as.alipayobjects.com/", scope)
-
-    def test_honor_list_and_detail_response_validation_and_retry(self):
-        origin = "https://" + HONOR_SITE
-        tenant = "SU60ee9e002f9d247b98da489e"
-        browser = JobBrowser(lambda: None, scope=BrowserScope(origin))
-        url = origin + "/wecruit/positionInfo/listPosition/" + tenant
-        self.assertEqual(honor_page_read(origin + "/" + tenant + "/mc/position/campus"), "listPosition")
-        self.assertTrue(is_detail(origin + "/" + tenant + "/mc/detail?postId=observed&recruitType=campus"))
-        self.assertFalse(is_detail(origin + "/" + tenant + "/mc/position/campus"))
-        for body in ({"state": "500", "data": {}}, {"state": "200", "data": {}}, []):
-            browser._response(SimpleNamespace(url=url, status=200, json=lambda: body))
-            self.assertNotIn("listPosition", browser._honor_verified)
-            self.assertTrue(browser.response_errors)
-        # A verified empty array is a real zero-result response, not a blank UI.
-        good = {"state": "200", "data": {"pageForm": {"pageData": []}}}
-        browser._response(SimpleNamespace(url=url, status=200, json=lambda: good))
-        self.assertIn("listPosition", browser._honor_verified)
-        self.assertFalse(browser.response_errors)
-        browser._response(SimpleNamespace(url=url, status=503))
-        self.assertNotIn("listPosition", browser._honor_verified)
-        detail = url.replace("listPosition/", "listPositionDetail/")
-        browser._response(SimpleNamespace(url=detail, status=200, json=lambda: {"state": 200, "data": {"postName": "软件工程师"}}))
-        self.assertIn("listPositionDetail", browser._honor_verified)
-
-    def test_honor_inflight_request_invalidates_previous_read_proof(self):
-        browser = JobBrowser(lambda: None, scope=BrowserScope("https://" + HONOR_SITE))
-        browser._honor_verified.add("listPosition")
-        route = Mock()
-        route.request = SimpleNamespace(url="https://" + HONOR_SITE + "/wecruit/positionInfo/listPosition/SU60ee9e002f9d247b98da489e",
-                                        method="POST", resource_type="xhr", post_data='{}')
-        browser._route(route)
-        self.assertNotIn("listPosition", browser._honor_verified)
-        self.assertIn("listPosition", browser._honor_seen)
-        route.continue_.assert_called_once()
+            BrowserScope("https://catalog.example", blocked_urls=["https://foreign.example/data"])
 
     def test_decorative_label_change_does_not_stale_but_write_change_still_denied(self):
         browser = JobBrowser(lambda: None)
@@ -111,7 +91,7 @@ class BrowserPolicyTests(unittest.TestCase):
         url = "https://" + SITE + "/experienced/position"
         self.assertEqual(element_actions(info, url), ["click"])
         self.assertEqual(element_actions({**info, "label": "暂不使用"}, url), ["click"])
-        for label in ("立即投递", "登录", "提交", "上传简历", "同意条款"):
+        for label in ("立即投递", "登录", "提交", "上传简历", "同意条款", "收藏", "关注", "转发"):
             self.assertEqual(element_actions({**info, "label": label}, url), [])
         for label in ("立即体验", "未知操作", "确认选择", "我知道了"):
             self.assertEqual(element_actions({**info, "label": label}, url), ["click"])
@@ -139,26 +119,19 @@ class BrowserPolicyTests(unittest.TestCase):
             browser._element("o1-e1", "click")
         self.assertEqual(caught.exception.status, 409)
 
-    def test_search_failure_is_not_empty_and_only_valid_retry_clears_response_error(self):
-        browser = JobBrowser(lambda: None)
-        url = "https://" + SITE + SEARCH_PATH
-        failed = SimpleNamespace(url=url, status=405)
-        browser._response(failed)
-        self.assertFalse(browser.search_verified)
-        self.assertIn("HTTP 405", browser.response_errors[SEARCH_PATH])
-        good = SimpleNamespace(url=url, status=200, json=lambda: {"code": 0, "data": {"job_post_list": []}})
-        # A foreign host must not validate a real search response.
-        good.url = "https://" + sorted(ASSET_HOSTS)[0] + SEARCH_PATH
-        browser._response(good)
-        self.assertFalse(browser.search_verified)
-        good.url = url
-        browser.read_errors.append("Policy denial must remain visible")
-        browser._response(good)
-        self.assertTrue(browser.search_verified)
-        self.assertFalse(browser.response_errors)
-        self.assertEqual(browser.read_errors, ["Policy denial must remain visible"])
-        browser._response(failed)
-        self.assertFalse(browser.search_verified)
+    def test_policy_blocks_are_not_network_errors_and_real_failure_clears_pending(self):
+        browser = JobBrowser(lambda: None, scope=BrowserScope("https://catalog.example"))
+        request = SimpleNamespace(url="https://catalog.example/api/data", method="POST", resource_type="xhr", post_data='{}', headers={}, failure="net::ERR_CONNECTION_RESET")
+        browser._request_started(request)
+        browser._network_failure(request)
+        self.assertFalse(browser._pending_data)
+        self.assertTrue(browser.data_errors)
+        blocked = Mock()
+        blocked.request = SimpleNamespace(url="https://catalog.example/api/sendMail", method="POST", resource_type="xhr", post_data='{}', headers={})
+        previous = list(browser.network_errors)
+        browser._route(blocked)
+        blocked.abort.assert_called_once()
+        self.assertEqual(browser.network_errors, previous)
 
     def test_navigation_scope_is_exact_and_read_only(self):
         for path in ("/experienced/", "/experienced/position", "/experienced/position/123/detail"):
@@ -174,45 +147,55 @@ class BrowserPolicyTests(unittest.TestCase):
         url = "https://" + SITE + "/experienced/position"
         query = "?keywords=算法&category=&location=&project=&type=&job_hot_flag=&current=2&limit=10&functionCategory=&tag="
         self.assertIn("current=2", navigation_url(url + query))
-        self.assertIn("current=2", JobBrowser(lambda: None).search_url("算法", 2))
         for query in ("?current=21", "?location=上海", "?keywords=图神经网络", "?limit=100", "?tag=synthetic"):
             with self.subTest(query=query):
                 self.assertEqual(navigation_url(url + query), url + query)
         self.assertTrue(navigation_url("https://" + SITE + "/campus/position"))
 
-    def test_only_audited_search_post_is_allowed(self):
+    def test_generic_post_bounds_and_write_guards_not_site_pagination_schema(self):
         url = "https://" + SITE + SEARCH_PATH
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body()))
-        for changes in ({"limit": 101}, {"offset": 1_000_001}, {"offset": True},
-                        {"upload": "resume"}, {"keyword": 123}):
+        for changes in ({"upload": "resume"}, {"password": "synthetic"}, {"action": "sendMail"}, {"updateProfile": {}}):
             with self.subTest(changes=changes):
                 self.assertFalse(allowed_request(url, "POST", "fetch", search_body(**changes)))
-        for path in ("/api/v1/csrf/token", "/api/v1/job/apply", "/api/v1/mail/send"):
+        self.assertTrue(allowed_request("https://" + SITE + "/api/v1/csrf/token", "POST", "fetch", search_body()))
+        for path in ("/api/v1/job/apply", "/api/v1/mail/send", "/api/sendMail", "/api/createOrder"):
             self.assertFalse(allowed_request("https://" + SITE + path, "POST", "fetch", search_body()))
         self.assertFalse(allowed_request(url, "DELETE", "fetch"))
         self.assertFalse(allowed_request(url, "POST", "fetch", "bad JSON"))
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body(keyword="图神经网络 上海", offset=250)))
         self.assertTrue(allowed_request(url, "POST", "fetch", search_body(portal_type=3, new_filter=["synthetic"])))
-        self.assertFalse(allowed_request(url, "POST", "fetch", search_body(keyword="x" * 1001)))
+        self.assertTrue(allowed_request(url, "POST", "fetch", search_body(keyword="x" * 1001, limit=1000)))
+        self.assertFalse(allowed_request(url, "POST", "fetch", 'x' * 65537))
+        self.assertFalse(allowed_request(url, "POST", "fetch", search_body(keyword="算法" * 12000)))
+        self.assertTrue(allowed_request(url, "POST", "fetch", 'q=mutation+in+biology'))
+        self.assertTrue(allowed_request(url, "POST", "fetch", '删除相关资料', content_type="text/plain"))
+        self.assertTrue(allowed_request(url, "POST", "fetch", 'query Jobs { jobs { title } }', content_type="application/graphql"))
+        self.assertFalse(allowed_request(url, "POST", "fetch", '# comment\nmutation Jobs { createJob }', content_type="application/graphql"))
+        self.assertFalse(allowed_request(url, "POST", "fetch", 'query=mutation+Jobs+%7BcreateJob%7D'))
+        self.assertFalse(allowed_request(url, "POST", "fetch", '{}', content_type="multipart/form-data; boundary=test"))
         self.assertFalse(allowed_request("https://" + SITE + "/api/v1/job/apply", "GET", "script"))
 
     def test_assets_cannot_be_navigation_or_writes(self):
         host = sorted(ASSET_HOSTS)[0]
-        self.assertTrue(allowed_request("https://" + host + "/app.js", "GET", "script"))
-        self.assertFalse(allowed_request("https://" + host + "/app.js", "GET", "document"))
-        self.assertFalse(allowed_request("https://" + host + "/upload", "POST", "fetch", "{}"))
+        scope = BrowserScope(resource_domains=[host])
+        self.assertTrue(allowed_request("https://" + host + "/app.js", "GET", "script", scope=scope))
+        self.assertFalse(allowed_request("https://" + host + "/app.js", "GET", "document", scope=scope))
+        self.assertFalse(allowed_request("https://" + host + "/api/query", "POST", "fetch", "{}", scope))
+        self.assertEqual(BrowserScope().resource_domains, frozenset({SITE}))
         for url in ("https://127.0.0.1/app.js", "https://10.0.0.1/app.js", "file:///etc/passwd",
-                    "https://evil.invalid/app.js", "https://" + SITE + "/api/v1/user/mobile/login_status"):
+                    "https://evil.invalid/app.js", "https://" + SITE + "/api/v1/user/login"):
             self.assertFalse(allowed_request(url, "GET", "fetch"))
 
-    def test_anonymous_read_session_bootstrap_is_not_general_post_permission(self):
-        url = "https://" + SITE + CSRF_PATH
+    def test_generic_initialization_and_status_queries_but_no_credentials(self):
+        url = "https://" + SITE + "/api/session/init"
         self.assertTrue(allowed_request(url, "POST", "xhr", '{"portal_entrance":1}'))
         self.assertTrue(allowed_request(url, "POST", "xhr", '{"portal_entrance":2}'))
-        for data in ({}, {"portal_entrance": True},
-                     {"portal_entrance": 1, "login": True}, {"password": "synthetic"}):
+        self.assertTrue(allowed_request(url, "POST", "xhr", '{}'))
+        for data in ({"portal_entrance": 1, "login": True}, {"password": "synthetic"}):
             self.assertFalse(allowed_request(url, "POST", "xhr", json.dumps(data)))
         self.assertFalse(allowed_request(url + "?login=true", "POST", "xhr", '{"portal_entrance":1}'))
+        self.assertTrue(allowed_request("https://" + SITE + "/api/isLogin", "POST", "xhr", None))
 
     def test_site_generated_search_query_is_bounded_and_matches_body(self):
         url = "https://" + SITE + SEARCH_PATH

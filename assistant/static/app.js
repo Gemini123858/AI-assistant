@@ -180,12 +180,13 @@ function taskCard(task) {
   card.append(top, node("p", "reason", task.note), node("p", "caption",
     `已保存 ${task.pages.length} 份页面观察 · 动作 ${task.steps}/${task.limits.steps} · 模型 ${task.calls}/${task.limits.calls} · ${task.phase === "analysis" ? "私人分析（无网站动作）" : "公开浏览"} · ${formatTime(task.created_at)}`));
   if (task.scope) card.append(node("p", "caption", "授权访问域：" + domains.join("、")));
-  if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "已确认只读 POST：" + task.scope.read_post_urls.join("、")));
+  if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "历史 POST 授权记录（新策略不再依赖）：" + task.scope.read_post_urls.join("、")));
+  if (task.scope?.blocked_urls?.length) card.append(node("p", "caption", "禁止访问路径：" + task.scope.blocked_urls.join("、")));
   if (task.actions?.length) {
     const actions = node("details", "task-actions");
     actions.append(node("summary", "", "查看浏览器动作记录"));
     const labels = { open_link: "打开链接", open_url: "打开 URL", observe_page: "观察页面", click_element: "点击元素", fill_field: "填写搜索框", scroll_page: "滚动页面", go_back: "返回", refresh_page: "刷新", wait_page: "等待", press_key: "按键", select_option: "选择筛选项", check_field: "勾选筛选", restart_browser: "重启匿名浏览器", take_screenshot: "截图（输入已遮罩）", read_source: "读取保存证据" };
-    const states = { running: "执行中", success: "成功", incomplete: "内容未验证", failed: "失败", interrupted: "已中止，结果未验证" };
+    const states = { running: "执行中", success: "动作已执行", incomplete: "正文尚不可读", failed: "失败", interrupted: "已中止，结果未验证" };
     for (const action of task.actions) {
       actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error_kind ? " · " + action.error_kind : ""}${action.error ? " · " + action.error : ""}`));
       if (action.loop_warning) actions.append(node("p", "caption", action.loop_warning));
@@ -223,7 +224,7 @@ function taskCard(task) {
   evidence.append(node("summary", "", "查看已访问页面及保存的正文"));
   for (const page of task.pages) {
     const row = node("p");
-    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}${page.ready === false ? " · 内容尚未验证" : ""}`, domains));
+    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}${page.ready === false ? " · 正文尚不可读" : " · 快照可读，内容需核对"}`, domains));
     evidence.append(row);
   }
   const view = node("button", "quiet", "载入保存的正文");
@@ -234,7 +235,9 @@ function taskCard(task) {
       evidence.append(node("h3", "", page.id + " · " + page.title),
         node("p", "caption", `${formatTime(page.fetched_at)}${page.text_truncated ? " · 正文已截断，覆盖不完整" : ""}`),
         node("pre", "task-evidence", page.text));
-      if (page.ready === false) evidence.append(node("p", "notice", page.read_error || "界面观察不等于有效岗位详情。"));
+      if (page.ready === false) evidence.append(node("p", "notice", page.read_error || "正文尚不可读，不能当成零结果。"));
+      if (page.content_note) evidence.append(node("p", "caption", page.content_note));
+      if (page.read_warning) evidence.append(node("p", "notice", page.read_warning));
       for (const item of page.network_errors || []) evidence.append(node("p", "caption", `网络失败：${item.target} · ${item.code}`));
       for (const item of page.policy_blocks || []) evidence.append(node("p", "caption", `主动拦截：${item.target} · ${item.reason}`));
     }
@@ -284,7 +287,7 @@ $("task-form").addEventListener("submit", (event) => {
     await api("/api/tasks", "POST", { request: $("task-request").value,
       public_request: $("task-public-request").value, start_url: start.href,
       domains, resource_domains: splitDomains("task-resources"),
-      read_post_urls: $("task-read-posts").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
+      blocked_urls: $("task-blocked-urls").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
     toast("已发起公开网页任务，可查看动作、恢复记录或取消。");
     await loadTasks();
   });
@@ -424,7 +427,7 @@ function mailCard(record) {
       const browse = node("button", "quiet", "到网页任务确认此链接");
       browse.addEventListener("click", () => {
         $("task-url").value = link.url;
-        $("task-domains").value = ""; $("task-resources").value = ""; $("task-read-posts").value = "";
+        $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = "";
         $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
         $("task-request").value = "整理此链接中的事项、时间和需要做的动作，结合我的画像说明相关性及未知项。";
         $("task-public-confirm").checked = false;

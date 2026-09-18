@@ -3,7 +3,7 @@
 from urllib.parse import urlsplit
 from unittest.mock import patch
 
-from assistant.browser import BrowserScope, JobBrowser, allowed_request, HONOR_SITE
+from assistant.browser import BrowserScope, JobBrowser, allowed_request
 from assistant.errors import AssistantError
 
 
@@ -58,16 +58,16 @@ def element(page, label):
     return next(e for e in page["elements"] if e["label"] == label)
 
 
-class HonorResponseBrowser(JobBrowser):
+class GenericResponseBrowser(JobBrowser):
     def _route(self, route):
         request = route.request
         if not allowed_request(request.url, request.method, request.resource_type, request.post_data, self.scope):
             return super()._route(route)
         if request.method == "POST":
-            route.fulfill(status=200, content_type="application/json", body=self.response_body)
+            route.fulfill(status=self.response_status, content_type="application/json", body=self.response_body)
         else:
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body="""<h1>职位列表框架</h1>
-<script>fetch('/wecruit/positionInfo/listPosition/SU60ee9e002f9d247b98da489e',
+<script>fetch('/api/unknown-data',
 {method:'POST',body:'{}'}).then(r=>r.json());</script>""")
 
 
@@ -128,13 +128,15 @@ def main():
                     assert getattr(error, "kind", None) == "permission"
                 assert any("重定向" in p["reason"] for p in browser.policy_blocks), "redirect response was not guarded"
                 assert not any(e["code"] == "net::ERR_BLOCKED_BY_CLIENT" for e in browser.network_errors)
-        honor = "https://" + HONOR_SITE + "/SU60ee9e002f9d247b98da489e/mc/position/campus"
-        with HonorResponseBrowser(lambda: None, scope=BrowserScope(honor)) as browser:
-            browser.response_body = '{"state":"500","data":{}}'
-            failed = browser.read(honor)
-            assert not failed["ready"] and "不能视为零岗位" in failed["read_error"]
-            browser.response_body = '{"state":"200","data":{"pageForm":{"pageData":[]}}}'
-            assert browser.refresh()["ready"], "A valid empty list must be distinguishable from failed reads"
+        start = "https://catalog.example/public-list"
+        with GenericResponseBrowser(lambda: None, scope=BrowserScope(start)) as browser:
+            browser.response_status, browser.response_body = 503, '{}'
+            failed = browser.read(start)
+            assert failed["ready"] and failed["data_errors"] and "不能视为零结果" in failed["read_warning"]
+            browser.response_status, browser.response_body = 200, '[]'
+            recovered = browser.refresh()
+            assert recovered["ready"] and not recovered["data_errors"]
+            assert recovered["content_note"], "Transport success must not promise business completeness"
     print("Offline generic Chromium passed: second-site DOM, free search/Enter, select/check, back/refresh/wait, screenshot, blank observation, redirect and write boundaries.")
 
 

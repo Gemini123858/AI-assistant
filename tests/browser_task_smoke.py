@@ -15,7 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import expect, sync_playwright
 from werkzeug.serving import make_server
 
-from assistant.browser import ENTRY, SEARCH_PATH, JobBrowser, allowed_request
+from assistant.browser import ENTRY, JobBrowser, allowed_request
+from .browser_fixtures import SEARCH_PATH
 from assistant.config import Config
 from assistant.errors import AssistantError
 from assistant.web import create_app

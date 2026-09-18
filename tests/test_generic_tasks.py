@@ -285,12 +285,12 @@ class GenericTaskTests(unittest.TestCase):
 
 
 class GenericScopeTests(unittest.TestCase):
-    def test_exact_read_post_authority_not_added_by_model_and_no_write_bodies(self):
+    def test_legacy_post_grants_are_compatible_but_no_longer_required(self):
         scope = BrowserScope("https://docs.example/catalog", read_post_urls=["https://docs.example/data"])
         self.assertTrue(allowed_request("https://docs.example/data?page=2", "POST", "fetch", '{"q":"图结构","new_field":2}', scope))
         self.assertTrue(allowed_request("https://docs.example/data", "POST", "document", 'q=Python', scope))
-        for url, body in (("https://docs.example/other", '{}'),
-                          ("https://docs.example/data", '{"operation":"delete"}'),
+        self.assertTrue(allowed_request("https://docs.example/other", "POST", "fetch", '{}', scope))
+        for url, body in (("https://docs.example/data", '{"operation":"delete"}'),
                           ("https://docs.example/data", '{"query":"mutation { createUser }"}')):
             self.assertFalse(allowed_request(url, "POST", "fetch", body, scope))
         with self.assertRaises(AssistantError):

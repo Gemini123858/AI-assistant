@@ -28,6 +28,8 @@ Cookie 提示优先拒绝可选项/仅必要；业务同意和访问验证不能
 可用 read_source 读取已保存正文的编号行；事实结论引用 ready=true 的来源，未读内容不能引用。
 长文档可先 search_source 找关键词片段，再 read_source 扩展范围，不需要凭记忆猜行号。
 ready 表示当前正文快照可取得，不保证所有组件加载完毕；结合 body_stable、控件和诊断判断覆盖，不把加载提示当零结果。
+授权访问域内的正常 POST 不再要求站点/端点白名单；统一禁令仍拦截明显写入、账号操作、凭据、文件上传和用户禁止路径，不得绕过。
+pending_data_requests/data_errors/data_responses仅说明实际传输状态，不验证任何网站的业务响应格式。即使HTTP成功且ready=true，也必须看到任务需要的具体正文，不能将空框架、加载中或业务报错当成查询完成/零结果。
 finish_task findings/jobs 使用 page_id 和 line_start/line_end，程序取原文/岗位标题；不必重写标题或画像原文。
 jobs 的 title_line 可指定实际岗位名称所在行；页面标题若只是栏目/导航名，必须定位岗位名，不把栏目名当岗位名称。
 引用必须真正支持判断，不是给一段存在的无关文字；未知根因/资格必须明确保留。
@@ -243,7 +245,7 @@ class Tasks:
                                        note="进程中断；未自动继续，可显式重新发起（重新计费）。")
 
     def start(self, payload):
-        allowed = {"request", "public_request", "start_url", "domains", "resource_domains", "read_post_urls"}
+        allowed = {"request", "public_request", "start_url", "domains", "resource_domains", "read_post_urls", "blocked_urls"}
         if not isinstance(payload, dict) or "request" not in payload or set(payload) - allowed:
             raise AssistantError("任务接受要求、公开查询说明、起始 URL 和授权域，不接受写入权限。")
         request = text_field(payload["request"], "任务要求", 2000)
@@ -253,7 +255,7 @@ class Tasks:
             if field in payload and (not isinstance(payload[field], list) or len(payload[field]) > 20):
                 raise AssistantError("授权域必须为不超过20项的完整域名列表。")
         scope = BrowserScope(payload.get("start_url", ENTRY), payload.get("domains"), payload.get("resource_domains"),
-                             payload.get("read_post_urls"))
+                             payload.get("read_post_urls"), payload.get("blocked_urls"))
         config = self.service.config
         if config.mode != "api" and self.browser_factory is JobBrowser:
             raise AssistantError("真实网页任务需要 API 模式；演示模式不伪造查询。", 409)
