@@ -46,6 +46,27 @@ class TaskWebTests(unittest.TestCase):
         self.assertNotIn("synthetic-never-sent", status.get_data(as_text=True))
         self.assertEqual(self.model.calls, [])
 
+    def test_new_goal_contract_restart_and_ambiguous_payload_rejection(self):
+        for payload in ({"goal": ""}, {"goal": "公开目标", "request": "旧要求"},
+                        {"goal": "公开目标", "public_request": "另一个目标"},
+                        {"request": "旧要求", "private_conditions": "私人条件"}):
+            self.assertEqual(self.client.post("/api/tasks", json=payload, headers=self.headers).status_code, 400)
+        self.assertEqual(self.model.calls, [])
+        self.model.outputs = [call("analyze_results", {}), call("finish_task", result())]
+        payload = {"goal": "查询计算机相关岗位及详细要求", "private_conditions": "合成私人筛选条件"}
+        started = self.client.post("/api/tasks", json=payload, headers=self.headers)
+        self.assertEqual(started.status_code, 202)
+        self.app.extensions["tasks"].wait()
+        key = started.json["task"]["id"]
+        task = self.client.get(f"/api/tasks/{key}").json["task"]
+        self.assertEqual(task["public_request"], payload["goal"])
+        self.assertEqual(task["private_conditions"], payload["private_conditions"])
+        self.model.outputs = [call("analyze_results", {}), call("finish_task", result())]
+        restarted = self.client.post(f"/api/tasks/{key}/restart", json={}, headers=self.headers)
+        self.assertEqual(restarted.status_code, 202)
+        self.app.extensions["tasks"].wait()
+        self.assertEqual(restarted.json["task"]["private_conditions"], payload["private_conditions"])
+
     def test_start_url_risk_returns_candidate_and_confirmed_scope_persists(self):
         payload = {"request": "合成阅读", "public_request": "读取公开文章",
                    "start_url": "https://jobs.bytedance.com/wiki/delete"}

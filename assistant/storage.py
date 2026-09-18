@@ -223,7 +223,7 @@ class Store:
             raise AssistantError("任务标识无效。")
         return self.root / "tasks" / f"{key}.json"
 
-    def create_task(self, request, portal, mode, memory, limits, scope=None, public_request=None):
+    def create_task(self, request, portal, mode, memory, limits, scope=None, public_request=None, private_conditions=None):
         with self._mutex:
             key = uuid.uuid4().hex
             record = {"schema_version": 2 if scope else 1, "id": key, "request": request, "portal": portal,
@@ -233,6 +233,8 @@ class Store:
                       "note": "仅限授权的公开网页读取；不登录、不发送或提交。"}
             if scope:
                 record.update(scope=scope, public_request=public_request, phase="browsing", stop_reason="")
+                if private_conditions is not None:
+                    record["private_conditions"] = private_conditions
             self._write_json(self._task_path(key), record)
             return record
 
@@ -266,6 +268,8 @@ class Store:
                     if BrowserScope(**scope).as_dict() != scope:
                         raise ValueError("invalid scope")
                     text_field(record["public_request"], "公开查询说明", 4000)
+                    if "private_conditions" in record:
+                        text_field(record["private_conditions"], "私人筛选条件", 2000, True)
                     if record["phase"] not in {"browsing", "analysis"}:
                         raise ValueError("invalid phase")
                     text_field(record["stop_reason"], "停止原因", 3000, True)

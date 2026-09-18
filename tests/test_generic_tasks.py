@@ -80,6 +80,60 @@ class GenericTaskTests(unittest.TestCase):
         self.assertIn("ERR_ADDRESS_UNREACHABLE", json.dumps(model.calls[0], ensure_ascii=False))
         self.assertEqual(task["result"]["findings"][0]["quote"], "岗位列表")
 
+    def test_goal_survives_trimming_analysis_and_resume_without_private_leak(self):
+        goal, private = "查询计算机相关岗位并读取详细要求", "PRIVATE_CONDITIONS_SENTINEL"
+        self.store.update_memory("profile", "PRIVATE_PROFILE_SENTINEL")
+        model = self.runner([call("search_source", {"page_id": "p1", "query": "岗位"}),
+            call("analyze_results", {}), call("resume_browsing", {}),
+            call("analyze_results", {}), call("finish_task", result())])
+        delegate = model.complete_tools
+        def with_long_history(messages, tools, timeout=None):
+            if not model.calls:
+                messages.insert(2, {"role": "user", "content": "合成长上下文" * 30000})
+            return delegate(messages, tools, timeout)
+        with patch.object(model, "complete_tools", side_effect=with_long_history):
+            task = self.tasks.start({"goal": goal, "private_conditions": private, "start_url": LIST})
+            self.tasks.wait(timeout=10)
+        saved = self.store.get_task(task["id"])
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(saved["request"], goal)
+        self.assertEqual(saved["private_conditions"], private)
+        for index, messages in enumerate(model.calls):
+            context = json.loads(messages[1]["content"])
+            self.assertEqual(context["task_goal"], goal)
+            serialized = json.dumps(messages)
+            if index in (0, 1, 3):
+                self.assertNotIn(private, serialized)
+                self.assertNotIn("PRIVATE_PROFILE_SENTINEL", serialized)
+            else:
+                self.assertEqual(context["private_conditions"], private)
+        self.assertIn("上下文已裁剪", model.calls[1][1]["content"])
+
+    def test_private_conditions_cannot_be_skipped_by_public_finish(self):
+        model = self.runner([call("finish_task", result()), call("analyze_results", {}),
+                             call("finish_task", result())])
+        task = self.tasks.start({"goal": "查询计算机岗位", "private_conditions": "PRIVATE_CONDITIONS_SENTINEL",
+                                 "start_url": LIST})
+        self.tasks.wait(timeout=10)
+        saved = self.store.get_task(task["id"])
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(saved["phase"], "analysis")
+        self.assertIn("先调用analyze_results", model.calls[1][-1]["content"])
+        self.assertNotIn("PRIVATE_CONDITIONS_SENTINEL", json.dumps(model.calls[1]))
+
+    def test_closing_budget_enters_private_analysis_before_final_call(self):
+        model = self.runner([call("search_source", {"page_id": "p1", "query": "岗位"}),
+                             call("finish_task", result())], browser_calls=2)
+        task = self.tasks.start({"goal": "查询计算机岗位", "private_conditions": "PRIVATE_CONDITIONS_SENTINEL",
+                                 "start_url": LIST})
+        self.tasks.wait(timeout=10)
+        saved = self.store.get_task(task["id"])
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(saved["calls"], 2)
+        self.assertNotIn("PRIVATE_CONDITIONS_SENTINEL", json.dumps(model.calls[0]))
+        self.assertIn("PRIVATE_CONDITIONS_SENTINEL", json.dumps(model.calls[1]))
+        self.assertEqual({t["function"]["name"] for t in model.tools[1]}, {"finish_task"})
+
     def test_local_search_is_compact_and_survives_context_trimming(self):
         search = call("search_source", {"page_id": "p1", "query": "岗位"})
         model = self.runner([search, call("finish_task", result())])

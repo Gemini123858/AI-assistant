@@ -205,7 +205,11 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
             raise AssistantError("运行中的任务不能重新发起。", 409)
         payload = {"request": previous["request"]}
         if previous.get("schema_version") == 2:
-            payload.update(public_request=previous["public_request"], **previous["scope"])
+            if "private_conditions" in previous:
+                payload = {"goal": previous["public_request"], "private_conditions": previous["private_conditions"],
+                           **previous["scope"]}
+            else:
+                payload.update(public_request=previous["public_request"], **previous["scope"])
         return jsonify(task=public_task(tasks.start(payload))), 202
 
     @app.get("/api/messages")

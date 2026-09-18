@@ -200,6 +200,8 @@ function taskCard(task) {
   card.append(top, node("p", "reason", task.note), node("p", "caption",
     `已保存 ${task.pages.length} 份页面观察 · 动作 ${task.steps}/${task.limits.steps} · 模型 ${task.calls}/${task.limits.calls} · ${task.phase === "analysis" ? "私人分析（无网站动作）" : "公开浏览"} · ${formatTime(task.created_at)}`));
   if (task.scope) card.append(node("p", "caption", "授权访问域：" + domains.join("、")));
+  if (task.public_request) card.append(node("p", "caption", "公开任务目标：" + task.public_request));
+  if (task.private_conditions) card.append(node("p", "caption", "私人筛选条件：" + task.private_conditions));
   if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "历史 POST 授权记录（新策略不再依赖）：" + task.scope.read_post_urls.join("、")));
   if (task.scope?.blocked_urls?.length) card.append(node("p", "caption", "禁止访问路径：" + task.scope.blocked_urls.join("、")));
   if (task.scope?.read_exceptions?.length) card.append(node("p", "caption", `本任务精确阅读豁免：${task.scope.read_exceptions.length} 项（不覆盖硬边界）`));
@@ -217,7 +219,7 @@ function taskCard(task) {
         entries.findIndex((other) => JSON.stringify(other) === JSON.stringify(entry)) === index), null, 2);
       $("task-read-exceptions").closest("details").open = true;
       $("task-public-request").value = task.public_request;
-      $("task-request").value = task.request;
+      $("task-request").value = task.private_conditions ?? (task.request !== task.public_request ? task.request : "");
       $("task-public-confirm").checked = false;
       $("task-form").scrollIntoView({ behavior: "smooth" });
       toast("已填入新任务，尚未放行。请核实具体URL、方法及POST正文摘要后重新确认。");
@@ -335,8 +337,8 @@ $("task-form").addEventListener("submit", (event) => {
     const start = new URL($("task-url").value);
     const splitDomains = (id) => $(id).value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
     const domains = [...new Set([start.hostname, ...splitDomains("task-domains")])];
-    await api("/api/tasks", "POST", { request: $("task-request").value,
-      public_request: $("task-public-request").value, start_url: start.href,
+    await api("/api/tasks", "POST", { goal: $("task-public-request").value,
+      private_conditions: $("task-request").value, start_url: start.href,
       domains, resource_domains: splitDomains("task-resources"),
       read_exceptions: JSON.parse($("task-read-exceptions").value.trim() || "[]"),
       blocked_urls: $("task-blocked-urls").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
@@ -481,7 +483,7 @@ function mailCard(record) {
         $("task-url").value = link.url;
         $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = ""; $("task-read-exceptions").value = "";
         $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
-        $("task-request").value = "整理此链接中的事项、时间和需要做的动作，结合我的画像说明相关性及未知项。";
+        $("task-request").value = "";
         $("task-public-confirm").checked = false;
         document.querySelector('[data-tab="tasks"]').click();
         toast("请检查链接（尤其参数中的私有令牌）和公开说明，确认访问范围后再开始。不会自动访问。");
