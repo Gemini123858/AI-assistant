@@ -6,7 +6,7 @@ from pathlib import Path
 from assistant.config import Config
 from assistant.web import create_app
 
-from .test_tasks import FixtureBrowser, ScriptModel, PROFILE, call, final_result
+from .test_tasks import DETAIL, LIST, FixtureBrowser, ScriptModel, PROFILE, call, final_result
 from .test_generic_tasks import result
 
 
@@ -53,7 +53,8 @@ class TaskWebTests(unittest.TestCase):
             self.assertEqual(self.client.post("/api/tasks", json=payload, headers=self.headers).status_code, 400)
         self.assertEqual(self.model.calls, [])
         self.model.outputs = [call("analyze_results", {}), call("finish_task", result())]
-        payload = {"goal": "查询计算机相关岗位及详细要求", "private_conditions": "合成私人筛选条件"}
+        payload = {"goal": "查询计算机相关岗位及详细要求", "profile_supplement": "本次关注图算法",
+                   "private_conditions": "合成私人筛选条件"}
         started = self.client.post("/api/tasks", json=payload, headers=self.headers)
         self.assertEqual(started.status_code, 202)
         self.app.extensions["tasks"].wait()
@@ -61,11 +62,13 @@ class TaskWebTests(unittest.TestCase):
         task = self.client.get(f"/api/tasks/{key}").json["task"]
         self.assertEqual(task["public_request"], payload["goal"])
         self.assertEqual(task["private_conditions"], payload["private_conditions"])
+        self.assertEqual(task["profile_supplement"], payload["profile_supplement"])
         self.model.outputs = [call("analyze_results", {}), call("finish_task", result())]
         restarted = self.client.post(f"/api/tasks/{key}/restart", json={}, headers=self.headers)
         self.assertEqual(restarted.status_code, 202)
         self.app.extensions["tasks"].wait()
         self.assertEqual(restarted.json["task"]["private_conditions"], payload["private_conditions"])
+        self.assertEqual(restarted.json["task"]["profile_supplement"], payload["profile_supplement"])
 
     def test_start_url_risk_returns_candidate_and_confirmed_scope_persists(self):
         payload = {"request": "合成阅读", "public_request": "读取公开文章",
@@ -118,6 +121,64 @@ class TaskWebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/tasks/invalid").status_code, 400)
         self.assertEqual(self.client.post(f"/api/tasks/{key}/cancel", json={"send": True},
                                          headers=self.headers).status_code, 400)
+
+    def test_only_latest_completed_task_keeps_closeable_followup(self):
+        first = self.start()
+        session = self.client.get("/api/followups").json["task"]
+        self.assertEqual(session["key"], first)
+        self.assertNotIn("messages", session)
+        self.model.outputs = [call("finish_followup", {"reply": "基于已保存结果继续回答。"})]
+        reply = self.client.post(f"/api/followups/task/{first}", json={"message": "还有什么未知项？"},
+                                 headers=self.headers)
+        self.assertEqual(reply.status_code, 200)
+        self.assertEqual(reply.json["session"]["turns"][-1]["role"], "assistant")
+        self.assertNotIn("messages", reply.json["session"])
+        self.model.outputs = outputs()
+        second = self.start()
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.client.get("/api/followups").json["task"]["key"], second)
+        self.assertEqual(self.client.post(f"/api/followups/task/{first}", json={"message": "旧追问"},
+                                         headers=self.headers).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/followups/task/{second}/close", json={},
+                                         headers=self.headers).status_code, 200)
+        self.assertIsNone(self.client.get("/api/followups").json["task"])
+
+    def test_task_followup_can_browse_with_original_scope_and_keep_new_evidence(self):
+        key = self.start()
+        followup_list = LIST + "?followup=1"
+        self.model.outputs = [
+            call("browse_public", {"goal": "补查岗位详情", "url": followup_list}),
+            call("open_link", {"link_id": "f1-l1"}),
+            call("return_to_followup", {}),
+            call("finish_followup", {"reply": "已补查详情，要求包括 Python。"}),
+        ]
+        response = self.client.post(f"/api/followups/task/{key}",
+                                    json={"message": "请继续打开列表中的岗位详情。"}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Python", response.json["session"]["turns"][-1]["text"])
+        self.assertIn(followup_list, FixtureBrowser.reads)
+        self.assertIn(DETAIL, FixtureBrowser.reads)
+        internal = self.app.extensions["service"]._followups["task"]
+        self.assertTrue(any(page["url"] == followup_list for page in internal["state"]["pages"]))
+
+    def test_task_followup_cannot_expand_a_limited_original_scope(self):
+        self.model.outputs = [call("finish_task", result())]
+        started = self.client.post("/api/tasks", json={"request": "限定站内阅读", "public_request": "读取目录",
+            "start_url": "https://catalog.example/topics/", "domains": ["catalog.example"],
+            "public_web": False}, headers=self.headers)
+        self.assertEqual(started.status_code, 202)
+        self.app.extensions["tasks"].wait()
+        key = started.json["task"]["id"]
+        FixtureBrowser.reads = []
+        self.model.outputs = [
+            call("browse_public", {"goal": "尝试扩大范围", "url": "https://outside.example/"}),
+            call("finish_followup", {"reply": "该地址不在原任务范围内，未访问。"}),
+        ]
+        response = self.client.post(f"/api/followups/task/{key}", json={"message": "打开另一个网站。"},
+                                    headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("https://outside.example/", FixtureBrowser.reads)
+        self.assertIn("不在原任务范围", response.json["session"]["turns"][-1]["text"])
 
     def test_custom_scope_and_separate_public_context_survive_explicit_restart(self):
         self.model.outputs = [call("finish_task", result())]

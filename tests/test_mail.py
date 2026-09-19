@@ -8,11 +8,12 @@ from pathlib import Path
 
 from assistant.config import Config
 from assistant.errors import AssistantError
+from assistant.followup import FollowupAgent
 from assistant.mail import Mail, parse_text
 from assistant.service import Service
 from assistant.storage import Store
 from assistant.web import create_app
-from .test_tasks import ScriptModel, call
+from .test_tasks import LIST, FixtureBrowser, ScriptModel, call
 
 
 TOKEN = "synthetic-access-token-not-a-secret-123"
@@ -146,28 +147,67 @@ class MailTests(unittest.TestCase):
         self.assertEqual(saved["analysis"]["events"][0]["evidence"], "2026年9月25日18:00前提交申请。")
         self.assertEqual([t["function"]["name"] for t in self.model.tools[0]], ["save_mail_analysis"])
         self.assertEqual(self.store.usage(self.service.day())["calls"], 2)
+        self.assertEqual(self.service.followups()["mail"]["key"], key)
+
+    def test_mail_followup_can_browse_public_link_without_exposing_private_context(self):
+        self.imap.mail = raw_mail(text="本人：我正在找实习。\n2026年9月25日18:00前提交申请。\n" + LIST)
+        self.store.update_memory("profile", "PRIVATE_PROFILE_SENTINEL")
+        key = self.new_mail()
+        self.model.outputs = [call("save_mail_analysis", analysis())]
+        self.mail.analyze(key)
+        before = len(self.model.calls)
+        FixtureBrowser.reads = []
+        self.model.outputs = [
+            call("browse_public", {"goal": "查看邮件中的公开招聘页面", "url": LIST}),
+            call("return_to_followup", {}),
+            call("finish_followup", {"reply": "已读取公开岗位列表，未执行投递。"}),
+        ]
+        agent = FollowupAgent(self.service, FixtureBrowser)
+        session = self.service.ask_followup("mail", key, "请打开邮件中的招聘链接看看。", agent.answer)
+        self.assertIn("未执行投递", session["turns"][-1]["text"])
+        self.assertIn(LIST, FixtureBrowser.reads)
+        followup_calls = self.model.calls[before:]
+        self.assertIn("update_profile", [tool["function"]["name"] for tool in self.model.tools[before]])
+        self.assertNotIn("update_profile", [tool["function"]["name"] for tool in self.model.tools[before + 1]])
+        self.assertIn("PRIVATE_PROFILE_SENTINEL", str(followup_calls[0]))
+        self.assertNotIn("PRIVATE_PROFILE_SENTINEL", str(followup_calls[1]))
+        self.assertNotIn("我正在找实习", str(followup_calls[1]))
+        self.assertIn("我正在找实习", str(followup_calls[2]))
 
     def test_model_event_table_and_identity_guard(self):
         key = self.new_mail()
-        update = {"text": "正在找实习", "evidence": "本人：我正在找实习。", "speaker": "本人", "kind": "fact"}
+        update = {"text": "正在找实习", "evidence": "本人：我正在找实习。", "speaker": "本人",
+                  "kind": "fact", "visibility": "public_search"}
         self.model.outputs = [call("update_profile", update), call("save_mail_analysis", analysis())]
         saved = self.mail.analyze(key)
         self.assertEqual(saved["analysis"]["events"][0]["time_kind"], "deadline")
         self.assertFalse(saved["profile_updates"][0]["applied"])
-        self.assertEqual(self.store.memory()["profile"], "")
+        self.assertEqual(self.store.memory()["public_profile"], "")
         self.mail.confirm_profile(key, 0)
-        self.assertIn("用户确认", self.store.memory()["profile"])
+        self.assertIn("用户确认", self.store.memory()["public_profile"])
         self.assertEqual(self.store.usage(self.service.day())["calls"], 2)
 
     def test_configured_speaker_auto_update_is_traced_and_idempotent(self):
         self.config.chat_self_names = "本人"
         key = self.new_mail()
         record = self.mail.read_body(key)
-        update = {"text": "正在找实习", "evidence": "本人：我正在找实习。", "speaker": "本人", "kind": "fact"}
+        update = {"text": "正在找实习", "evidence": "本人：我正在找实习。", "speaker": "本人",
+                  "kind": "fact", "visibility": "public_search"}
         self.assertTrue(self.mail.update_profile(record, update)["applied"])
         self.assertTrue(self.mail.update_profile(record, update)["duplicate"])
         self.assertEqual(len(list((self.store.root/"memory/history").glob("*.json"))), 1)
-        self.assertIn(key, self.store.memory()["profile"])
+        self.assertIn(key, self.store.memory()["public_profile"])
+        self.assertEqual(self.store.memory()["profile"], "")
+
+    def test_model_can_route_attributed_information_to_private_profile(self):
+        self.config.chat_self_names = "本人"
+        key = self.new_mail()
+        record = self.mail.read_body(key)
+        update = {"text": "这条长期信息仅供私人分析", "evidence": "本人：我正在找实习。",
+                  "speaker": "本人", "kind": "inference", "visibility": "private"}
+        self.assertTrue(self.mail.update_profile(record, update)["applied"])
+        self.assertIn("私人画像", self.store.memory()["profile"])
+        self.assertEqual(self.store.memory()["public_profile"], "")
 
     def test_fabricated_event_and_naive_time_rejected(self):
         original = "本人：我正在找实习。\r\n2026年9月25日18:00前提交申请。\r\n"
@@ -215,7 +255,9 @@ class MailAuthTests(unittest.TestCase):
                 self.assertEqual(client.post("/login", data={"token": TOKEN, "csrf_token": csrf}).status_code, 302)
                 self.assertEqual(client.post("/api/mail/latest", json={}, headers={"X-CSRF-Token": csrf}).status_code, 400)
                 self.assertEqual(client.get("/api/mail").status_code, 200)
+                app.extensions["service"].open_followup("mail", "synthetic", {"summary": "合成"})
                 client.post("/api/logout", json={}, headers={"X-CSRF-Token": csrf})
+                self.assertIsNone(app.extensions["service"].followups()["mail"])
                 self.assertEqual(client.get("/api/memory").status_code, 401)
             finally:
                 app.extensions["mail"].close()

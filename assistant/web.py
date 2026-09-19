@@ -7,6 +7,7 @@ from werkzeug.exceptions import HTTPException
 
 from .config import Config
 from .errors import AssistantError
+from .followup import FollowupAgent
 from .service import Service
 from .storage import Store
 from .tasks import Tasks
@@ -27,10 +28,11 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     try:
         tasks = Tasks(service, browser_factory)
         mail = Mail(service, mail_connector)
+        followup_agent = FollowupAgent(service, browser_factory, mail)
     except Exception:
         store.close()
         raise
-    app.extensions.update(store=store, service=service, tasks=tasks, mail=mail)
+    app.extensions.update(store=store, service=service, tasks=tasks, mail=mail, followup_agent=followup_agent)
     csrf_token = secrets.token_urlsafe(32)
 
     @app.before_request
@@ -91,6 +93,7 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         if request.method == "POST":
             if not secrets.compare_digest(request.form.get("token", "").encode(), config.access_token.encode()):
                 return render_template("login.html", csrf_token=csrf_token, error="访问口令不正确。"), 401
+            service.close_followups()
             session.clear()
             session["authenticated"] = True
             session.permanent = True
@@ -99,8 +102,24 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.post("/api/logout")
     def logout():
+        service.close_followups()
         session.clear()
         return jsonify(logged_out=True)
+
+    @app.get("/api/followups")
+    def followups():
+        return jsonify(**service.followups())
+
+    @app.post("/api/followups/<kind>/<key>")
+    def ask_followup(kind, key):
+        return jsonify(session=service.ask_followup(kind, key, body().get("message"), followup_agent.answer))
+
+    @app.post("/api/followups/<kind>/<key>/close")
+    def close_followup(kind, key):
+        if body():
+            raise AssistantError("关闭追问不接受额外参数。")
+        service.close_followup(kind, key)
+        return jsonify(closed=True)
 
     @app.get("/api/status")
     def status():
@@ -208,6 +227,7 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         if previous.get("schema_version") == 2:
             if "private_conditions" in previous:
                 payload = {"goal": previous["public_request"], "private_conditions": previous["private_conditions"],
+                           "profile_supplement": previous.get("profile_supplement", ""),
                            **previous["scope"]}
             else:
                 payload.update(public_request=previous["public_request"], **previous["scope"])

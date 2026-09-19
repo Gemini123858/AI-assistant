@@ -11,7 +11,7 @@ from assistant.config import Config
 from assistant.errors import AssistantError
 from assistant.service import Service
 from assistant.storage import Store
-from assistant.tasks import Tasks, validate_result
+from assistant.tasks import TASK_SYSTEM, Tasks, validate_result
 from .test_tasks import FixtureBrowser, ScriptModel, LIST, ENTRY, call
 
 
@@ -82,6 +82,7 @@ class GenericTaskTests(unittest.TestCase):
 
     def test_goal_survives_trimming_analysis_and_resume_without_private_leak(self):
         goal, private = "查询计算机相关岗位并读取详细要求", "PRIVATE_CONDITIONS_SENTINEL"
+        self.store.update_memory("public_profile", "PUBLIC_PROFILE_SENTINEL")
         self.store.update_memory("profile", "PRIVATE_PROFILE_SENTINEL")
         model = self.runner([call("search_source", {"page_id": "p1", "query": "岗位"}),
             call("analyze_results", {}), call("resume_browsing", {}),
@@ -92,15 +93,19 @@ class GenericTaskTests(unittest.TestCase):
                 messages.insert(2, {"role": "user", "content": "合成长上下文" * 30000})
             return delegate(messages, tools, timeout)
         with patch.object(model, "complete_tools", side_effect=with_long_history):
-            task = self.tasks.start({"goal": goal, "private_conditions": private, "start_url": LIST})
+            task = self.tasks.start({"goal": goal, "profile_supplement": "TASK_PROFILE_SUPPLEMENT",
+                                     "private_conditions": private, "start_url": LIST})
             self.tasks.wait(timeout=10)
         saved = self.store.get_task(task["id"])
         self.assertEqual(saved["status"], "completed")
         self.assertEqual(saved["request"], goal)
         self.assertEqual(saved["private_conditions"], private)
+        self.assertEqual(saved["profile_supplement"], "TASK_PROFILE_SUPPLEMENT")
         for index, messages in enumerate(model.calls):
             context = json.loads(messages[1]["content"])
             self.assertEqual(context["task_goal"], goal)
+            self.assertEqual(context["public_profile"], "PUBLIC_PROFILE_SENTINEL")
+            self.assertEqual(context["task_profile_supplement"], "TASK_PROFILE_SUPPLEMENT")
             serialized = json.dumps(messages)
             if index in (0, 1, 3):
                 self.assertNotIn(private, serialized)
@@ -108,6 +113,12 @@ class GenericTaskTests(unittest.TestCase):
             else:
                 self.assertEqual(context["private_conditions"], private)
         self.assertIn("上下文已裁剪", model.calls[1][1]["content"])
+
+    def test_browser_prompt_prefers_new_evidence_and_early_finish(self):
+        self.assertIn("最短证据路径", TASK_SYSTEM)
+        self.assertIn("不要紧接着重复observe_page", TASK_SYSTEM)
+        self.assertIn("连续两次无进展应停止该路径", TASK_SYSTEM)
+        self.assertIn("remaining.calls", TASK_SYSTEM)
 
     def test_private_conditions_cannot_be_skipped_by_public_finish(self):
         model = self.runner([call("finish_task", result()), call("analyze_results", {}),

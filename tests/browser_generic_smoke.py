@@ -14,7 +14,7 @@ HTML = """<!doctype html><html lang="zh"><h1>公开资料目录</h1>
 <div class="filters"><label>城市<select aria-label="城市"><option value="all">全部</option><option value="sh">上海</option></select></label>
 <label><input type="checkbox">仅开放资料</label></div>
 <a href="/articles/graph">图结构资料</a><form method="post" action="/api/save"><input placeholder="姓名"><button>保存</button></form>
-<a href="/blog/how-to-delete-facebook-account" onclick="document.body.textContent='不应执行文章链接监听器';return false">如何删除账号</a>
+<a href="/blog/how-to-delete-facebook-account" onclick="document.body.dataset.articleClicked='yes'">如何删除账号</a>
 <button type="button" onclick="fetch('/api/save',{method:'POST',body:'{}'})">发送</button>
 <div id="react-card">React 无角色资料卡片</div><div onclick="location.href='/articles/graph'">原生无角色卡片</div>
 <script>fetch('https://127.0.0.1/private');fetch('/api/save',{method:'POST',body:'{}'});
@@ -94,16 +94,16 @@ def main():
             search_id = element(first, "搜索资料")["id"]
             browser.page.locator('input[type="search"]').evaluate("e=>e.placeholder='搜索资料（已更新）'")
             first = browser.fill(search_id, "公开查询", False)
-            assert element(first, "姓名")["actions"] == []
-            assert element(first, "发送")["actions"] == []
+            assert element(first, "姓名")["actions"] == ["click"]
+            assert element(first, "发送")["actions"] == ["click"]
             for label in ("保存", "发送"):
-                try:
-                    browser.click(element(first, label)["id"])
-                    raise AssertionError("Unauthorized write control executed")
-                except AssistantError as error:
-                    assert error.status == 403
-            search = browser.fill(element(first, "搜索资料（已更新）")["id"], "KG alignment 图结构 上海", False)
-            search = browser.press(element(search, "搜索资料（已更新）")["id"], "Enter")
+                first = browser.read(START)
+                browser.click(element(first, label)["id"])
+                assert any(block["rule"] == "path_keyword" and "/api/save" in block["target"]
+                           for block in browser.policy_blocks), "UI dispatch must not expand network authority"
+            first = browser.read(START)
+            search = browser.fill(element(first, "搜索资料")["id"], "KG alignment 图结构 上海", False)
+            search = browser.press(element(search, "搜索资料")["id"], "Enter")
             assert "q=" in search["url"] and search["ready"]
             selected = browser.select(element(search, "城市")["id"], "sh")
             checked = browser.check_field(element(selected, "仅开放资料")["id"], True)

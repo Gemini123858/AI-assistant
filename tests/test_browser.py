@@ -37,7 +37,7 @@ class BrowserPolicyTests(unittest.TestCase):
         browser._transport.allow_host.assert_called_once_with("catalog.example")
         browser._cdp.send.assert_called_once_with("Fetch.continueRequest", {"requestId": "redirect"})
         route = Mock(request=SimpleNamespace(url=desktop, method="GET", resource_type="document", post_data=None, headers={}))
-        browser._route(route)
+        browser._route_request(route)
         route.continue_.assert_called_once()
 
     def test_public_scope_roundtrip_and_explicit_deny_keep_legacy_scope_unchanged(self):
@@ -111,15 +111,16 @@ class BrowserPolicyTests(unittest.TestCase):
             info = {"connected": True, "visible": True, "tag": "a", "role": "link",
                     "label": "如何删除账号 / delete account", "href": url}
             self.assertEqual(element_actions(info, scope.start_url, scope), ["click"])
-        self.assertEqual(element_actions({**info, "tag": "button", "href": "", "label": "删除"}, scope.start_url, scope), [])
+        self.assertEqual(element_actions({**info, "tag": "button", "href": "", "label": "删除"}, scope.start_url, scope), ["click"])
         browser = JobBrowser(lambda: None, scope=scope)
         handle = Mock()
         handle.evaluate.return_value = info
         browser._element = Mock(return_value=handle)
-        browser.read = Mock(return_value={"ready": True})
+        browser.page = Mock()
+        browser.observe = Mock(return_value={"ready": True})
         browser.click("observed")
-        browser.read.assert_called_once_with(info["href"])
-        handle.click.assert_not_called()
+        handle.click.assert_called_once_with(timeout=5000)
+        browser.observe.assert_called_once_with(wait_seconds=5)
 
     def test_exact_read_exceptions_are_bound_and_cannot_override_hard_boundaries(self):
         scope = BrowserScope("https://catalog.example/")
@@ -154,7 +155,7 @@ class BrowserPolicyTests(unittest.TestCase):
         browser = JobBrowser(lambda: None, scope=scope)
         route = Mock()
         route.request = SimpleNamespace(url=get_url, method="GET", resource_type="document", post_data=None, headers={})
-        browser._route(route)
+        browser._route_request(route)
         self.assertEqual(browser.policy_blocks[-1]["read_exception"], get_entry)
         browser._cdp = Mock()
         browser._continue_response({"request": {"url": get_url + "/redirect", "method": "GET"},
@@ -202,7 +203,7 @@ class BrowserPolicyTests(unittest.TestCase):
         with self.assertRaises(AssistantError):
             BrowserScope("https://catalog.example", blocked_urls=["https://foreign.example/data"])
 
-    def test_decorative_label_change_does_not_stale_but_write_change_still_denied(self):
+    def test_label_changes_do_not_filter_trusted_page_clicks(self):
         browser = JobBrowser(lambda: None)
         url = "https://" + SITE + "/experienced/position"
         browser.page = SimpleNamespace(url=url)
@@ -214,8 +215,7 @@ class BrowserPolicyTests(unittest.TestCase):
         browser._elements["o1-e1"] = (handle, info)
         self.assertIs(browser._element("o1-e1", "click"), handle)
         handle.evaluate.return_value = {**info, "label": "发送"}
-        with self.assertRaises(AssistantError):
-            browser._element("o1-e1", "click")
+        self.assertIs(browser._element("o1-e1", "click"), handle)
 
     def test_cdp_callback_failure_aborts_paused_request_and_reports_internal_error(self):
         browser = JobBrowser(lambda: None)
@@ -230,22 +230,24 @@ class BrowserPolicyTests(unittest.TestCase):
         browser._redirect_response({"requestId": "already-cancelled"})
         self.assertFalse(browser.internal_errors)
 
-    def test_capabilities_not_popup_workflow_and_sensitive_controls_denied(self):
+    def test_all_visible_enabled_elements_are_clickable_without_label_filtering(self):
         info = {"connected": True, "visible": True, "tag": "button", "label": "稍后再试", "disabled": False,
                 "href": "", "dialog": True, "search": False, "pagination": False, "type": "button"}
         url = "https://" + SITE + "/experienced/position"
         self.assertEqual(element_actions(info, url), ["click"])
         self.assertEqual(element_actions({**info, "label": "暂不使用"}, url), ["click"])
         for label in ("立即投递", "登录", "提交", "上传简历", "同意条款", "收藏", "关注", "转发"):
-            self.assertEqual(element_actions({**info, "label": label}, url), [])
+            self.assertEqual(element_actions({**info, "label": label}, url), ["click"])
         for label in ("立即体验", "未知操作", "确认选择", "我知道了"):
             self.assertEqual(element_actions({**info, "label": label}, url), ["click"])
         search = {**info, "tag": "input", "type": "text", "dialog": False, "search": True,
                   "label": "搜索职位", "placeholder": "搜索职位"}
-        self.assertEqual(element_actions(search, url), ["fill", "press"])
-        for changes in ({"type": "password"}, {"type": "email"}, {"disabled": True}, {"visible": False}):
+        self.assertEqual(element_actions(search, url), ["click", "fill", "press"])
+        for changes in ({"type": "password"}, {"type": "email"}):
+            self.assertEqual(element_actions({**search, **changes}, url), ["click"])
+        for changes in ({"disabled": True}, {"visible": False}):
             self.assertEqual(element_actions({**search, **changes}, url), [])
-        self.assertEqual(element_actions(search, url + "/123/detail"), ["fill", "press"])
+        self.assertEqual(element_actions(search, url + "/123/detail"), ["click", "fill", "press"])
         self.assertEqual(element_actions({**info, "dialog": False, "search": True, "label": "未知操作"}, url), ["click"])
         self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "2"}, url), ["click"])
         self.assertEqual(element_actions({**info, "dialog": False, "pagination": True, "label": "1000"}, url), ["click"])
@@ -274,7 +276,7 @@ class BrowserPolicyTests(unittest.TestCase):
         blocked = Mock()
         blocked.request = SimpleNamespace(url="https://catalog.example/api/sendMail", method="POST", resource_type="xhr", post_data='{}', headers={})
         previous = list(browser.network_errors)
-        browser._route(blocked)
+        browser._route_request(blocked)
         blocked.abort.assert_called_once()
         self.assertEqual(browser.network_errors, previous)
 

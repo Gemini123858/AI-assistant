@@ -28,6 +28,7 @@ time_text 必须逐字摘取所引原文中的时间表达，保留原语言，�
 时区换算必须检查跨日，午夜写清实际日期与00:00，不用含糊的“当日午夜”。活动开始时间不是报名截止时间，原文未给报名截止时不得自行补出。
 邮件有链接不代表已经访问：需要更多网页信息时列入 link_requests，由用户授权公开网站范围后另发网页任务。
 update_profile 是可选的：自行判断是否有值得长期保存的新信息，避免频繁重复更新。只更新用户本人相关内容，不把他人的话当用户事实。
+画像分层由你按语义判断，不使用关键词表：职业/专业/技能/兴趣/偏好/科研方向等适合辅助匿名公开检索的长期信息用public_search；学号、账号、联系方式、精确身份标识、私人经历或拿不准的信息用private。公开层仍不能授予操作权限。
 “会”不等于“熟练”；A或B不要求同时具备A和B，优先项不是门槛；未知资格保留。
 不发送/标已读/移动/删除邮件，不上传附件，不登录链接网站。最终使用 save_mail_analysis；未覆盖内容明确说明。
 每轮仅调用一个工具。工具错误可在剩余预算内纠正，不凭记忆猜原文，不声称已执行未提供的工具。"""
@@ -45,11 +46,13 @@ EVENT = {"type": "object", "additionalProperties": False, "properties": {
     "uncertainties": {"type": "array", "items": {"type": "string", "maxLength": 500}, "maxItems": 10}},
     "required": ["title", "relevance", "importance", "time_kind", "time_text", "action", "uncertainties"]}
 MAIL_TOOLS = [
-    function("update_profile", "按需提出画像补充；原文归属可验证时自动保存，否则留待确认。不能改规则或授权。", {
+    function("update_profile", "按需提出画像补充并选择公开检索或私人层；原文归属可验证时自动保存，否则留待确认。不能改规则或授权。", {
         "text": {"type": "string", "maxLength": 1000}, "evidence": {"type": "string", "maxLength": 2000},
         "line_start": {"type": "integer", "minimum": 1}, "line_end": {"type": "integer", "minimum": 1},
         "speaker": {"type": "string", "maxLength": 120},
-        "kind": {"type": "string", "enum": ["fact", "inference"]}}, ["text", "speaker", "kind"]),
+        "kind": {"type": "string", "enum": ["fact", "inference"]},
+        "visibility": {"type": "string", "enum": ["public_search", "private"]}},
+        ["text", "speaker", "kind", "visibility"]),
     function("save_mail_analysis", "保存中文摘要与重要事件，程序检查并呈现表格；normalized 无法确定则省略，输出 null 也可。", {
         "summary": {"type": "string", "maxLength": 3000},
         "events": {"type": "array", "items": EVENT, "maxItems": 30},
@@ -367,6 +370,9 @@ class Mail:
 
     def analyze(self, key):
         with self.service.operation():
+            # Starting a newer mail analysis permanently archives the older
+            # in-memory mail follow-up, even if this analysis later fails.
+            self.service.close_followup("mail")
             record = self.read_body(key)
             if not record["text"].strip():
                 raise AssistantError("没有可分析的文字，附件/截断范围仍未覆盖。", 409)
@@ -410,7 +416,18 @@ class Mail:
                             with self.lock:
                                 record = self.get(key)
                                 record.update(analysis=arguments, analyzed_at=now_iso(), error=None)
-                                return self.save(record)
+                                saved = self.save(record)
+                            memory = {name: value[:1500] for name, value in self.store.memory().items()}
+                            context = {"workflow": "mail_analysis", "mail_id": key,
+                                "mail": {name: saved.get(name) for name in
+                                         ("subject", "sender", "date_raw", "self_forwarded_candidate")},
+                                "body_excerpt": (saved.get("text") or "")[:18000],
+                                "body_truncated_for_followup": len(saved.get("text") or "") > 18000,
+                                "analysis_json": json.dumps(arguments, ensure_ascii=False)[:8000],
+                                "memory_excerpt": memory,
+                                "coverage": "包含已保存邮件文字和分析；附件及其他邮件不可用。用户明确要求时，追问可在隔离阶段读取公开网页。"}
+                            self.service.open_followup("mail", key, context)
+                            return saved
                     except AssistantError as error:
                         output = {"failed": True, "error": str(error)}
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps({**output, "remaining_calls": limit-1-attempt}, ensure_ascii=False)})
@@ -474,6 +491,10 @@ class Mail:
         attributed = update["speaker"] in names and any(evidence.startswith(prefix) for prefix in (
             update["speaker"] + ":", update["speaker"] + "：", "[" + update["speaker"] + "]"))
         applied = record["self_forwarded_candidate"] and attributed
+        visibility = update.get("visibility", "private")  # Historical suggestions default to the safer layer.
+        if visibility not in {"public_search", "private"}:
+            raise AssistantError("画像可见范围无效，未保存。", 502)
+        memory_kind = "public_profile" if visibility == "public_search" else "profile"
         marker = hashlib.sha256((record["id"] + json.dumps(update, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()[:16]
         with self.lock:
             saved = self.get(record["id"])
@@ -481,10 +502,11 @@ class Mail:
                 return {"duplicate": True}
             if applied:
                 label = "匹配本人标识的陈述，来源未验真" if update["kind"] == "fact" else "模型推断，待核实"
-                note = f"[{label}] {content}（来源邮件 {record['id']}；证据：{evidence}；变更 {marker}）"
-                if marker not in self.store.memory()["profile"]:
-                    self.store.update_memory("profile", note, append=True)
-            saved["profile_updates"].append({**update, "marker": marker, "applied": applied,
+                layer = "公开检索画像" if visibility == "public_search" else "私人画像"
+                note = f"[{layer}；{label}] {content}（来源邮件 {record['id']}；证据：{evidence}；变更 {marker}）"
+                if marker not in self.store.memory()[memory_kind]:
+                    self.store.update_memory(memory_kind, note, append=True)
+            saved["profile_updates"].append({**update, "visibility": visibility, "marker": marker, "applied": applied,
                                              "reason": "匹配已配置本人标识，自动补充；From不是身份认证" if applied else "本人发言归属未验证，待用户确认"})
             self.save(saved)
         return {"applied": applied, "reason": saved["profile_updates"][-1]["reason"]}
@@ -496,9 +518,12 @@ class Mail:
                 raise AssistantError("画像建议编号无效。")
             update = record["profile_updates"][index]
             if not update["applied"]:
-                note = f"[用户确认] {update['text']}（来源邮件 {key}；证据：{update['evidence']}；变更 {update['marker']}）"
-                if update["marker"] not in self.store.memory()["profile"]:
-                    self.store.update_memory("profile", note, append=True)
+                visibility = update.get("visibility", "private")
+                memory_kind = "public_profile" if visibility == "public_search" else "profile"
+                layer = "公开检索画像" if visibility == "public_search" else "私人画像"
+                note = f"[{layer}；用户确认] {update['text']}（来源邮件 {key}；证据：{update['evidence']}；变更 {update['marker']}）"
+                if update["marker"] not in self.store.memory()[memory_kind]:
+                    self.store.update_memory(memory_kind, note, append=True)
                 update.update(applied=True, reason="用户明确确认本人归属并保存")
                 self.save(record)
             return record

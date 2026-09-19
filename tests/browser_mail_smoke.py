@@ -39,6 +39,7 @@ def main():
                     page.locator("#mail-list").get_by_role("heading", name="聊天记录").wait_for()
                     page.get_by_role("button", name="细读分析（调用模型）", exact=True).click()
                     page.locator("#mail-events td").filter(has_text="提交申请").first.wait_for()
+                    page.get_by_role("heading", name="继续追问").wait_for()
                     assert "截止" in page.locator("#mail-events").inner_text()
                     assert "2026-09-25" in page.locator("#mail-events").inner_text()
                     page.get_by_role("button", name="只读查看正文").click()

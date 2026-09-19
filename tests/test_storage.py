@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from assistant.browser import BrowserScope
 from assistant.errors import AssistantError
 from assistant.storage import Store, normalize_message
 
@@ -119,6 +120,30 @@ class StorageTests(unittest.TestCase):
         snapshot = next(item for item in snapshots if item["after"] == "新画像")
         self.store.update_memory("profile", snapshot["before"])
         self.assertEqual(self.store.memory()["profile"], "旧画像")
+
+    def test_public_search_profile_is_explicitly_separate_and_persistent(self):
+        self.assertEqual(self.store.memory()["public_profile"], "")
+        self.store.update_memory("public_profile", "熟悉 Python，关注知识图谱")
+        self.store.update_memory("profile", "合成私人标识")
+        self.store.close()
+        self.store = Store(self.root)
+        memory = self.store.memory()
+        self.assertEqual(memory["public_profile"], "熟悉 Python，关注知识图谱")
+        self.assertEqual(memory["profile"], "合成私人标识")
+
+    def test_existing_task_without_public_profile_stays_private(self):
+        memory = self.store.memory()
+        memory["profile"] = "旧任务私人画像"
+        task = self.store.create_task("查询", "public_web", "api", memory,
+            {"calls": 2, "seconds": 60, "steps": 2, "pages": 2, "details": 2},
+            BrowserScope("https://catalog.example/", public_web=True).as_dict(), "公开查询")
+        path = self.root / "tasks" / f"{task['id']}.json"
+        raw = json.loads(path.read_text())
+        raw["memory"].pop("public_profile")
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        loaded = self.store.get_task(task["id"])
+        self.assertEqual(loaded["memory"]["public_profile"], "")
+        self.assertEqual(loaded["memory"]["profile"], "旧任务私人画像")
 
     def test_corrupt_file_is_not_treated_as_empty(self):
         record, _ = self.store.import_message(notification())

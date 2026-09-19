@@ -88,7 +88,7 @@ class Store:
             raise AssistantError("已有实例正在使用该数据目录，请勿启动第二个写入进程。", 409) from exc
         try:
             self._recover_memory()
-            for kind in ("profile", "rules"):
+            for kind in ("public_profile", "profile", "rules"):
                 path = self.root / "memory" / f"{kind}.md"
                 if not path.exists():
                     self._write(path, "")
@@ -216,14 +216,15 @@ class Store:
         with self._mutex:
             self._recover_memory()
             return {kind: self._read_text(self.root / "memory" / f"{kind}.md")
-                    for kind in ("profile", "rules")}
+                    for kind in ("public_profile", "profile", "rules")}
 
     def _task_path(self, key):
         if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
             raise AssistantError("任务标识无效。")
         return self.root / "tasks" / f"{key}.json"
 
-    def create_task(self, request, portal, mode, memory, limits, scope=None, public_request=None, private_conditions=None):
+    def create_task(self, request, portal, mode, memory, limits, scope=None, public_request=None,
+                    private_conditions=None, profile_supplement=""):
         with self._mutex:
             key = uuid.uuid4().hex
             record = {"schema_version": 2 if scope else 1, "id": key, "request": request, "portal": portal,
@@ -232,7 +233,8 @@ class Store:
                       "calls": 0, "steps": 0, "pages": [], "actions": [], "errors": [], "result": None,
                       "note": "仅限授权的公开网页读取；不登录、不发送或提交。"}
             if scope:
-                record.update(scope=scope, public_request=public_request, phase="browsing", stop_reason="")
+                record.update(scope=scope, public_request=public_request, profile_supplement=profile_supplement,
+                              phase="browsing", stop_reason="")
                 if private_conditions is not None:
                     record["private_conditions"] = private_conditions
             self._write_json(self._task_path(key), record)
@@ -260,7 +262,11 @@ class Store:
                     raise ValueError("invalid envelope")
                 text_field(record["request"], "任务要求", 2000)
                 text_field(record["note"], "任务状态说明", 3000)
-                for kind in ("profile", "rules"):
+                # public_profile was added after schema 2 tasks already existed.
+                # Keep old task snapshots readable without reclassifying any
+                # existing private profile text as public.
+                record["memory"].setdefault("public_profile", "")
+                for kind in ("public_profile", "profile", "rules"):
                     text_field(record["memory"][kind], "任务记忆", allow_empty=True)
                 if modern:
                     from .browser import BrowserScope
@@ -268,6 +274,8 @@ class Store:
                     if BrowserScope(**scope).as_dict() != scope:
                         raise ValueError("invalid scope")
                     text_field(record["public_request"], "公开查询说明", 4000)
+                    text_field(record.get("profile_supplement", ""), "本次公开画像补充", 2000, True)
+                    record.setdefault("profile_supplement", "")
                     if "private_conditions" in record:
                         text_field(record["private_conditions"], "私人筛选条件", 2000, True)
                     if record["phase"] not in {"browsing", "analysis"}:
@@ -312,7 +320,8 @@ class Store:
                     if (type(action["step"]) is not int or not 1 <= action["step"] <= record["steps"]
                             or action["tool"] not in {"open_link", "open_url", "observe_page", "click_element", "fill_field", "scroll_page",
                                                       "go_back", "refresh_page", "wait_page", "press_key", "select_option", "check_field",
-                                                      "restart_browser", "take_screenshot", "read_source", "search_source", "hover_element", "dismiss_overlay"}
+                                                      "restart_browser", "take_screenshot", "read_source", "search_source", "hover_element", "dismiss_overlay",
+                                                      "click_text", "list_tabs", "switch_tab", "close_tab"}
                             or action["status"] not in {"running", "success", "incomplete", "failed", "interrupted"}
                             or not isinstance(action["arguments"], dict)):
                         raise ValueError("invalid action")
@@ -362,8 +371,8 @@ class Store:
             return name
 
     def update_memory(self, kind, content, append=False):
-        if kind not in {"profile", "rules"}:
-            raise AssistantError("记忆类型必须是 profile 或 rules。")
+        if kind not in {"public_profile", "profile", "rules"}:
+            raise AssistantError("记忆类型必须是 public_profile、profile 或 rules。")
         content = text_field(content, "记忆内容", allow_empty=True)
         with self._mutex:
             self._recover_memory()
@@ -390,7 +399,7 @@ class Store:
         if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{32}", revision):
             raise AssistantError("记忆恢复记录无效。", 500)
         snapshot = self._read_json(self.root / "memory" / "history" / f"{revision}.json")
-        if snapshot.get("kind") not in {"profile", "rules"} or not isinstance(snapshot.get("after"), str):
+        if snapshot.get("kind") not in {"public_profile", "profile", "rules"} or not isinstance(snapshot.get("after"), str):
             raise AssistantError("记忆快照损坏，不能恢复。", 500)
         self._write(self.root / "memory" / f"{snapshot['kind']}.md", snapshot["after"])
         pending.unlink()

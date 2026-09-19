@@ -1,5 +1,6 @@
 import hashlib
 import json
+import copy
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -16,6 +17,8 @@ class Service:
         self.config = config
         self.model = model if model is not None else (APIModel(config) if config.mode == "api" else DemoModel())
         self._operation_lock = threading.Lock()
+        self._followup_lock = threading.RLock()
+        self._followups = {"task": None, "mail": None}
 
     @contextmanager
     def operation(self):
@@ -29,6 +32,55 @@ class Service:
 
     def day(self):
         return datetime.now(ZoneInfo(self.config.timezone)).date().isoformat()
+
+    @staticmethod
+    def _followup_kind(kind):
+        if kind not in {"task", "mail"}:
+            raise AssistantError("追问类型无效。", 400)
+        return kind
+
+    def open_followup(self, kind, key, context):
+        kind = self._followup_kind(kind)
+        serialized = json.dumps(context, ensure_ascii=False)
+        if len(serialized) > 36000:
+            raise AssistantError("追问上下文超过本版限制，原分析结果已保存但未开启追问。", 409)
+        with self._followup_lock:
+            self._followups[kind] = {"kind": kind, "key": key, "turns": [],
+                "context": copy.deepcopy(context), "state": {"pages": []}}
+
+    def followups(self):
+        with self._followup_lock:
+            return {kind: (None if item is None else
+                    {"kind": kind, "key": item["key"], "turns": copy.deepcopy(item["turns"])})
+                    for kind, item in self._followups.items()}
+
+    def close_followup(self, kind, key=None):
+        kind = self._followup_kind(kind)
+        with self._followup_lock:
+            item = self._followups[kind]
+            if key is not None and (item is None or item["key"] != key):
+                raise AssistantError("该追问会话已归档或被更新任务替代。", 409)
+            self._followups[kind] = None
+
+    def close_followups(self):
+        with self._followup_lock:
+            self._followups = {"task": None, "mail": None}
+
+    def ask_followup(self, kind, key, message, agent):
+        kind = self._followup_kind(kind)
+        question = text_field(message, "追问", 4000)
+        with self.operation(), self._followup_lock:
+            item = self._followups[kind]
+            if item is None or item["key"] != key:
+                raise AssistantError("该追问会话已归档或被更新任务替代。", 409)
+            if len(item["turns"]) >= 40:
+                raise AssistantError("本次追问已达20轮，请关闭后发起新的任务或分析。", 409)
+            working = copy.deepcopy(item)
+            reply = text_field(agent(working, question), "追问回答", 6000)
+            working["turns"].extend(({"role": "user", "text": question},
+                                     {"role": "assistant", "text": reply}))
+            self._followups[kind] = item = working
+            return {"kind": kind, "key": key, "turns": copy.deepcopy(item["turns"])}
 
     def _complete(self, instruction, data):
         data = {**data, "current_time": datetime.now(ZoneInfo(self.config.timezone)).isoformat()}

@@ -185,6 +185,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/memory").json["profile"], "")
 
     def test_memory_can_be_viewed_edited_and_removed(self):
+        public = self.client.put("/api/memory/public_profile", json={"content": "熟悉 Python"}, headers=self.headers)
+        self.assertEqual(public.status_code, 200)
+        self.assertEqual(public.json["public_profile"], "熟悉 Python")
         self.assertEqual(self.client.put("/api/memory/profile", json={"content": "信息"}, headers=self.headers).status_code, 200)
         self.assertEqual(self.client.put("/api/memory/profile", json={"content": ""}, headers=self.headers).status_code, 200)
         self.assertEqual(self.client.get("/api/memory").json["profile"], "")

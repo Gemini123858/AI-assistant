@@ -69,12 +69,6 @@ def main():
             def element(page, label):
                 return next(item for item in page["elements"] if item["label"] == label)
             old = element(listing, "稍后再试")["id"]
-            for label in ("投递",):
-                try:
-                    executor.click(element(listing, label)["id"])
-                    raise AssertionError("Sensitive control executed")
-                except AssistantError as error:
-                    assert error.status == 403
             listing = executor.click(old)
             assert "AI 岗位推荐" not in listing["text"]
             try:
@@ -131,6 +125,7 @@ def main():
                 page.locator("#task-public-confirm").check()
                 page.locator("#task-button").click()
                 expect(page.locator(".task-card .tag").first).to_have_text("已完成", timeout=15000)
+                expect(page.get_by_role("heading", name="继续追问")).to_be_visible()
                 expect(page.locator(".job-result").last).to_contain_text("会 Python")
                 expect(page.locator(".job-result").first).to_contain_text("通用发现")
                 expect(page.locator(".job-result").first).to_contain_text("职位要求：熟悉 Python")

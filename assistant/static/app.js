@@ -7,10 +7,11 @@ let offset = 0;
 let total = 0;
 const pageSize = 20;
 let toastTimer;
-const savedMemory = { profile: "", rules: "" };
+let followups = { task: null, mail: null };
+const savedMemory = { public_profile: "", profile: "", rules: "" };
 
 function refreshMemory(memory) {
-  for (const kind of ["profile", "rules"]) {
+  for (const kind of ["public_profile", "profile", "rules"]) {
     const field = $(kind + "-text");
     if (field.value === savedMemory[kind]) field.value = memory[kind];
     savedMemory[kind] = memory[kind];
@@ -22,6 +23,41 @@ function node(tag, className = "", text = "") {
   if (className) element.className = className;
   if (text) element.textContent = text;
   return element;
+}
+
+function followupBox(kind, key, refresh) {
+  const session = followups[kind];
+  if (!session || session.key !== key) return null;
+  const box = node("section", "followup-box");
+  const heading = node("div", "followup-heading");
+  heading.append(node("h3", "", "继续追问"));
+  const close = node("button", "quiet", "关闭并归档");
+  close.addEventListener("click", () => working(close, async () => {
+    await api(`/api/followups/${kind}/${key}/close`, "POST", {});
+    followups[kind] = null;
+    await refresh();
+  }));
+  heading.append(close); box.append(heading);
+  const history = node("div", "followup-history");
+  for (const turn of session.turns) history.append(node("div", `bubble ${turn.role}`, turn.text));
+  if (!session.turns.length) history.append(node("p", "caption", "可以继续提问或要求补查公开网页。网页追问沿用原任务范围；邮件追问会把公开浏览与邮件私人上下文隔离。一次回答可能调用多轮模型和浏览器工具。"));
+  box.append(history);
+  const form = node("form", "followup-form");
+  const input = node("textarea");
+  input.required = true; input.maxLength = 4000; input.rows = 2;
+  input.placeholder = "继续追问这个结果……";
+  const send = node("button", "primary", "发送追问");
+  form.append(input, send);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    working(send, async () => {
+      const response = await api(`/api/followups/${kind}/${key}`, "POST", { message: input.value });
+      followups[kind] = response.session;
+      await Promise.all([refresh(), loadStatus()]);
+    });
+  });
+  box.append(form);
+  return box;
 }
 
 function toast(text, error = false) {
@@ -202,6 +238,7 @@ function taskCard(task) {
   if (task.scope) card.append(node("p", "caption", domains === null ?
     "阅读范围：任务相关的公网 HTTPS 网页与数据（不授权外部写入）" : "限定访问域：" + domains.join("、")));
   if (task.public_request) card.append(node("p", "caption", "公开任务目标：" + task.public_request));
+  if (task.profile_supplement) card.append(node("p", "caption", "本次公开画像补充：" + task.profile_supplement));
   if (task.private_conditions) card.append(node("p", "caption", "私人筛选条件：" + task.private_conditions));
   if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "历史 POST 授权记录（新策略不再依赖）：" + task.scope.read_post_urls.join("、")));
   if (task.scope?.blocked_urls?.length) card.append(node("p", "caption", "禁止访问路径：" + task.scope.blocked_urls.join("、")));
@@ -221,6 +258,7 @@ function taskCard(task) {
         entries.findIndex((other) => JSON.stringify(other) === JSON.stringify(entry)) === index), null, 2);
       $("task-read-exceptions").closest("details").open = true;
       $("task-public-request").value = task.public_request;
+      $("task-profile-supplement").value = task.profile_supplement || "";
       $("task-request").value = task.private_conditions ?? (task.request !== task.public_request ? task.request : "");
       $("task-public-confirm").checked = false;
       $("task-form").scrollIntoView({ behavior: "smooth" });
@@ -236,7 +274,7 @@ function taskCard(task) {
   if (task.actions?.length) {
     const actions = node("details", "task-actions");
     actions.append(node("summary", "", "查看浏览器动作记录"));
-    const labels = { open_link: "打开链接", open_url: "打开 URL", observe_page: "观察页面", click_element: "点击元素", fill_field: "填写搜索框", scroll_page: "滚动页面", go_back: "返回", refresh_page: "刷新", wait_page: "等待", press_key: "按键", select_option: "选择筛选项", check_field: "勾选筛选", restart_browser: "重启匿名浏览器", take_screenshot: "截图（输入已遮罩）", read_source: "读取保存证据" };
+    const labels = { open_link: "打开链接", open_url: "打开 URL", observe_page: "观察页面", click_element: "点击元素", click_text: "点击正文文字", list_tabs: "列出标签页", switch_tab: "切换标签页", close_tab: "关闭标签页", fill_field: "填写搜索框", scroll_page: "滚动页面", go_back: "返回", refresh_page: "刷新", wait_page: "等待", press_key: "按键", select_option: "选择筛选项", check_field: "勾选筛选", restart_browser: "重启匿名浏览器", take_screenshot: "截图（输入已遮罩）", read_source: "读取保存证据" };
     const states = { running: "执行中", success: "动作已执行", incomplete: "正文尚不可读", failed: "失败", interrupted: "已中止，结果未验证" };
     for (const action of task.actions) {
       actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error_kind ? " · " + action.error_kind : ""}${action.error ? " · " + action.error : ""}`));
@@ -245,6 +283,8 @@ function taskCard(task) {
       for (const item of action.connection_errors || []) actions.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
       if (action.loop_warning) actions.append(node("p", "caption", action.loop_warning));
       if (action.streak_warning) actions.append(node("p", "notice", action.streak_warning));
+      if (action.tabs?.length) actions.append(node("p", "caption", "打开的标签页：" + action.tabs.map((tab) =>
+        `${tab.tab_id}${tab.active ? "（当前）" : ""} · ${tab.title || tab.url}`).join("；")));
       if (action.remaining) actions.append(node("p", "caption", `动作结束时剩余：模型 ${action.remaining.calls} 次 / 动作 ${action.remaining.steps} 步 / 时间 ${action.remaining.seconds} 秒`));
     }
     card.append(actions);
@@ -270,6 +310,8 @@ function taskCard(task) {
     }
     if (task.result.questions.length) card.append(node("p", "notice", "需要你补充：" + task.result.questions.join("；")));
   }
+  const taskFollowup = followupBox("task", task.id, loadTasks);
+  if (taskFollowup) card.append(taskFollowup);
   for (const error of task.errors) {
     card.append(node("p", "notice", `历史失败/恢复线索${error.step ? "（步骤" + error.step + "）" : ""}：${error.kind || "读取失败"} · ${error.url} · ${error.error}`));
     for (const item of error.network_errors || []) card.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
@@ -318,6 +360,7 @@ function taskCard(task) {
       $("task-blocked-urls").value = (task.scope.blocked_urls || []).join("\n");
       $("task-read-exceptions").value = JSON.stringify(task.scope.read_exceptions || [], null, 2);
       $("task-public-request").value = task.public_request;
+      $("task-profile-supplement").value = task.profile_supplement || "";
       $("task-request").value = task.private_conditions ?? (task.request !== task.public_request ? task.request : "");
       $("task-public-confirm").checked = false;
       $("task-form").scrollIntoView({ behavior: "smooth" });
@@ -337,7 +380,8 @@ function taskCard(task) {
 let taskPoll;
 async function loadTasks() {
   clearTimeout(taskPoll);
-  const data = await api("/api/tasks");
+  const [data, sessions] = await Promise.all([api("/api/tasks"), api("/api/followups")]);
+  followups = sessions;
   const open = new Set([...$("task-list").querySelectorAll(".task-card")]
     .filter((card) => card.querySelector("details.task-pages")?.open).map((card) => card.dataset.taskId));
   const openActions = new Set([...$("task-list").querySelectorAll(".task-card")]
@@ -361,6 +405,7 @@ $("task-form").addEventListener("submit", (event) => {
     const splitDomains = (id) => $(id).value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
     const domains = [...new Set([start.hostname, ...splitDomains("task-domains")])];
     await api("/api/tasks", "POST", { goal: $("task-public-request").value,
+      profile_supplement: $("task-profile-supplement").value,
       private_conditions: $("task-request").value, start_url: start.href,
       public_web: !$("task-limit-domains").checked,
       domains, resource_domains: splitDomains("task-resources"),
@@ -508,6 +553,7 @@ function mailCard(record) {
         $("task-limit-domains").checked = false;
         $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = ""; $("task-read-exceptions").value = "";
         $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
+        $("task-profile-supplement").value = "";
         $("task-request").value = "";
         $("task-public-confirm").checked = false;
         document.querySelector('[data-tab="tasks"]').click();
@@ -516,8 +562,11 @@ function mailCard(record) {
       card.append(browse);
     }
   }
+  const mailFollowup = followupBox("mail", record.id, loadMail);
+  if (mailFollowup) card.append(mailFollowup);
   for (const [index, update] of record.profile_updates.entries()) {
-    card.append(node("p", "notice", `画像${update.applied ? "已补充" : "建议待确认"}：${update.text}；${update.reason}`));
+    const layer = update.visibility === "public_search" ? "公开检索画像" : "私人画像";
+    card.append(node("p", "notice", `${layer}${update.applied ? "已补充" : "建议待确认"}：${update.text}；${update.reason}`));
     card.append(node("p", "caption", `来源：${update.evidence}`));
     if (!update.applied) {
       const confirm = node("button", "quiet", "确认属于我并保存画像");
@@ -541,7 +590,8 @@ function mailCard(record) {
 }
 
 async function loadMail() {
-  const data = await api("/api/mail");
+  const [data, sessions] = await Promise.all([api("/api/mail"), api("/api/followups")]);
+  followups = sessions;
   const status = data.status;
   $("mail-status").textContent = status.enabled ? `${status.started ? "新邮件同步已启用" : "尚未启用；不会读取历史"} · 检查间隔 ${status.poll_seconds} 秒 · ${status.error || "后台不调用模型"}` : "未配置：在私有 .env 填写 QQ_IMAP_USER、QQ_IMAP_AUTH_CODE 和 ASSISTANT_ACCESS_TOKEN，重启后启用。不要把授权码贴到网页/聊天。";
   $("mail-start").disabled = !status.enabled || status.started;

@@ -71,10 +71,11 @@
             <p class="caption">仅在核实为阅读后确认。绑定完整URL（含查询参数）、方法、请求类型；POST还绑定正文SHA256和Content-Type。不能覆盖域范围、显式禁令、凭据、文件或写入正文；不授权实际写操作。</p>
           </details>
           <label>公开任务目标（必填，浏览与回答围绕此目标）<textarea id="task-public-request" rows="4" required maxlength="2000" placeholder="例如：查找此网站的计算机相关岗位，进入具体岗位查看职责和要求，给出名称、地点、要求及来源。不要只写注意事项；不要填私人信息。"></textarea></label>
+          <label>本次公开画像补充（可选，不写回长期画像）<textarea id="task-profile-supplement" rows="2" maxlength="2000" placeholder="例如：本次只看上海岗位；最近开始关注多模态方向。这些内容会用于网页检索词和筛选，不要填写账号、学号或联系方式。"></textarea></label>
           <label for="task-request">私人筛选条件（可选，仅在分析时提供）<textarea id="task-request" rows="2" maxlength="2000" placeholder="例如：结合我的画像比较技能差距；个人经历或不希望发送网站的条件放在这里，不要把查询目标只写在这里。"></textarea></label>
           <label><input id="task-public-confirm" type="checkbox" required> 我确认公开目标可用于网站检索，允许匿名读取任务相关的公网 HTTPS 网页、数据和资源（开启限定模式则遵守指定范围）；不授权登录、发送、上传或业务提交。如填写阅读豁免，已核实其用途。接受匿名浏览风险，查询策略由模型决定。</label>
           <button id="task-button" type="submit" class="primary">开始读取与分析</button>
-          <p class="caption">公开目标始终传给模型，无需重复填写。私人条件与画像只在关闭网站动作后的分析阶段提供。任务共享日额度；只用于匿名可信公开查询，不授权登录、发送、上传或提交。</p>
+          <p class="caption">长期公开检索画像由程序在已授权资料分析中维护，本次补充只影响当前任务。私人条件与私人画像只在关闭网站动作后的分析阶段提供。任务共享日额度；只用于匿名可信公开查询，不授权登录、发送、上传或提交。</p>
           <p id="task-availability" class="caption"></p>
         </form>
       </div>
@@ -91,8 +92,9 @@
       <div class="section-heading"><h2>新邮件及分析结果</h2><span id="mail-count" class="caption"></span></div><div id="mail-list" class="message-list"></div>
     </section>
     <section id="memory-panel" class="memory-workspace" hidden>
-      <div class="memory-intro"><h2>让判断有自己的上下文。</h2><p class="muted">信息与纠正保存在本机 Markdown 文件，可直接编辑。保存即生效，不修改你的原资料。</p><p class="caption">这里的内容会随分析和问答发送给已配置的模型。不要填写密码、Key 或不适合外发的内容。</p></div>
-      <form class="panel memory-form" data-kind="profile"><h3>个人画像</h3><p class="caption">明确的个人信息、当前状态和偏好。推断信息请标明“待核实”。</p><label class="sr-only" for="profile-text">个人画像内容</label><textarea id="profile-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 我目前正在找实习。&#10;- 我希望优先看到需要报名或提交材料的通知。"></textarea><button class="primary" type="submit">保存画像</button></form>
+      <div class="memory-intro"><h2>让判断有自己的上下文。</h2><p class="muted">信息与纠正保存在本机 Markdown 文件，可直接编辑。保存即生效，不修改你的原资料。</p><p class="caption">这些内容会按下面标注的范围发送给已配置的模型。不要填写密码或 Key；公开检索画像可能转化为网站搜索词，但不会用于身份或业务表单。</p></div>
+      <form class="panel memory-form" data-kind="public_profile"><h3>公开检索画像（程序维护）</h3><p class="caption">模型在你明确发起的资料分析中，从可归属于你的长期信息里维护专业、职业方向、技能、兴趣、科研方向和偏好。网页任务全程可用；这里用于查看、纠正或删除，不要求每次任务手填。</p><label class="sr-only" for="public_profile-text">公开检索画像内容</label><textarea id="public_profile-text" rows="10" maxlength="12000" placeholder="尚无程序确认的公开检索画像；也可以在这里直接纠正。"></textarea><button class="primary" type="submit">保存纠正</button></form>
+      <form class="panel memory-form" data-kind="profile"><h3>私人画像（程序维护）</h3><p class="caption">学号、账号、联系方式、精确身份或其他不适合公开检索的信息进入这一层，只在关闭网页操作后的分析阶段使用。这里用于查看、纠正或删除。</p><label class="sr-only" for="profile-text">私人画像内容</label><textarea id="profile-text" rows="10" maxlength="12000" placeholder="旧画像保留在这里，不会自动迁入公开层。"></textarea><button class="primary" type="submit">保存纠正</button></form>
       <form class="panel memory-form" data-kind="rules"><h3>纠正规则</h3><p class="caption">具体、可验证的纠正。规则不能授予助手发送或提交权限。</p><label class="sr-only" for="rules-text">纠正规则内容</label><textarea id="rules-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 不要把报名截止时间当成活动开始时间。"></textarea><button class="primary" type="submit">保存规则</button></form>
     </section>
   </main>

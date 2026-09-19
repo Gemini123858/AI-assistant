@@ -23,6 +23,25 @@ ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,summary,[onclick],[role
 CLICKABLE_INFO = r"""e => !!e.onclick || Object.keys(e).some(k =>
     /^(?:__reactProps\$|__reactEventHandlers\$)/.test(k) &&
     e[k] && typeof e[k].onClick === 'function')"""
+# Discovery is deliberately inclusive: event delegation need not leave an
+# onclick property or a framework marker. Priority only orders the results;
+# it never removes a visible node. Include open shadow roots as well.
+ELEMENT_CANDIDATES = """selector => {
+    const declared = """ + CLICKABLE_INFO + """;
+    const preferred = [], remaining = [];
+    function visit(root) {
+        for (const e of root.querySelectorAll('*')) {
+            const style = getComputedStyle(e);
+            if (e.getClientRects().length && style.visibility !== 'hidden') {
+                (e.matches(selector) || declared(e) || style.cursor === 'pointer'
+                    ? preferred : remaining).push(e);
+            }
+            if (e.shadowRoot) visit(e.shadowRoot);
+        }
+    }
+    visit(document);
+    return preferred.concat(remaining);
+}"""
 ELEMENT_INFO = """e => {
     const visible = !!e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
     const parent = e.closest('[role="search"], [class*="search" i]');
@@ -42,7 +61,6 @@ ELEMENT_INFO = """e => {
 }"""
 
 
-WRITE_LABEL = re.compile(r"投递|登录|登入|注册|上传|发送|提交|验证码|订阅|购买|删除|保存|支付|收藏|关注|转发|sign.?in|log.?in|apply now|submit|send|upload|save|delete|purchase|subscribe|checkout|favorite|follow", re.I)
 WRITE_PATH = re.compile(r"(?:^|[/_.\s-])(?:login|logout|signin|signup|register|apply|deliver|submit|upload|delete|remove|save|send|create|update|insert|edit|collect|favorite|follow|unfollow|subscribe|unsubscribe|checkout|purchase|payment|captcha|verify)(?:$|[/_.\s-])", re.I)
 CREDENTIAL_FIELD = re.compile(r"(?:^|[/_.\s-])(?:password|passwd|authorization|access_token|refresh_token|auth_code|credit_card)(?:$|[/_.\s-])", re.I)
 # Whole operation segments are still ambiguous, but article slugs are not
@@ -181,47 +199,31 @@ class BrowserScope:
 
 
 def element_actions(info, url, scope=None):
-    """Site-level read capabilities, NOT a fixed popup/search workflow."""
+    """All visible enabled nodes may be clicked; filling remains a separate capability."""
     if not info.get("connected") or not info.get("visible") or info.get("disabled"):
         return []
-    label = info.get("label", "")
-    if info.get("href"):
-        try:
-            navigation_url(info["href"], scope)
-            return ["click"]
-        except AssistantError:
-            return []
-    if WRITE_LABEL.search(label):
-        return []
+    actions = ["click"]
     search = info.get("search") or info.get("type") == "search" or bool(re.search(
         r"搜索|关键词|关键字|search|query|keywords", " ".join(info.get(k, "") for k in ("label", "placeholder", "name")), re.I))
     read_control = search or info.get("filter") or info.get("pagination")
-    if info.get("form"):
+    if info.get("form") and search:
         try:
             navigation_url(info.get("form_action"), scope)
         except AssistantError:
-            return []
+            return actions
         method = info.get("form_method")
         post_allowed = allowed_request(info.get("form_action"), "POST", "document", "", scope)
         if not search or method != "GET" and not (method == "POST" and post_allowed):
-            return []
+            return actions
     if info.get("tag") in {"input", "textarea"}:
         if read_control and info.get("type") in {"", "text", "search"}:
-            return ["fill", "press"]
+            return actions + ["fill", "press"]
         if info.get("filter") and info.get("type") in {"checkbox", "radio"}:
-            return ["check"]
-        return []
+            return actions + ["check"]
+        return actions
     if info.get("tag") == "select" and read_control:
-        return ["select"]
-    if read_control or info.get("role") == "tab":
-        return ["click"]
-    # Navigation/UI buttons are model-directed; the network layer still applies
-    # the negative policy. No positive popup-label whitelist is needed.
-    if info.get("tag") == "button" or info.get("role") in {"button", "menuitem", "link"}:
-        if re.search(r"同意|接受|accept|agree", label, re.I) and not info.get("cookie"):
-            return []
-        return ["click"]
-    return []
+        return actions + ["select"]
+    return actions
 
 
 def request_url(value, hosts):
@@ -415,6 +417,11 @@ def resolver_rules(hosts, mode="system", check=lambda: None):
 
 
 class JobBrowser:
+    # Only transport is shared. Background tabs must not overwrite the current
+    # tab's readiness, pending requests or failure diagnosis.
+    TAB_STATE_FIELDS = ("read_errors", "data_errors", "_pending_data", "data_responses", "network_errors",
+                        "internal_errors", "policy_blocks", "_document_ok", "_proxy_auth_failed")
+
     def __init__(self, check, dns_mode="system", scope=None):
         self.check = check
         self.dns_mode = "system"
@@ -434,6 +441,96 @@ class JobBrowser:
         self._document_ok = False
         self._transport = None
         self._proxy_auth_failed = False
+        self._tabs, self._page_ids, self._tab_states, self._tab_cdps = {}, {}, {}, {}
+        self._tab_titles = {}
+        self._tab_sequence = 0
+        self._observed_text = ""
+
+    def _save_tab_state(self):
+        if self.page is not None:
+            self._tab_states[self.page] = {key: getattr(self, key) for key in self.TAB_STATE_FIELDS}
+
+    def _activate_page(self, page):
+        self._save_tab_state()
+        self.page = page
+        self._cdp = self._tab_cdps.get(page)
+        state = self._tab_states.get(page, {})
+        for key in self.TAB_STATE_FIELDS:
+            default = False if key in {"_document_ok", "_proxy_auth_failed"} else {} if key in {"data_errors", "_pending_data"} else []
+            setattr(self, key, state.get(key, default))
+
+    def _page_event(self, page, callback, *args):
+        # Playwright's synchronous callbacks share one thread. Restore the
+        # selected tab even when a background callback raises.
+        selected = self.page
+        if page is not selected:
+            self._activate_page(page)
+        try:
+            return callback(*args)
+        finally:
+            self._save_tab_state()
+            if page is not selected:
+                self._activate_page(selected)
+
+    def _attach_page(self, page):
+        if page in self._page_ids or page.is_closed() is True:
+            return
+        self._tab_sequence += 1
+        key = f"t{self._tab_sequence}"
+        self._page_ids[page], self._tabs[key] = key, page
+        self._tab_states[page] = {}
+        for event, callback in (("request", self._request_started), ("requestfinished", self._finished),
+                                ("requestfailed", self._network_failure), ("response", self._http_status)):
+            page.on(event, lambda value, callback=callback: self._page_event(page, callback, value))
+        page.on("dialog", lambda dialog: dialog.dismiss())
+        page.on("close", lambda: self._tabs.pop(key, None))
+        cdp = self.context.new_cdp_session(page)
+        self._tab_cdps[page] = cdp
+        cdp.on("Fetch.requestPaused", lambda event: self._page_event(page, self._redirect_response, event))
+        cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Response"}]})
+
+    def list_tabs(self):
+        self.check()
+        tabs = []
+        for key, page in list(self._tabs.items()):
+            if page.is_closed():
+                continue
+            # Never wait for a background page's execution context just to
+            # enumerate tabs. Its title is filled when that tab is observed.
+            title = self._tab_titles.get(page, "")
+            tabs.append({"tab_id": key, "url": page.url, "title": title, "active": page is self.page})
+        return {"tabs": tabs, "active_tab": self._page_ids.get(self.page)}
+
+    def _ensure_page(self):
+        if self.page is None or self.page.is_closed() is True:
+            page = next((page for page in self._tabs.values() if not page.is_closed()), None)
+            if page is None:
+                page = self.context.new_page()
+                self._attach_page(page)
+            self._activate_page(page)
+            self._clear_elements()
+
+    def switch_tab(self, tab_id):
+        self.check()
+        page = self._tabs.get(tab_id)
+        if page is None or page.is_closed():
+            raise BrowserError("标签页不存在或已关闭，请先列出标签页。", "interaction", False, 409)
+        self._activate_page(page)
+        self._clear_elements()
+        return self.observe(wait_seconds=5)
+
+    def close_tab(self, tab_id):
+        self.check()
+        page = self._tabs.get(tab_id)
+        if page is None or page.is_closed():
+            raise BrowserError("标签页不存在或已关闭。", "interaction", False, 409)
+        selected = page is self.page
+        page.close()
+        self._tabs.pop(tab_id, None)
+        if selected:
+            self._activate_page(next(iter(self._tabs.values()), None))
+            self._clear_elements()
+        return self.list_tabs()
 
     def diagnostics(self):
         connection_errors = self._transport.failures() if self._transport else []
@@ -484,19 +581,9 @@ class JobBrowser:
             self.context.route("**/*", self._route)
             self.context.route_web_socket("**/*", lambda ws: ws.close())
             self.page = self.context.new_page()
-            # Track transport only, without site schemas or reading API bodies.
-            self.page.on("request", self._request_started)
-            self.page.on("requestfinished", self._finished)
-            self.page.on("requestfailed", self._network_failure)
-            self.page.on("response", self._http_status)
-            self.page.on("dialog", lambda dialog: dialog.dismiss())
-            # Playwright route handlers do not re-run for HTTP redirect hops.
-            # Validate response Location before Chromium follows it, without
-            # fetching through an unpinned APIRequestContext.
-            self._cdp = self.context.new_cdp_session(self.page)
-            self._cdp.on("Fetch.requestPaused", self._redirect_response)
-            self._cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Response"}]})
-            self.context.on("page", lambda page: page.close() if page != self.page else None)
+            self._attach_page(self.page)
+            self._cdp = self._tab_cdps[self.page]
+            self.context.on("page", self._attach_page)
             return self
         except AssistantError:
             self.__exit__(None, None, None)
@@ -523,6 +610,23 @@ class JobBrowser:
             self._transport = None
 
     def _route(self, route):
+        from playwright.sync_api import Error as PlaywrightError
+        request = route.request
+        # Wire popup diagnostics and redirect checks before continuing its
+        # first navigation; context routing covers initial popup requests too.
+        try:
+            page = request.frame.page
+        except PlaywrightError:
+            # Some initial navigations precede the frame object. Still apply
+            # the same request policy; page events attach the new tab as soon
+            # as Playwright exposes it, without closing or stalling it.
+            for page in self.context.pages:
+                self._attach_page(page)
+            return self._route_request(route)
+        self._attach_page(page)
+        return self._page_event(page, self._route_request, route)
+
+    def _route_request(self, route):
         request = route.request
         if self.permitted(request):
             if self._transport:
@@ -647,6 +751,7 @@ class JobBrowser:
 
         url = navigation_url(url, self.scope)
         self.check()
+        self._ensure_page()
         self.read_errors = []
         self.data_errors.clear()
         self._pending_data.clear()
@@ -694,8 +799,10 @@ class JobBrowser:
             except Exception:
                 pass
         self._elements = {}
+        self._observed_text = ""
 
-    def observe(self, wait_seconds=2, text_start=0, text_length=65536):
+    def observe(self, wait_seconds=2, text_start=0, text_length=65536,
+                element_start=0, element_limit=200, link_start=0):
         """Return useful incomplete UI too, so the model can handle an overlay."""
         from playwright.sync_api import Error as PlaywrightError
 
@@ -703,11 +810,15 @@ class JobBrowser:
         if (type(text_start) is not int or not 0 <= text_start <= 4_000_000
                 or type(text_length) is not int or not 1 <= text_length <= 65536):
             raise AssistantError("正文起始位置必须为0～4000000的整数。")
+        if (type(element_start) is not int or element_start < 0 or type(link_start) is not int or link_start < 0
+                or type(element_limit) is not int or not 1 <= element_limit <= 200):
+            raise AssistantError("控件/链接偏移须为非负整数，每次返回1～200个控件。")
+        self._ensure_page()
         try:
             if self.page.url == "about:blank":
                 return {"url": self.scope.start_url, "title": "", "text": "", "links": [], "elements": [],
                         "kind": "page", "ready": False, "fetched_at": now_iso(), "text_truncated": False,
-                        "read_error": "尚未成功导航，可打开授权 URL 或报告停止。", **self.diagnostics()}
+                        "read_error": "尚未成功导航，可打开授权 URL 或报告停止。", **self.list_tabs(), **self.diagnostics()}
             if self.page.url.startswith("chrome-error:"):
                 # Chromium replaced the page with its own error view (blocked
                 # redirect, failed navigation). Report the real cause from
@@ -721,7 +832,7 @@ class JobBrowser:
                 return {"url": self.scope.start_url, "title": "", "text": "", "links": [], "elements": [],
                         "kind": "page", "ready": False, "fetched_at": now_iso(), "text_truncated": False,
                         "read_error": "导航未成功（可能被权限拦截或连接失败）：" + detail +
-                        "若是重定向目标越域，可换范围内入口或由用户扩大范围。", **self.diagnostics()}
+                        "若是重定向目标越域，可换范围内入口或由用户扩大范围。", **self.list_tabs(), **self.diagnostics()}
             url = navigation_url(self.page.url, self.scope)
             deadline = time.monotonic() + wait_seconds
             previous, stable = "", 0
@@ -755,34 +866,43 @@ class JobBrowser:
             window = text[text_start:text_start + text_length]
             ready = ready and bool(window.strip())
             final = navigation_url(self.page.url, self.scope)
-            links = self.page.locator("a[href]").evaluate_all(
-                "els => els.map(e => ({text:e.innerText.slice(0,160),url:e.href}))")
-            safe = {}
-            for link in links:
+            observed_links = {}
+            for frame in self.page.frames:
                 try:
-                    target = navigation_url(link["url"], self.scope)
-                    safe.setdefault(target, {"url": target, "text": link["text"]})
-                except AssistantError:
-                    continue
+                    links = frame.locator("a[href]").evaluate_all(
+                        "els => els.map(e => ({text:e.innerText.slice(0,160),url:e.href}))")
+                    for link in links:
+                        # Observation is not authorization. Do not hide links
+                        # because of their label/path/scheme or task host list.
+                        observed_links.setdefault(link["url"], link)
+                except PlaywrightError:
+                    continue  # A frame may detach during this snapshot.
             heading = self.page.locator("h1").first
             title = heading.inner_text(timeout=2000) if heading.count() else self.page.title()
+            self._tab_titles[self.page] = title[:300]
             self._clear_elements()
             self._observation += 1
             self._element_url = final
             elements = []
-            candidates = self.page.evaluate_handle("""selector => {
-                const declared = """ + CLICKABLE_INFO + """;
-                return Array.from(document.querySelectorAll('*')).filter(e =>
-                    e.matches(selector) || declared(e));
-            }""", ELEMENT_SELECTOR)
-            try:
-                handles = list(candidates.get_properties().values())
-            finally:
-                candidates.dispose()
-            for handle in handles:
-                if len(elements) >= 200:
-                    handle.dispose()
+            handles, element_total = [], 0
+            for frame in self.page.frames:
+                candidates = selected = None
+                try:
+                    candidates = frame.evaluate_handle(ELEMENT_CANDIDATES, ELEMENT_SELECTOR)
+                    count = candidates.evaluate("els => els.length")
+                    start = max(0, element_start - element_total)
+                    left = element_limit - len(handles)
+                    element_total += count
+                    if start < count and left > 0:
+                        selected = candidates.evaluate_handle("(els, range) => els.slice(range[0], range[1])", [start, start + left])
+                        handles.extend(selected.get_properties().values())
+                except PlaywrightError:
                     continue
+                finally:
+                    for array in (selected, candidates):
+                        if array is not None:
+                            array.dispose()
+            for handle in handles:
                 try:
                     info = handle.evaluate(ELEMENT_INFO)
                     info["clickable"] = handle.evaluate(CLICKABLE_INFO)
@@ -799,12 +919,13 @@ class JobBrowser:
                 actions = element_actions(info, final, self.scope)
                 elements.append({"id": identity, "role": info["role"], "label": info["label"],
                                  "actions": actions, "disabled": info["disabled"],
-                                 "href": info["href"] if actions and info["href"] else None,
+                                 "href": info["href"] or None,
                                  "options": info["options"],
                                  "context": "dialog" if info["dialog"] else "search" if info["search"] else
                                             "filter" if info["filter"] else "pagination" if info["pagination"] else "page",
-                                 "restriction": "未知或可能写入的控件；需核实副作用/单独授权" if not actions else None})
+                                 "restriction": "控件已禁用，不能点击" if info["disabled"] else None})
                 self._elements[identity] = (handle, info)
+            self._observed_text = text + "\n" + "\n".join(e["label"] for e in elements)
             blocked_loads = [item for item in self.policy_blocks if item["type"] in
                              STATIC_RESOURCE_TYPES | {"document", "xhr", "fetch"}]
             connection_errors = self._transport.failures() if self._transport else []
@@ -821,7 +942,12 @@ class JobBrowser:
             return {"url": final, "title": title[:300], "text": window,
                     "text_start": text_start, "total_characters": len(text),
                     "text_truncated": text_start > 0 or len(text) > text_start + text_length,
-                    "links": list(safe.values())[:200],
+                    "links": list(observed_links.values())[link_start:link_start + 200],
+                    "link_total": len(observed_links), "link_start": link_start,
+                    "next_link_start": link_start + 200 if link_start + 200 < len(observed_links) else None,
+                    "element_total": element_total, "element_start": element_start,
+                    "next_element_start": element_start + element_limit if element_start + element_limit < element_total else None,
+                    "tab_id": self._page_ids.get(self.page), **self.list_tabs(),
                     "fetched_at": now_iso(), "kind": "detail" if is_detail(final) else "page",
                     "blocked_requests": self.blocked, "elements": elements, "ready": ready,
                     "body_stable": stable >= 2, "resource_warning": script_warning, **self.diagnostics(),
@@ -851,7 +977,7 @@ class JobBrowser:
                     or navigation_url(self.page.url, self.scope) != self._element_url):
                 raise AssistantError("元素已变化，请重新观察页面，未执行动作。", 409)
             if action not in element_actions(actual, navigation_url(self.page.url, self.scope), self.scope):
-                raise AssistantError("该控件不在已验证的只读操作范围内，未执行。", 403)
+                raise AssistantError("当前控件不可执行此动作：可能不可见、已禁用或未开放填写。", 403)
             return handle
         except AssistantError:
             raise
@@ -872,16 +998,33 @@ class JobBrowser:
         return self.observe()
 
     def click(self, identity):
-        from playwright.sync_api import Error as PlaywrightError
-
         element = self._element(identity, "click")
+        return self._click(element)
+
+    def click_text(self, text, match=0):
+        """Fixed browser locator, not model-provided JS/selectors or a label policy."""
+        self.check()
+        if not isinstance(text, str) or not text.strip() or len(text) > 200 or type(match) is not int or match < 0:
+            raise AssistantError("点击文字须为1～200字符，match为从0开始的非负匹配序号。", 400)
+        if text not in self._observed_text:
+            raise BrowserError("文字未出现在当前观察中，请先观察页面。", "interaction", True, 409)
+        targets = []
+        for frame in self.page.frames:
+            locator = frame.get_by_text(text, exact=True)
+            for index in range(locator.count()):
+                target = locator.nth(index)
+                if target.is_visible():
+                    targets.append(target)
+        if match >= len(targets):
+            raise BrowserError(f"当前有{len(targets)}个可见精确文字匹配；请使用完整文字和有效match，或点击元素编号。", "interaction", True, 409)
+        return self._click(targets[match])
+
+    def _click(self, element):
+        from playwright.sync_api import Error as PlaywrightError
         try:
-            # Reading an action-themed article does not authorize its click
-            # listeners. Navigate the revalidated href without firing them.
-            actual = element.evaluate(ELEMENT_INFO)
-            if actual.get("href") and WRITE_LABEL.search(actual.get("label", "")):
-                return self.read(actual["href"])
             element.click(timeout=5000)  # No force=True: do not click through overlays.
+            # Pump popup events without selecting or closing the new tab.
+            self.page.wait_for_timeout(200)
             return self.observe(wait_seconds=5)
         except PlaywrightError:
             raise AssistantError("元素点击失败或被遮挡；未强制点击，可重新观察页面。", 409) from None
