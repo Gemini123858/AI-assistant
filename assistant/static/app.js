@@ -9,7 +9,9 @@ const pageSize = 20;
 let toastTimer;
 let followups = { task: null, mail: null };
 let activeDraft = null;
+let pendingDraftDelete = null;
 let draftSendingEnabled = false;
+let draftLoadSequence = 0;
 const savedMemory = { public_profile: "", profile: "", rules: "" };
 
 function refreshMemory(memory) {
@@ -114,9 +116,13 @@ async function working(button, action) {
 
 async function createDraftFrom(source) {
   const response = await api("/api/drafts", "POST", { to: [], cc: [], bcc: [], subject: "", body: "", source });
-  activeDraft = response.draft;
+  const draft = response.draft;
+  // The create response is authoritative. Render it immediately so an older
+  // list request cannot leave the newly created editor in its disabled state.
+  draftLoadSequence += 1;
+  showDraft(draft);
   document.querySelector('[data-tab="mail"]').click();
-  await loadDrafts(activeDraft.id);
+  await loadDrafts(draft.id);
   $("draft-instruction").focus();
   toast("已创建本地草稿；填写要求后可让 Kimi 生成内容。尚未发送。");
 }
@@ -694,7 +700,9 @@ function renderDeliveries(records) {
 }
 
 async function loadDrafts(preferred) {
+  const sequence = ++draftLoadSequence;
   const data = await api("/api/drafts");
+  if (sequence !== draftLoadSequence) return;
   draftSendingEnabled = data.enabled;
   const drafts = data.drafts.filter((draft) => ["draft", "failed"].includes(draft.status));
   const deliveries = data.drafts.filter((draft) => ["sending", "sent", "partial", "unknown"].includes(draft.status));
@@ -755,12 +763,26 @@ $("draft-send").addEventListener("click", () => working($("draft-send"), async (
 $("draft-delete").addEventListener("click", () => {
   if (!activeDraft) return;
   const subject = activeDraft.subject || "（无主题）";
-  if (!window.confirm(`永久删除草稿“${subject}”及其全部版本和编写对话？此操作不可恢复。`)) return;
-  working($("draft-delete"), async () => {
-    const deleting = activeDraft;
+  pendingDraftDelete = { id: activeDraft.id, version: activeDraft.version, subject };
+  $("draft-delete-message").textContent = `将永久删除草稿“${subject}”。`;
+  $("draft-delete-dialog").showModal();
+});
+function cancelDraftDelete() {
+  pendingDraftDelete = null;
+  $("draft-delete-dialog").close();
+}
+$("draft-delete-cancel").addEventListener("click", cancelDraftDelete);
+$("draft-delete-dialog").addEventListener("cancel", () => { pendingDraftDelete = null; });
+$("draft-delete-confirm").addEventListener("click", () => {
+  if (!pendingDraftDelete) return;
+  const deleting = pendingDraftDelete;
+  pendingDraftDelete = null;
+  $("draft-delete-dialog").close();
+  working($("draft-delete-confirm"), async () => {
     await api(`/api/drafts/${deleting.id}`, "DELETE", {version: deleting.version});
-    activeDraft = null;
+    if (activeDraft?.id === deleting.id) activeDraft = null;
     await loadDrafts();
+    (activeDraft ? $("draft-subject") : $("draft-new")).focus();
     toast("草稿及其版本历史已永久删除。");
   });
 });

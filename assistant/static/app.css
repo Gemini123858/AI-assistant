@@ -109,6 +109,9 @@ dialog { width:min(660px,92vw); border:1px solid var(--line); border-radius:16px
 dialog::backdrop { background:#162b2466; }
 .dialog-heading { display:flex; justify-content:space-between; align-items:center; }
 dialog pre { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); padding:17px; border-radius:9px; max-height:55vh; overflow:auto; }
+#draft-delete-dialog { width:min(520px,92vw); }
+#draft-delete-dialog h2 { margin-top:0; }
+#draft-delete-dialog .form-actions { justify-content:flex-end; margin-top:18px; }
 #source-id { overflow-wrap:anywhere; }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 .tasks-workspace { max-width:1000px; margin:auto; }

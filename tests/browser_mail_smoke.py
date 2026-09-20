@@ -65,6 +65,12 @@ def main():
                     expect(page.locator("#draft-status")).to_contain_text("版本 2")
                     page.locator("#draft-new").click()
                     expect(page.locator("#draft-list button")).to_have_count(2)
+                    for selector in ("#draft-to", "#draft-cc", "#draft-bcc", "#draft-subject",
+                                     "#draft-body", "#draft-instruction"):
+                        expect(page.locator(selector)).to_be_enabled()
+                    page.locator("#draft-subject").fill("可编辑的空白草稿")
+                    page.locator("#draft-body").fill("空白草稿正文可以输入。")
+                    page.locator("#draft-instruction").fill("空白草稿提示词可以输入。")
                     first_draft = page.locator("#draft-list button").filter(has_text="合成草稿")
                     first_draft.click()
                     expect(first_draft).to_have_class(re.compile(r"\bselected\b"))
@@ -73,11 +79,23 @@ def main():
                         page.locator("#draft-send").click()
                     expect(page.locator("#delivery-list")).to_contain_text("合成草稿")
                     assert "合成草稿" not in page.locator("#draft-list").inner_text()
-                    page.once("dialog", lambda dialog: dialog.accept())
+                    page.locator("#draft-delete").click()
+                    expect(page.locator("#draft-delete-dialog")).to_be_visible()
                     with page.expect_response(lambda r: "/api/drafts/" in r.url and r.request.method == "DELETE" and r.status == 200):
-                        page.locator("#draft-delete").click()
+                        page.locator("#draft-delete-confirm").click()
+                    expect(page.locator("#draft-delete-dialog")).not_to_be_visible()
                     expect(page.locator("#draft-list button")).to_have_count(0)
                     expect(page.locator("#draft-status")).to_contain_text("尚未创建草稿")
+                    with page.expect_response(lambda r: r.url.endswith("/api/drafts") and r.request.method == "POST" and r.status == 201):
+                        page.locator("#draft-new").click()
+                    expect(page.locator("#draft-list button")).to_have_count(1)
+                    for selector in ("#draft-to", "#draft-subject", "#draft-body", "#draft-instruction"):
+                        expect(page.locator(selector)).to_be_enabled()
+                        page.locator(selector).click()
+                    page.locator("#draft-to").fill("after-delete@example.com")
+                    page.locator("#draft-subject").fill("删除后仍可编辑")
+                    page.locator("#draft-body").fill("删除后新建草稿的正文可以输入。")
+                    page.locator("#draft-instruction").fill("删除后提示词可以输入。")
                     page.locator("#mail-list .message-card").first.evaluate("""e => {
                         const link = document.createElement('p'); link.className = 'caption';
                         link.textContent = 'https://public.example/' + 'a'.repeat(200); e.append(link);
@@ -94,7 +112,7 @@ def main():
                     page.locator("#logout-button").click()
                     page.wait_for_url("**/login")
                     assert page.request.get(f"http://127.0.0.1:{server.server_port}/api/mail").status == 401
-                    print("Offline mail UI passed: contextual drafts, stable versions, deletion, selected state, separate delivery records, narrow layout and logout.")
+                    print("Offline mail UI passed: contextual drafts, stable versions, modal deletion and post-delete editing, selected state, separate delivery records, narrow layout and logout.")
                 finally:
                     browser.close()
         finally:

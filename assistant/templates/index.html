@@ -119,6 +119,12 @@
   </main>
   <footer>文件持久化 · 原文可追溯 · 邮件发送仅由用户点击当前草稿触发 · 无主动推送</footer>
   <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="draft-delete-dialog" aria-labelledby="draft-delete-title" aria-describedby="draft-delete-message">
+    <h2 id="draft-delete-title">永久删除草稿？</h2>
+    <p id="draft-delete-message"></p>
+    <p class="notice">该草稿的全部版本和编写对话都会从本机删除，无法恢复；发送记录不受影响。</p>
+    <div class="form-actions"><button id="draft-delete-cancel" class="quiet" type="button">取消</button><button id="draft-delete-confirm" class="danger" type="button">确认永久删除</button></div>
+  </dialog>
   <dialog id="source-dialog"><div class="dialog-heading"><h2>通知原文</h2><button id="close-dialog" class="quiet">关闭</button></div><p id="source-meta" class="caption"></p><pre id="source-body"></pre><p id="source-attachments" class="notice"></p><p id="source-id" class="caption"></p></dialog>
 </body>
 </html>
