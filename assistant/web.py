@@ -159,6 +159,16 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     def draft_assist(key):
         return jsonify(draft=drafts.assist(key, body()))
 
+    @app.post("/api/drafts/<key>/restore")
+    def draft_restore(key):
+        with service.operation():
+            return jsonify(draft=drafts.restore(key, body()))
+
+    @app.delete("/api/drafts/<key>")
+    def draft_delete(key):
+        with service.operation():
+            return jsonify(**drafts.delete(key, body()))
+
     @app.post("/api/drafts/<key>/send")
     def draft_send(key):
         payload = body()

@@ -1,4 +1,5 @@
 """Local synthetic IMAP + Chromium UI, no model API or real account."""
+import re
 import threading
 import tempfile
 from pathlib import Path
@@ -8,6 +9,7 @@ from werkzeug.serving import make_server
 
 from assistant.config import Config
 from assistant.web import create_app
+from .test_drafts import FakeSMTP
 from .test_mail import FakeIMAP, TOKEN, analysis
 from .test_tasks import ScriptModel, call
 
@@ -15,10 +17,11 @@ from .test_tasks import ScriptModel, call
 def main():
     with tempfile.TemporaryDirectory() as temporary:
         imap = FakeIMAP()
+        smtp = FakeSMTP()
         model = ScriptModel([call("save_mail_analysis", analysis())])
         app = create_app(Config(data_dir=Path(temporary)/"data", mode="api", api_key="synthetic",
                          qq_imap_user="owner@qq.com", qq_imap_auth_code="synthetic", access_token=TOKEN),
-                         model, mail_connector=lambda: imap)
+                         model, mail_connector=lambda: imap, smtp_connector=lambda: smtp)
         server = make_server("127.0.0.1", 0, app, threaded=True)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
@@ -57,6 +60,24 @@ def main():
                     with page.expect_response(lambda r: "/api/drafts/" in r.url and r.request.method == "PUT" and r.status == 200):
                         page.locator("#draft-save").click()
                     expect(page.locator("#draft-status")).to_contain_text("版本 2")
+                    with page.expect_response(lambda r: "/api/drafts/" in r.url and r.request.method == "PUT" and r.status == 200):
+                        page.locator("#draft-save").click()
+                    expect(page.locator("#draft-status")).to_contain_text("版本 2")
+                    page.locator("#draft-new").click()
+                    expect(page.locator("#draft-list button")).to_have_count(2)
+                    first_draft = page.locator("#draft-list button").filter(has_text="合成草稿")
+                    first_draft.click()
+                    expect(first_draft).to_have_class(re.compile(r"\bselected\b"))
+                    expect(page.locator("#draft-subject")).to_have_value("合成草稿")
+                    with page.expect_response(lambda r: r.url.endswith("/send") and r.status == 200):
+                        page.locator("#draft-send").click()
+                    expect(page.locator("#delivery-list")).to_contain_text("合成草稿")
+                    assert "合成草稿" not in page.locator("#draft-list").inner_text()
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    with page.expect_response(lambda r: "/api/drafts/" in r.url and r.request.method == "DELETE" and r.status == 200):
+                        page.locator("#draft-delete").click()
+                    expect(page.locator("#draft-list button")).to_have_count(0)
+                    expect(page.locator("#draft-status")).to_contain_text("尚未创建草稿")
                     page.locator("#mail-list .message-card").first.evaluate("""e => {
                         const link = document.createElement('p'); link.className = 'caption';
                         link.textContent = 'https://public.example/' + 'a'.repeat(200); e.append(link);
@@ -73,7 +94,7 @@ def main():
                     page.locator("#logout-button").click()
                     page.wait_for_url("**/login")
                     assert page.request.get(f"http://127.0.0.1:{server.server_port}/api/mail").status == 401
-                    print("Offline mail UI passed: login, read-only mail, event table, editable contextual draft, narrow layout and logout.")
+                    print("Offline mail UI passed: contextual drafts, stable versions, deletion, selected state, separate delivery records, narrow layout and logout.")
                 finally:
                     browser.close()
         finally:

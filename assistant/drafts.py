@@ -115,7 +115,20 @@ class Drafts:
         if record["status"] not in {"draft", "failed"}:
             raise AssistantError("该草稿当前不能修改；结果不明时请先核查，已发送邮件请新建草稿。", 409)
         fields = validate_fields(payload, self.config.qq_imap_user)
-        return self.store.update_draft(key, payload["version"], {**fields, "status": "draft", "error": None})
+        return self.store.update_draft(key, payload["version"],
+            {**fields, "status": "draft", "send": None, "error": None}, revision_reason="manual")
+
+    def restore(self, key, payload):
+        if (not isinstance(payload, dict) or set(payload) != {"version", "target_version"}
+                or type(payload.get("version")) is not int):
+            raise AssistantError("恢复草稿需要当前版本号和目标版本号。")
+        return self.store.restore_draft(key, payload["version"], payload["target_version"])
+
+    def delete(self, key, payload):
+        if (not isinstance(payload, dict) or set(payload) != {"version"}
+                or type(payload.get("version")) is not int):
+            raise AssistantError("删除草稿需要当前版本号。")
+        return self.store.delete_draft(key, payload["version"])
 
     def _context(self, source):
         kind, keys = source["kind"], source["keys"]
@@ -184,7 +197,8 @@ class Drafts:
             turns = copy.deepcopy(record["turns"])
             turns.append({"user": instruction, "reply": reply, "created_at": now_iso()})
             return self.store.update_draft(key, payload["version"],
-                {**fields, "turns": turns, "status": "draft", "error": None})
+                {**fields, "turns": turns, "status": "draft", "send": None, "error": None},
+                revision_reason="assistant")
 
     def send(self, key, version):
         if type(version) is not int:

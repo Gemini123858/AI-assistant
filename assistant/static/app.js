@@ -638,7 +638,7 @@ function showDraft(draft) {
   const delivery = draft?.send ? `${draft.send.detail || ""}${draft.send.accepted?.length ? ` · 已接受 ${draft.send.accepted.join("、")}` : ""}${draft.send.refused?.length ? ` · 已拒绝 ${draft.send.refused.join("、")}` : ""}` : "";
   $("draft-status").textContent = draft ? `${labels[draft.status] || draft.status} · 版本 ${draft.version}${draft.error ? " · " + draft.error : delivery ? " · " + delivery : ""}` : "尚未创建草稿。";
   const editable = draft && ["draft", "failed"].includes(draft.status);
-  for (const id of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body", "draft-save", "draft-instruction", "draft-assist"]) $(id).disabled = !editable;
+  for (const id of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body", "draft-save", "draft-delete", "draft-instruction", "draft-assist"]) $(id).disabled = !editable;
   $("draft-send").disabled = !draftSendingEnabled || !draft || draft.status !== "draft";
   const history = $("draft-chat-history");
   history.replaceChildren();
@@ -648,23 +648,70 @@ function showDraft(draft) {
     history.append(wrapper);
   }
   if (!draft?.turns?.length) history.append(node("p", "caption", "输入邮件要求后，Kimi 会直接填充可编辑字段。模型只能保存本地草稿，不能发送。"));
+  const revisions = $("draft-revisions");
+  revisions.replaceChildren();
+  const reasons = { created: "创建", manual: "手工修改", assistant: "Kimi 修改", restore: "恢复历史", legacy: "旧数据导入" };
+  for (const revision of [...(draft?.revisions || [])].reverse()) {
+    const row = node("div", "revision-row");
+    const description = node("div");
+    const restored = revision.restored_from ? ` · 来源 v${revision.restored_from}` : "";
+    description.append(node("p", "summary-text", `v${revision.version} · ${reasons[revision.reason] || revision.reason}${restored}`),
+      node("p", "caption", `${revision.subject || "（无主题）"} · ${revision.to.join("、") || "未填写收件人"} · ${formatTime(revision.created_at)}`));
+    const restore = node("button", "quiet", revision.version === draft.version ? "当前版本" : "恢复此版本");
+    restore.type = "button";
+    restore.disabled = revision.version === draft.version;
+    restore.addEventListener("click", () => working(restore, async () => {
+      const response = await api(`/api/drafts/${draft.id}/restore`, "POST",
+        {version: draft.version, target_version: revision.version});
+      activeDraft = response.draft;
+      await loadDrafts(activeDraft.id);
+      toast(`已基于 v${revision.version} 创建新的当前版本，原历史仍保留。`);
+    }));
+    row.append(description, restore); revisions.append(row);
+  }
+  if (!draft) revisions.append(node("p", "caption", "选择草稿后显示该邮件的版本历史。"));
+}
+
+function renderDeliveries(records) {
+  const list = $("delivery-list");
+  list.replaceChildren();
+  const labels = { sending: "发送中", sent: "已发送", partial: "部分发送", unknown: "结果不明" };
+  for (const draft of records) {
+    const card = node("article", "delivery-card");
+    const top = node("div", "card-top");
+    top.append(node("h3", "", draft.subject || "（无主题）"), node("span", "tag", labels[draft.status] || draft.status));
+    card.append(top,
+      node("p", "caption", `收件人：${draft.to.join("、") || "无"}${draft.cc.length ? " · 抄送：" + draft.cc.join("、") : ""}${draft.bcc.length ? " · 密送：" + draft.bcc.join("、") : ""}`),
+      node("p", "caption", `${draft.send?.completed_at ? formatTime(draft.send.completed_at) : formatTime(draft.updated_at)} · v${draft.version} · ${draft.send?.detail || "等待发送结果"}`));
+    if (draft.send?.accepted?.length) card.append(node("p", "reason", "SMTP 已接受：" + draft.send.accepted.join("、")));
+    if (draft.send?.refused?.length) card.append(node("p", "notice", "SMTP 已拒绝：" + draft.send.refused.join("、")));
+    const details = node("details");
+    details.append(node("summary", "", "查看发送内容"), node("p", "caption", "发件账号：" + draft.from),
+      node("pre", "", draft.body || "（空正文）"));
+    card.append(details); list.append(card);
+  }
+  if (!records.length) list.append(node("p", "caption", "尚无发送记录。只有点击发送后才会出现在这里。"));
 }
 
 async function loadDrafts(preferred) {
   const data = await api("/api/drafts");
   draftSendingEnabled = data.enabled;
-  const chosen = data.drafts.find((draft) => draft.id === (preferred || activeDraft?.id)) || data.drafts[0] || null;
+  const drafts = data.drafts.filter((draft) => ["draft", "failed"].includes(draft.status));
+  const deliveries = data.drafts.filter((draft) => ["sending", "sent", "partial", "unknown"].includes(draft.status));
+  const chosen = drafts.find((draft) => draft.id === (preferred || activeDraft?.id)) || drafts[0] || null;
   showDraft(chosen);
   const list = $("draft-list");
   list.replaceChildren();
-  for (const draft of data.drafts) {
-    const button = node("button", draft.id === chosen?.id ? "primary" : "quiet",
-      `${draft.subject || "（无主题）"} · ${draft.status} · v${draft.version}`);
+  for (const draft of drafts) {
+    const button = node("button", `quiet draft-choice${draft.id === chosen?.id ? " selected" : ""}`,
+      `${draft.subject || "（无主题）"} · ${draft.status === "failed" ? "发送失败，可继续修改" : "草稿"} · 更新于 ${formatTime(draft.updated_at)}`);
     button.type = "button";
-    button.addEventListener("click", () => showDraft(draft));
+    button.setAttribute("aria-pressed", draft.id === chosen?.id ? "true" : "false");
+    button.addEventListener("click", () => working(button, () => loadDrafts(draft.id)));
     list.append(button);
   }
-  if (!data.drafts.length) list.append(node("p", "caption", "尚无草稿。可以新建，或从通知、邮件、网页任务创建。"));
+  if (!drafts.length) list.append(node("p", "caption", "尚无可编辑草稿。可以新建，或从通知、邮件、网页任务创建。"));
+  renderDeliveries(deliveries);
   if (!data.enabled) $("draft-status").textContent += " SMTP 尚未配置；可以编辑草稿，但不能发送。";
 }
 
@@ -679,7 +726,11 @@ async function saveActiveDraft() {
 $("draft-new").addEventListener("click", () => working($("draft-new"), () => createDraftFrom({kind: "manual", keys: []})));
 $("draft-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  working($("draft-save"), async () => { await saveActiveDraft(); toast("当前草稿版本已保存。"); });
+  working($("draft-save"), async () => {
+    const before = activeDraft?.version;
+    await saveActiveDraft();
+    toast(activeDraft.version === before ? "没有检测到邮件内容变化，未创建新版本。" : `修改已保存为 v${activeDraft.version}。`);
+  });
 });
 $("draft-assist-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -696,10 +747,23 @@ $("draft-assist-form").addEventListener("submit", (event) => {
 $("draft-send").addEventListener("click", () => working($("draft-send"), async () => {
   await saveActiveDraft();
   const response = await api(`/api/drafts/${activeDraft.id}/send`, "POST", {version: activeDraft.version});
-  activeDraft = response.draft;
-  await loadDrafts(activeDraft.id);
-  toast(activeDraft.status === "sent" ? "SMTP 服务器已接受邮件。" : "发送未完整成功，请查看草稿状态。", activeDraft.status !== "sent");
+  const sent = response.draft;
+  activeDraft = null;
+  await loadDrafts();
+  toast(sent.status === "sent" ? "SMTP 服务器已接受邮件，已移入发送记录。" : "发送未完整成功，请查看发送记录。", sent.status !== "sent");
 }));
+$("draft-delete").addEventListener("click", () => {
+  if (!activeDraft) return;
+  const subject = activeDraft.subject || "（无主题）";
+  if (!window.confirm(`永久删除草稿“${subject}”及其全部版本和编写对话？此操作不可恢复。`)) return;
+  working($("draft-delete"), async () => {
+    const deleting = activeDraft;
+    await api(`/api/drafts/${deleting.id}`, "DELETE", {version: deleting.version});
+    activeDraft = null;
+    await loadDrafts();
+    toast("草稿及其版本历史已永久删除。");
+  });
+});
 
 async function loadMail() {
   const [data, sessions] = await Promise.all([api("/api/mail"), api("/api/followups")]);

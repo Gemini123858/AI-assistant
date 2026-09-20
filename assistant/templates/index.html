@@ -98,13 +98,15 @@
           <label>主题<input id="draft-subject" maxlength="500"></label>
           <label>正文<textarea id="draft-body" rows="12" maxlength="50000" placeholder="纯文本邮件正文"></textarea></label>
           <p id="draft-status" class="notice">尚未创建草稿。</p>
-          <div class="form-actions"><button id="draft-save" class="quiet" type="submit">保存当前修改</button><button id="draft-send" class="primary" type="button">发送当前版本</button></div>
+          <div class="form-actions"><button id="draft-save" class="quiet" type="submit">保存当前修改</button><button id="draft-send" class="primary" type="button">发送当前版本</button><button id="draft-delete" class="danger" type="button">删除此草稿</button></div>
           <p class="caption">发送按钮只发送当前页面所示版本，不经过 Kimi；结果不明时不会自动重发。第一版不发送附件或 HTML。</p>
         </form>
         <div id="draft-chat-history" class="followup-history"></div>
         <form id="draft-assist-form" class="followup-form"><label class="sr-only" for="draft-instruction">邮件撰写要求</label><textarea id="draft-instruction" rows="3" maxlength="4000" placeholder="例如：根据来源写一封正式邮件；语气更简洁；保留收件人并重写正文。"></textarea><button id="draft-assist" class="primary" type="submit">让 Kimi 生成或修改</button></form>
-        <div class="section-heading"><h3>已保存草稿</h3></div><div id="draft-list" class="draft-list"></div>
+        <div class="section-heading"><div><h3>当前草稿的版本历史</h3><p class="caption">内容实际变化时才创建版本；恢复旧版本会生成新的当前版本，不删除已有历史。</p></div></div><div id="draft-revisions" class="revision-list"></div>
+        <div class="section-heading"><div><h3>可编辑草稿</h3><p class="caption">这里每一项是一封独立草稿，不是同一邮件的不同版本。</p></div></div><div id="draft-list" class="draft-list"></div>
       </div>
+      <div class="panel delivery-workspace"><div class="section-heading"><div><h2>发送记录</h2><p class="caption">已发送、部分发送和结果不明的邮件在这里只读展示，不占用草稿编辑器。</p></div></div><div id="delivery-list" class="delivery-list"></div></div>
       <div class="section-heading"><h2>重要事件表</h2></div><div id="mail-events" class="panel table-scroll"></div>
       <div class="section-heading"><h2>新邮件及分析结果</h2><span id="mail-count" class="caption"></span></div><div id="mail-list" class="message-list"></div>
     </section>

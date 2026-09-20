@@ -85,11 +85,62 @@ class DraftTests(unittest.TestCase):
         saved = self.drafts.update(draft["id"], payload)
         self.assertEqual(saved["version"], 2)
         self.assertEqual(saved["body"], "\n正文末尾保留空行\n\n")
+        unchanged = self.drafts.update(draft["id"], {**payload, "version": 2})
+        self.assertEqual(unchanged["version"], 2)
+        self.assertEqual(len(unchanged["revisions"]), 2)
         with self.assertRaises(AssistantError):
             self.drafts.update(draft["id"], payload)
         payload.update(version=2, subject="主题\nBcc: victim@example.com")
         with self.assertRaises(AssistantError):
             self.drafts.update(draft["id"], payload)
+
+    def test_restore_creates_new_current_revision_without_deleting_history(self):
+        draft = self.create()
+        first = self.drafts.update(draft["id"], {"version": 1, "to": ["one@example.com"],
+            "cc": [], "bcc": [], "subject": "第一版", "body": "第一版正文"})
+        second = self.drafts.update(draft["id"], {"version": first["version"], "to": ["two@example.com"],
+            "cc": [], "bcc": [], "subject": "第二版", "body": "第二版正文"})
+        restored = self.drafts.restore(draft["id"],
+            {"version": second["version"], "target_version": first["version"]})
+        self.assertEqual(restored["version"], 4)
+        self.assertEqual((restored["subject"], restored["body"]), ("第一版", "第一版正文"))
+        self.assertEqual([item["version"] for item in restored["revisions"]], [1, 2, 3, 4])
+        self.assertEqual(restored["revisions"][-1]["reason"], "restore")
+        self.assertEqual(restored["revisions"][-1]["restored_from"], 2)
+
+    def test_delete_requires_current_editable_draft_and_removes_all_history(self):
+        draft = self.create()
+        updated = self.drafts.update(draft["id"], {"version": 1, "to": ["person@example.com"],
+            "cc": [], "bcc": [], "subject": "准备删除", "body": "第二个版本"})
+        with self.assertRaises(AssistantError):
+            self.drafts.delete(draft["id"], {"version": 1})
+        result = self.drafts.delete(draft["id"], {"version": updated["version"]})
+        self.assertEqual(result, {"id": draft["id"], "deleted": True})
+        with self.assertRaises(AssistantError) as missing:
+            self.store.get_draft(draft["id"])
+        self.assertEqual(missing.exception.status, 404)
+
+        delivery = self.create()
+        delivery = self.drafts.update(delivery["id"], {"version": 1,
+            "to": ["person@example.com"], "cc": [], "bcc": [], "subject": "发送记录", "body": "保留"})
+        delivery = self.drafts.send(delivery["id"], delivery["version"])
+        with self.assertRaises(AssistantError) as protected:
+            self.drafts.delete(delivery["id"], {"version": delivery["version"]})
+        self.assertEqual(protected.exception.status, 409)
+        self.assertEqual(self.store.get_draft(delivery["id"])["status"], "sent")
+
+    def test_legacy_draft_gets_single_compatible_revision_then_upgrades_on_edit(self):
+        draft = self.create()
+        legacy = copy.deepcopy(draft)
+        legacy["schema_version"] = 1
+        legacy.pop("revisions")
+        self.store._write_json(self.store._draft_path(draft["id"]), legacy)
+        loaded = self.store.get_draft(draft["id"])
+        self.assertEqual(loaded["revisions"][0]["reason"], "legacy")
+        upgraded = self.drafts.update(draft["id"], {"version": 1, "to": [], "cc": [], "bcc": [],
+            "subject": "升级后修改", "body": ""})
+        self.assertEqual(upgraded["schema_version"], 2)
+        self.assertEqual([item["reason"] for item in upgraded["revisions"]], ["legacy", "manual"])
 
     def test_user_send_uses_current_version_and_cannot_repeat(self):
         draft = self.create()

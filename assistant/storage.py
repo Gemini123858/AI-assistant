@@ -1,5 +1,6 @@
 """A single-writer file store; no database and no pluggable storage framework."""
 
+import copy
 import fcntl
 import hashlib
 import json
@@ -437,21 +438,32 @@ class Store:
         with self._mutex:
             key = uuid.uuid4().hex
             stamp = now_iso()
-            record = {"schema_version": 1, "id": key, "version": 1,
+            record = {"schema_version": 2, "id": key, "version": 1,
                       "status": "draft", "source": source, **fields,
                       "turns": [], "created_at": stamp, "updated_at": stamp,
                       "send": None, "error": None}
+            record["revisions"] = [self._draft_revision(record, "created", stamp)]
             self._write_json(self._draft_path(key), record)
             return record
+
+    @staticmethod
+    def _draft_revision(record, reason, created_at=None, restored_from=None):
+        revision = {"version": record["version"], "reason": reason,
+                    "created_at": created_at or now_iso(),
+                    **{name: copy.deepcopy(record[name]) for name in
+                       ("from", "to", "cc", "bcc", "subject", "body")}}
+        if restored_from is not None:
+            revision["restored_from"] = restored_from
+        return revision
 
     def get_draft(self, key):
         with self._mutex:
             path = self._draft_path(key)
             if not path.exists():
                 raise AssistantError("邮件草稿不存在。", 404)
-            record = self._read_json(path)
+            record = self._read_json(path, versions=(1, 2))
             try:
-                if (record.get("schema_version") != 1 or record["id"] != key
+                if (record.get("schema_version") not in {1, 2} or record["id"] != key
                         or type(record["version"]) is not int or record["version"] < 1
                         or record["status"] not in {"draft", "sending", "sent", "partial", "failed", "unknown"}
                         or not isinstance(record["source"], dict)
@@ -459,6 +471,20 @@ class Store:
                                (("from", str), ("to", list), ("cc", list), ("bcc", list),
                                 ("subject", str), ("body", str), ("turns", list)))):
                     raise ValueError("invalid draft")
+                if record["schema_version"] == 1:
+                    record["schema_version"] = 2
+                    record["revisions"] = [self._draft_revision(
+                        record, "legacy", record.get("updated_at") or record.get("created_at"))]
+                revisions = record.get("revisions")
+                if (not isinstance(revisions, list) or not revisions
+                        or any(not isinstance(item, dict) or type(item.get("version")) is not int
+                               or item["version"] < 1 or item.get("reason") not in
+                               {"created", "manual", "assistant", "restore", "legacy"}
+                               or any(not isinstance(item.get(name), value_type) for name, value_type in
+                                      (("from", str), ("to", list), ("cc", list), ("bcc", list),
+                                       ("subject", str), ("body", str), ("created_at", str)))
+                               for item in revisions)):
+                    raise ValueError("invalid revisions")
             except (KeyError, TypeError, ValueError):
                 raise AssistantError("邮件草稿记录损坏，不会自动覆盖。", 500) from None
             return record
@@ -469,7 +495,8 @@ class Store:
             records = [self.get_draft(path.stem) for path in (self.root / "drafts").glob("*.json")]
             return sorted(records, key=lambda item: item["updated_at"], reverse=True)
 
-    def update_draft(self, key, expected_version, changes, *, bump=True):
+    def update_draft(self, key, expected_version, changes, *, bump=True,
+                     revision_reason=None, restored_from=None):
         allowed = {"from", "to", "cc", "bcc", "subject", "body", "turns", "status", "send", "error"}
         if set(changes) - allowed:
             raise AssistantError("不能修改草稿身份或来源。", 500)
@@ -477,11 +504,53 @@ class Store:
             record = self.get_draft(key)
             if record["version"] != expected_version:
                 raise AssistantError("草稿已被更新，请刷新后再操作。", 409)
-            record.update(changes, updated_at=now_iso())
-            if bump:
+            content = ("from", "to", "cc", "bcc", "subject", "body")
+            content_changed = any(name in changes and changes[name] != record[name] for name in content)
+            changed = any(record.get(name) != value for name, value in changes.items())
+            if not changed:
+                return record
+            stamp = now_iso()
+            record.update(changes, updated_at=stamp, schema_version=2)
+            if bump and content_changed:
                 record["version"] += 1
+                record["revisions"].append(self._draft_revision(
+                    record, revision_reason or "manual", stamp, restored_from))
             self._write_json(self._draft_path(key), record)
             return record
+
+    def restore_draft(self, key, expected_version, target_version):
+        if type(target_version) is not int:
+            raise AssistantError("要恢复的草稿版本无效。")
+        with self._mutex:
+            record = self.get_draft(key)
+            if record["version"] != expected_version:
+                raise AssistantError("草稿已被更新，请刷新后再恢复。", 409)
+            if record["status"] not in {"draft", "failed"}:
+                raise AssistantError("只有可编辑草稿可以恢复历史版本。", 409)
+            revision = next((item for item in record["revisions"]
+                             if item["version"] == target_version), None)
+            if revision is None:
+                raise AssistantError("没有找到要恢复的草稿版本。", 404)
+            fields = {name: copy.deepcopy(revision[name]) for name in
+                      ("from", "to", "cc", "bcc", "subject", "body")}
+            if all(fields[name] == record[name] for name in fields):
+                return record
+            return self.update_draft(key, expected_version,
+                {**fields, "status": "draft", "send": None, "error": None},
+                revision_reason="restore", restored_from=target_version)
+
+    def delete_draft(self, key, expected_version):
+        if type(expected_version) is not int:
+            raise AssistantError("删除草稿需要当前版本号。")
+        with self._mutex:
+            record = self.get_draft(key)
+            if record["version"] != expected_version:
+                raise AssistantError("草稿已被更新，请刷新后再删除。", 409)
+            if record["status"] not in {"draft", "failed"}:
+                raise AssistantError("只能删除可编辑草稿；发送记录不会通过草稿删除操作移除。", 409)
+            self._draft_path(key).unlink()
+            self._sync_directory(self.root / "drafts")
+            return {"id": key, "deleted": True}
 
     def usage(self, day):
         with self._mutex:
