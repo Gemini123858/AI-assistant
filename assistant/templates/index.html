@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>个人助手 · 通知与记忆</title>
+  <title>个人助手 · 通知、网页与邮件</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="个人助手首页"><span class="brand-mark">助</span>个人助手<span class="version">v0.3</span></a>
-    <div class="topbar-right"><span id="mode-badge" class="badge">正在连接</span><span class="local-note">仅本机 · 外部操作只读</span>{% if auth_enabled %}<button id="logout-button" class="quiet">退出</button>{% endif %}</div>
+    <a class="brand" href="/" aria-label="个人助手首页"><span class="brand-mark">助</span>个人助手<span class="version">v0.4</span></a>
+    <div class="topbar-right"><span id="mode-badge" class="badge">正在连接</span><span class="local-note">仅本机 · 邮件发送须手动点击</span>{% if auth_enabled %}<button id="logout-button" class="quiet">退出</button>{% endif %}</div>
   </header>
   <main>
     <section class="intro">
@@ -24,7 +24,7 @@
       <button class="tab" data-tab="tasks" aria-selected="false">网页任务</button>
       <button class="tab" data-tab="mail" aria-selected="false">邮箱工作台</button>
       <button class="tab" data-tab="memory" aria-selected="false">画像与规则</button>
-      <span class="roadmap-note">邮件只读同步 · 主动推送/发送后置</span>
+      <span class="roadmap-note">邮件只读同步 · 草稿可编辑 · 发送须手动点击</span>
     </nav>
     <section id="notifications-panel" class="workspace">
       <div class="feed-column">
@@ -48,7 +48,7 @@
         <div class="pagination"><button id="previous-page" class="quiet">上一页</button><span id="page-info" class="caption"></span><button id="next-page" class="quiet">下一页</button></div>
       </div>
       <aside class="panel chat-panel">
-        <div class="chat-heading"><div><h2>和助手聊聊</h2><p class="caption">追问事项、整理待办，或起草邮件文本。</p></div><span class="chat-dot" aria-hidden="true"></span></div>
+        <div class="chat-heading"><div><h2>和助手聊聊</h2><p class="caption">追问事项或整理待办；结构化邮件请从通知创建草稿。</p></div><span class="chat-dot" aria-hidden="true"></span></div>
         <p id="chat-context" class="context-note">未选择时使用最近 10 条通知；完整历史保存，模型仅读取最近 6 轮。</p>
         <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
         <form id="chat-form" class="chat-form"><label class="sr-only" for="chat-input">对话消息</label><textarea id="chat-input" rows="3" required maxlength="4000" placeholder="这条通知需要我做什么？&#10;/记住 我目前正在找实习&#10;/规则 报名截止不等于活动开始"></textarea><div class="chat-footer"><span class="caption">普通对话不自动写画像；没有发送工具。</span><button id="chat-button" class="primary" type="submit">发送</button></div></form>
@@ -88,6 +88,23 @@
         <div class="form-actions"><button id="mail-start" class="primary">启用同步（仅之后的新邮件）</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-latest" class="quiet">导入最新一封已有邮件</button><button id="mail-triage" class="quiet">初筛新邮件（调用模型）</button><button id="mail-refresh" class="quiet">刷新</button></div>
         <p class="caption">目前默认手动分析。邮件文字会发送给已配置模型；自己发送的邮件可能包含多人聊天，不默认全是你的事实。附件未识别，链接访问另行确认范围。</p>
       </div>
+      <div class="panel draft-workspace">
+        <div class="section-heading"><div><h2>邮件草稿</h2><p id="draft-source" class="caption">新草稿可以引用通知、邮件分析或网页任务；来源不会作为附件发送。</p></div><button id="draft-new" class="quiet" type="button">新建空白草稿</button></div>
+        <form id="draft-form">
+          <input id="draft-id" type="hidden"><input id="draft-version" type="hidden">
+          <label>发件账号<input id="draft-from" readonly placeholder="由 QQ 邮箱配置决定"></label>
+          <label>收件人<input id="draft-to" placeholder="多个地址用逗号分隔"></label>
+          <details><summary>抄送与密送</summary><label>抄送<input id="draft-cc" placeholder="多个地址用逗号分隔"></label><label>密送<input id="draft-bcc" placeholder="多个地址用逗号分隔"></label></details>
+          <label>主题<input id="draft-subject" maxlength="500"></label>
+          <label>正文<textarea id="draft-body" rows="12" maxlength="50000" placeholder="纯文本邮件正文"></textarea></label>
+          <p id="draft-status" class="notice">尚未创建草稿。</p>
+          <div class="form-actions"><button id="draft-save" class="quiet" type="submit">保存当前修改</button><button id="draft-send" class="primary" type="button">发送当前版本</button></div>
+          <p class="caption">发送按钮只发送当前页面所示版本，不经过 Kimi；结果不明时不会自动重发。第一版不发送附件或 HTML。</p>
+        </form>
+        <div id="draft-chat-history" class="followup-history"></div>
+        <form id="draft-assist-form" class="followup-form"><label class="sr-only" for="draft-instruction">邮件撰写要求</label><textarea id="draft-instruction" rows="3" maxlength="4000" placeholder="例如：根据来源写一封正式邮件；语气更简洁；保留收件人并重写正文。"></textarea><button id="draft-assist" class="primary" type="submit">让 Kimi 生成或修改</button></form>
+        <div class="section-heading"><h3>已保存草稿</h3></div><div id="draft-list" class="draft-list"></div>
+      </div>
       <div class="section-heading"><h2>重要事件表</h2></div><div id="mail-events" class="panel table-scroll"></div>
       <div class="section-heading"><h2>新邮件及分析结果</h2><span id="mail-count" class="caption"></span></div><div id="mail-list" class="message-list"></div>
     </section>
@@ -98,7 +115,7 @@
       <form class="panel memory-form" data-kind="rules"><h3>纠正规则</h3><p class="caption">具体、可验证的纠正。规则不能授予助手发送或提交权限。</p><label class="sr-only" for="rules-text">纠正规则内容</label><textarea id="rules-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 不要把报名截止时间当成活动开始时间。"></textarea><button class="primary" type="submit">保存规则</button></form>
     </section>
   </main>
-  <footer>文件持久化 · 原文可追溯 · 邮箱按需启用 · 无主动推送或邮件发送</footer>
+  <footer>文件持久化 · 原文可追溯 · 邮件发送仅由用户点击当前草稿触发 · 无主动推送</footer>
   <div id="toast" class="toast" role="status" hidden></div>
   <dialog id="source-dialog"><div class="dialog-heading"><h2>通知原文</h2><button id="close-dialog" class="quiet">关闭</button></div><p id="source-meta" class="caption"></p><pre id="source-body"></pre><p id="source-attachments" class="notice"></p><p id="source-id" class="caption"></p></dialog>
 </body>

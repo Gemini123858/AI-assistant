@@ -8,6 +8,8 @@ let total = 0;
 const pageSize = 20;
 let toastTimer;
 let followups = { task: null, mail: null };
+let activeDraft = null;
+let draftSendingEnabled = false;
 const savedMemory = { public_profile: "", profile: "", rules: "" };
 
 function refreshMemory(memory) {
@@ -110,6 +112,15 @@ async function working(button, action) {
   finally { button.disabled = false; button.textContent = label; }
 }
 
+async function createDraftFrom(source) {
+  const response = await api("/api/drafts", "POST", { to: [], cc: [], bcc: [], subject: "", body: "", source });
+  activeDraft = response.draft;
+  document.querySelector('[data-tab="mail"]').click();
+  await loadDrafts(activeDraft.id);
+  $("draft-instruction").focus();
+  toast("已创建本地草稿；填写要求后可让 Kimi 生成内容。尚未发送。");
+}
+
 function formatTime(value) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
@@ -181,7 +192,11 @@ function messageCard(record) {
     await Promise.all([loadMessages(), loadStatus()]);
     toast("分析结果已保存。");
   }));
-  actions.append(view, analyze, node("span", "source-time", formatTime(record.original.sent_at)));
+  const draft = node("button", "quiet", selected.size ? "用所选通知写邮件" : "用此通知写邮件");
+  draft.addEventListener("click", () => working(draft, () => createDraftFrom({
+    kind: "notifications", keys: selected.size ? [...selected] : [record.id]
+  })));
+  actions.append(view, analyze, draft, node("span", "source-time", formatTime(record.original.sent_at)));
   card.append(actions);
   return card;
 }
@@ -203,7 +218,7 @@ async function loadStatus() {
   $("model-name").textContent = status.model;
   $("usage").textContent = `今日 API 尝试 ${status.usage.calls} / ${status.daily_limit}`;
   $("mode-notice").textContent = status.mode === "api" ?
-    "真实模型已启用。明确分析、问答及网页任务调用 API；失败也计入额度。邮箱后台只同步新邮件，不自动分析；普通问答没有浏览工具，网页任务不登录、不投递，没有推送或邮件发送。" :
+    `真实模型已启用。明确分析、问答及网页任务调用 API；失败也计入额度。邮箱后台只同步新邮件，不自动分析；普通问答没有浏览工具。邮件发送${status.capabilities.send_email ? "已配置，但只能由草稿中的发送按钮触发" : "尚未配置"}。` :
     "当前为演示模式：只验证界面、文件保存和显式记忆命令，不判断真实相关性或日期。配置 API 后重启，可进行真实分析和问答。";
   $("task-button").disabled = !status.capabilities.browser_tasks;
   const budget = status.browser_budget;
@@ -372,7 +387,10 @@ function taskCard(task) {
     await loadTasks();
   }));
   const actions = node("div", "card-actions");
-  actions.append(button);
+  const draft = node("button", "quiet", "用此任务结果写邮件");
+  draft.disabled = !task.result;
+  draft.addEventListener("click", () => working(draft, () => createDraftFrom({kind: "task", keys: [task.id]})));
+  actions.append(button, draft);
   card.append(actions);
   return card;
 }
@@ -525,7 +543,7 @@ $("close-dialog").addEventListener("click", () => $("source-dialog").close());
 
 const current = new Date();
 $("sent-at").value = new Date(current.getTime() - current.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-Promise.all([loadMessages(), loadStatus(), loadTasks(), loadChat(), loadMail(), api("/api/memory").then(refreshMemory)])
+Promise.all([loadMessages(), loadStatus(), loadTasks(), loadChat(), loadMail(), loadDrafts(), api("/api/memory").then(refreshMemory)])
   .catch((error) => toast(error.message, true));
 
 function mailSource(record) {
@@ -585,9 +603,103 @@ function mailCard(record) {
     await api(`/api/mail/${record.id}/analyze`, "POST", {});
     await Promise.all([loadMail(), loadStatus()]); refreshMemory(await api("/api/memory"));
   }));
-  actions.append(read, analyze); card.append(actions);
+  const draft = node("button", "quiet", record.analysis ? "根据此邮件写邮件" : "用此邮件写草稿");
+  draft.addEventListener("click", () => working(draft, () => createDraftFrom({kind: "mail", keys: [record.id]})));
+  actions.append(read, analyze, draft); card.append(actions);
   return card;
 }
+
+function draftAddresses(value) {
+  return value.split(/[,，;；\n]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function draftPayload() {
+  return { version: Number($("draft-version").value), to: draftAddresses($("draft-to").value),
+    cc: draftAddresses($("draft-cc").value), bcc: draftAddresses($("draft-bcc").value),
+    subject: $("draft-subject").value, body: $("draft-body").value };
+}
+
+function draftSourceLabel(source) {
+  const names = { manual: "空白草稿", notifications: "通知", mail: "邮件分析", task: "网页任务" };
+  return `${names[source.kind] || "未知来源"}${source.keys.length ? " · " + source.keys.length + " 项" : ""}；来源只用于生成，不会作为附件发送。`;
+}
+
+function showDraft(draft) {
+  activeDraft = draft;
+  $("draft-id").value = draft?.id || "";
+  $("draft-version").value = draft?.version || "";
+  $("draft-from").value = draft?.from || "";
+  for (const kind of ["to", "cc", "bcc"]) $("draft-" + kind).value = (draft?.[kind] || []).join(", ");
+  $("draft-subject").value = draft?.subject || "";
+  $("draft-body").value = draft?.body || "";
+  $("draft-source").textContent = draft ? draftSourceLabel(draft.source) : "新草稿可以引用通知、邮件分析或网页任务；来源不会作为附件发送。";
+  const labels = { draft: "草稿，尚未发送", sending: "正在发送", sent: "SMTP 已接受邮件", partial: "部分收件人被拒绝，请核对发送记录",
+    failed: "发送失败；修改或重新保存后可再次明确发送", unknown: "发送结果不明；请先在已发送邮件中核查，不能直接重发" };
+  const delivery = draft?.send ? `${draft.send.detail || ""}${draft.send.accepted?.length ? ` · 已接受 ${draft.send.accepted.join("、")}` : ""}${draft.send.refused?.length ? ` · 已拒绝 ${draft.send.refused.join("、")}` : ""}` : "";
+  $("draft-status").textContent = draft ? `${labels[draft.status] || draft.status} · 版本 ${draft.version}${draft.error ? " · " + draft.error : delivery ? " · " + delivery : ""}` : "尚未创建草稿。";
+  const editable = draft && ["draft", "failed"].includes(draft.status);
+  for (const id of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body", "draft-save", "draft-instruction", "draft-assist"]) $(id).disabled = !editable;
+  $("draft-send").disabled = !draftSendingEnabled || !draft || draft.status !== "draft";
+  const history = $("draft-chat-history");
+  history.replaceChildren();
+  for (const turn of draft?.turns || []) {
+    const wrapper = node("div", "chat-turn");
+    wrapper.append(node("div", "bubble user", turn.user), node("div", "bubble assistant", turn.reply));
+    history.append(wrapper);
+  }
+  if (!draft?.turns?.length) history.append(node("p", "caption", "输入邮件要求后，Kimi 会直接填充可编辑字段。模型只能保存本地草稿，不能发送。"));
+}
+
+async function loadDrafts(preferred) {
+  const data = await api("/api/drafts");
+  draftSendingEnabled = data.enabled;
+  const chosen = data.drafts.find((draft) => draft.id === (preferred || activeDraft?.id)) || data.drafts[0] || null;
+  showDraft(chosen);
+  const list = $("draft-list");
+  list.replaceChildren();
+  for (const draft of data.drafts) {
+    const button = node("button", draft.id === chosen?.id ? "primary" : "quiet",
+      `${draft.subject || "（无主题）"} · ${draft.status} · v${draft.version}`);
+    button.type = "button";
+    button.addEventListener("click", () => showDraft(draft));
+    list.append(button);
+  }
+  if (!data.drafts.length) list.append(node("p", "caption", "尚无草稿。可以新建，或从通知、邮件、网页任务创建。"));
+  if (!data.enabled) $("draft-status").textContent += " SMTP 尚未配置；可以编辑草稿，但不能发送。";
+}
+
+async function saveActiveDraft() {
+  if (!activeDraft) throw new Error("请先新建草稿。");
+  const response = await api(`/api/drafts/${activeDraft.id}`, "PUT", draftPayload());
+  activeDraft = response.draft;
+  await loadDrafts(activeDraft.id);
+  return activeDraft;
+}
+
+$("draft-new").addEventListener("click", () => working($("draft-new"), () => createDraftFrom({kind: "manual", keys: []})));
+$("draft-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  working($("draft-save"), async () => { await saveActiveDraft(); toast("当前草稿版本已保存。"); });
+});
+$("draft-assist-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  working($("draft-assist"), async () => {
+    const instruction = $("draft-instruction").value;
+    await saveActiveDraft();
+    const response = await api(`/api/drafts/${activeDraft.id}/assist`, "POST",
+      {version: activeDraft.version, instruction});
+    $("draft-instruction").value = "";
+    activeDraft = response.draft;
+    await Promise.all([loadDrafts(activeDraft.id), loadStatus()]);
+  });
+});
+$("draft-send").addEventListener("click", () => working($("draft-send"), async () => {
+  await saveActiveDraft();
+  const response = await api(`/api/drafts/${activeDraft.id}/send`, "POST", {version: activeDraft.version});
+  activeDraft = response.draft;
+  await loadDrafts(activeDraft.id);
+  toast(activeDraft.status === "sent" ? "SMTP 服务器已接受邮件。" : "发送未完整成功，请查看草稿状态。", activeDraft.status !== "sent");
+}));
 
 async function loadMail() {
   const [data, sessions] = await Promise.all([api("/api/mail"), api("/api/followups")]);

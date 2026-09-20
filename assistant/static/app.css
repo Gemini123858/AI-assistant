@@ -69,6 +69,11 @@ input::placeholder,textarea::placeholder { color:#939d96; }
 .followup-form { display:flex; gap:10px; align-items:flex-end; padding:12px 14px; border-top:1px solid var(--line); }
 .followup-form textarea { margin:0; }
 .followup-form button { white-space:nowrap; }
+.draft-workspace { display:grid; gap:14px; }
+.draft-workspace form { display:grid; gap:12px; }
+.draft-workspace .followup-history { min-height:70px; border:1px solid var(--line); border-radius:8px; }
+.draft-list { display:flex; flex-wrap:wrap; gap:8px; }
+.draft-list button { max-width:100%; overflow-wrap:anywhere; }
 .source-time { margin-left:auto; font-size:10px; color:var(--muted); }
 .empty-state { padding:45px 20px; text-align:center; color:var(--muted); border:1px dashed #cfd9cf; border-radius:13px; }
 .pagination { display:flex; justify-content:center; align-items:center; gap:14px; margin:18px 0; }

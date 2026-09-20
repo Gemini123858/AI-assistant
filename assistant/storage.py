@@ -69,7 +69,8 @@ class Store:
         self._lock_file = None
         self._closed = False
         for directory in (self.root, self.root / "messages", self.root / "memory",
-                          self.root / "memory" / "history", self.root / "tasks"):
+                          self.root / "memory" / "history", self.root / "tasks",
+                          self.root / "drafts"):
             if directory.is_symlink():
                 raise AssistantError("数据目录不能是符号链接。", 500)
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -426,6 +427,61 @@ class Store:
             turns.append(turn)
             self._write_json(self.root / "chat.json", {"schema_version": 1, "turns": turns})
             return turn
+
+    def _draft_path(self, key):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
+            raise AssistantError("草稿标识无效。")
+        return self.root / "drafts" / f"{key}.json"
+
+    def create_draft(self, fields, source):
+        with self._mutex:
+            key = uuid.uuid4().hex
+            stamp = now_iso()
+            record = {"schema_version": 1, "id": key, "version": 1,
+                      "status": "draft", "source": source, **fields,
+                      "turns": [], "created_at": stamp, "updated_at": stamp,
+                      "send": None, "error": None}
+            self._write_json(self._draft_path(key), record)
+            return record
+
+    def get_draft(self, key):
+        with self._mutex:
+            path = self._draft_path(key)
+            if not path.exists():
+                raise AssistantError("邮件草稿不存在。", 404)
+            record = self._read_json(path)
+            try:
+                if (record.get("schema_version") != 1 or record["id"] != key
+                        or type(record["version"]) is not int or record["version"] < 1
+                        or record["status"] not in {"draft", "sending", "sent", "partial", "failed", "unknown"}
+                        or not isinstance(record["source"], dict)
+                        or any(not isinstance(record[name], value_type) for name, value_type in
+                               (("from", str), ("to", list), ("cc", list), ("bcc", list),
+                                ("subject", str), ("body", str), ("turns", list)))):
+                    raise ValueError("invalid draft")
+            except (KeyError, TypeError, ValueError):
+                raise AssistantError("邮件草稿记录损坏，不会自动覆盖。", 500) from None
+            return record
+
+    def list_drafts(self):
+        with self._mutex:
+            self._ensure_open()
+            records = [self.get_draft(path.stem) for path in (self.root / "drafts").glob("*.json")]
+            return sorted(records, key=lambda item: item["updated_at"], reverse=True)
+
+    def update_draft(self, key, expected_version, changes, *, bump=True):
+        allowed = {"from", "to", "cc", "bcc", "subject", "body", "turns", "status", "send", "error"}
+        if set(changes) - allowed:
+            raise AssistantError("不能修改草稿身份或来源。", 500)
+        with self._mutex:
+            record = self.get_draft(key)
+            if record["version"] != expected_version:
+                raise AssistantError("草稿已被更新，请刷新后再操作。", 409)
+            record.update(changes, updated_at=now_iso())
+            if bump:
+                record["version"] += 1
+            self._write_json(self._draft_path(key), record)
+            return record
 
     def usage(self, day):
         with self._mutex:

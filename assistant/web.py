@@ -12,9 +12,10 @@ from .service import Service
 from .storage import Store
 from .tasks import Tasks
 from .mail import Mail
+from .drafts import Drafts
 
 
-def create_app(config=None, model=None, browser_factory=None, mail_connector=None):
+def create_app(config=None, model=None, browser_factory=None, mail_connector=None, smtp_connector=None):
     config = config or Config.from_env()
     config.validate()
     app = Flask(__name__)
@@ -28,11 +29,13 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     try:
         tasks = Tasks(service, browser_factory)
         mail = Mail(service, mail_connector)
+        drafts = Drafts(service, mail, smtp_connector)
         followup_agent = FollowupAgent(service, browser_factory, mail)
     except Exception:
         store.close()
         raise
-    app.extensions.update(store=store, service=service, tasks=tasks, mail=mail, followup_agent=followup_agent)
+    app.extensions.update(store=store, service=service, tasks=tasks, mail=mail, drafts=drafts,
+                          followup_agent=followup_agent)
     csrf_token = secrets.token_urlsafe(32)
 
     @app.before_request
@@ -125,14 +128,43 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     def status():
         return jsonify(mode=config.mode, model=config.model if config.mode == "api" else "演示（无真实推理）",
                        usage=store.usage(service.day()), daily_limit=config.daily_calls,
-                       timezone=config.timezone, version="0.3.0",
+                       timezone=config.timezone, version="0.4.0",
                        browser_budget={"calls": config.browser_calls, "steps": config.browser_steps,
                                        "seconds": config.browser_seconds,
                                        "effective_calls": min(config.browser_calls, max(0, config.daily_calls - store.usage(service.day())["calls"]))},
                        capabilities={"auto_collect": mail.enabled, "browser_vision": config.browser_vision,
                        "browser_tasks": config.mode == "api", "browser_scope": "public_https_reading",
                        "browser_dns": "system",
-                       "push": False, "send_email": False, "automatic_memory": mail.enabled})
+                       "push": False, "send_email": drafts.enabled, "automatic_memory": mail.enabled})
+
+    @app.get("/api/drafts")
+    def draft_list():
+        return jsonify(enabled=drafts.enabled, drafts=store.list_drafts())
+
+    @app.post("/api/drafts")
+    def draft_create():
+        with service.operation():
+            return jsonify(draft=drafts.create(body())), 201
+
+    @app.get("/api/drafts/<key>")
+    def draft_detail(key):
+        return jsonify(draft=store.get_draft(key))
+
+    @app.put("/api/drafts/<key>")
+    def draft_update(key):
+        with service.operation():
+            return jsonify(draft=drafts.update(key, body()))
+
+    @app.post("/api/drafts/<key>/assist")
+    def draft_assist(key):
+        return jsonify(draft=drafts.assist(key, body()))
+
+    @app.post("/api/drafts/<key>/send")
+    def draft_send(key):
+        payload = body()
+        if set(payload) != {"version"}:
+            raise AssistantError("发送只接受当前草稿版本号。")
+        return jsonify(draft=drafts.send(key, payload["version"]))
 
     @app.get("/api/mail")
     def mail_list():

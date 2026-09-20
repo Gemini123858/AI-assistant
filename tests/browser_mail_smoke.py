@@ -3,7 +3,7 @@ import threading
 import tempfile
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 from werkzeug.serving import make_server
 
 from assistant.config import Config
@@ -46,15 +46,26 @@ def main():
                     page.locator("#source-dialog[open]").wait_for()
                     assert "我正在找实习" in page.locator("#source-body").inner_text()
                     page.locator("#close-dialog").click()
+                    with page.expect_response(lambda r: r.url.endswith("/api/drafts") and r.status == 201):
+                        page.get_by_role("button", name="根据此邮件写邮件", exact=True).click()
+                    expect(page.locator("#draft-from")).to_have_value("owner@qq.com")
+                    assert page.locator("#draft-from").input_value() == "owner@qq.com"
+                    assert "邮件分析" in page.locator("#draft-source").inner_text()
+                    page.locator("#draft-to").fill("recipient@example.com")
+                    page.locator("#draft-subject").fill("合成草稿")
+                    page.locator("#draft-body").fill("仅保存，不发送。")
+                    with page.expect_response(lambda r: "/api/drafts/" in r.url and r.request.method == "PUT" and r.status == 200):
+                        page.locator("#draft-save").click()
+                    expect(page.locator("#draft-status")).to_contain_text("版本 2")
                     page.locator("#mail-list .message-card").first.evaluate("""e => {
                         const link = document.createElement('p'); link.className = 'caption';
                         link.textContent = 'https://public.example/' + 'a'.repeat(200); e.append(link);
                     }""")
                     output = Path("data/browser-check")
                     output.mkdir(parents=True, exist_ok=True)
-                    page.screenshot(path=str(output/"v03-mail-desktop.png"))
+                    page.screenshot(path=str(output/"v04-mail-desktop.png"))
                     page.set_viewport_size({"width": 390, "height": 844})
-                    page.screenshot(path=str(output/"v03-mail-mobile.png"))
+                    page.screenshot(path=str(output/"v04-mail-mobile.png"))
                     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
                     page.once("dialog", lambda dialog: dialog.accept())
                     with page.expect_response(lambda r: r.url.endswith("/api/mail/latest") and r.status == 200):
@@ -62,7 +73,7 @@ def main():
                     page.locator("#logout-button").click()
                     page.wait_for_url("**/login")
                     assert page.request.get(f"http://127.0.0.1:{server.server_port}/api/mail").status == 401
-                    print("Offline mail UI passed: login, baseline, new header, read-only body, event table, narrow layout and logout.")
+                    print("Offline mail UI passed: login, read-only mail, event table, editable contextual draft, narrow layout and logout.")
                 finally:
                     browser.close()
         finally:
