@@ -42,7 +42,44 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/data/browser-cache"
 
 浏览器访问 `http://127.0.0.1:8000`。可用 `--port 8001` 修改端口。
 
-默认是 `demo` 模式，只验证界面和存储，不进行真实语义分析或网页任务。当前使用 Flask 本地开发服务器，不要直接暴露到公网或使用多 worker 启动。
+默认是 `demo` 模式，只验证界面和存储，不进行真实语义分析或网页任务。启动使用单进程、8线程的 Waitress；当前不支持多 worker 或多个实例共用一个数据目录。
+
+## 校内服务器 IP 测试部署
+
+在目标机器 clone 后进入项目目录，按“快速启动”安装 Python 依赖和 Chromium。无需安装 Node.js、数据库或 Docker。如果 Chromium 提示缺少系统库，运行 `.venv/bin/python -m playwright install-deps chromium`；此步骤通常需要管理员权限。
+
+编辑服务器上的私有 `.env`，保留 Kimi、邮箱等配置，再设置：
+
+```dotenv
+ASSISTANT_HOST=0.0.0.0
+ASSISTANT_PORT=11209
+# 替换成浏览器实际访问的网关 IP；只填 IP，不加 http:// 或 :11209
+ASSISTANT_TRUSTED_HOSTS=localhost,127.0.0.1,你的网关IP
+ASSISTANT_ACCESS_TOKEN=替换为自己生成的至少24字符随机口令
+```
+
+`11209` 是 Mario 的示例映射端口，须确认空闲。浏览器访问 `http://网关IP:11209/`，使用 `ASSISTANT_ACCESS_TOKEN` 登录。`0.0.0.0` 是监听地址，不是浏览器访问地址。非回环监听必须设置访问口令；HTTP 校内测试流量没有加密。
+
+从项目根目录启动（先停止占用相同端口的网络测试程序）：
+
+```bash
+chmod 600 .env
+export PLAYWRIGHT_BROWSERS_PATH="$PWD/data/browser-cache"
+.venv/bin/python -m assistant
+```
+
+终端中的 `.env` 配置会自动加载，无需 `source .env`；已经导出的同名环境变量优先。可以用 `--host` 和 `--port` 临时覆盖监听配置。服务器重启应用后需要重新登录；已保存资料保留，临时追问关闭，未完成网页任务标记中断。
+
+测试期间可用 tmux 保持 SSH 断开后继续运行：
+
+```bash
+tmux new -s personal-assistant
+# 在 tmux 中进入项目根目录，再执行上面的 export 与启动命令
+```
+
+按 `Ctrl+B` 然后按 `D` 脱离会话；用 `tmux attach -t personal-assistant` 返回，`Ctrl+C` 停止服务。tmux 不提供崩溃或机器重启后的自动启动。
+
+更新时先停止服务并备份 `data/`，再 `git pull --ff-only`、重新安装依赖并启动；Playwright 版本变化后重新安装 Chromium。新 clone 不含 `.env`、邮箱记录、草稿和画像；如需迁移数据，应在源实例停止后私下复制 `.env` 与 `data/`，不要通过 Git 上传。
 
 ## 配置 Kimi
 
@@ -142,7 +179,7 @@ ASSISTANT_CHAT_SELF_NAMES=
 git diff --check
 ```
 
-离线测试使用临时目录、合成邮箱、SMTP 和模拟模型，不访问真实账号或产生 API 费用。当前共有 181 项单元测试。
+离线测试使用临时目录、合成邮箱、SMTP 和模拟模型，不访问真实账号或产生 API 费用。当前共有 184 项单元测试。
 
 可选的 Chromium 合成界面回归：
 
@@ -158,7 +195,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/data/browser-cache"
 
 ## 已知限制
 
-- 邮件发送第一版仅支持 QQ SMTP 纯文本邮件；尚无附件、HTML、联系人目录、远程安全部署、主动推送、Bark 或网盘备份。
+- 邮件发送第一版仅支持 QQ SMTP 纯文本邮件；尚无附件、HTML、联系人目录、HTTPS 公网部署、主动推送、Bark 或网盘备份。
 - 合成 SMTP 已验证，真实 QQ 发送仍需由用户指定测试收件人并明确触发；SMTP 接受不等于最终投递或阅读。
 - QQ/微信客户端自动接入已取消；聊天内容需通过邮件、复制或导入提供。
 - Chromium 不继承 WSL 的 `HTTP_PROXY`；当前使用系统 DNS，并拒绝解析到私网或 Fake-IP 的公网目标。

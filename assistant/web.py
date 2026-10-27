@@ -3,7 +3,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, redirect, render_template, request, session
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, SecurityError
 
 from .config import Config
 from .errors import AssistantError
@@ -19,7 +19,7 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     config = config or Config.from_env()
     config.validate()
     app = Flask(__name__)
-    app.config.update(MAX_CONTENT_LENGTH=128 * 1024, TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
+    app.config.update(MAX_CONTENT_LENGTH=128 * 1024, TRUSTED_HOSTS=config.trusted_hosts)
     app.json.ensure_ascii = False
     app.secret_key = secrets.token_bytes(32)
     app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
@@ -40,6 +40,9 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.before_request
     def guard_request():
+        # Authentication redirects must not mask Flask's untrusted-Host error.
+        if isinstance(request.routing_exception, SecurityError):
+            raise request.routing_exception
         public = request.endpoint in {"login", "static"}
         if config.access_token and not public and not session.get("authenticated"):
             if request.path.startswith("/api/"):

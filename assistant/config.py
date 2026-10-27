@@ -1,4 +1,5 @@
 import json
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,9 @@ class Config:
     qq_imap_auth_code: str = field(default="", repr=False)
     mail_poll_seconds: int = 60
     chat_self_names: str = ""
+    host: str = "127.0.0.1"
+    port: int = 8000
+    trusted_hosts: list = field(default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"])
 
     @classmethod
     def from_env(cls):
@@ -59,6 +63,10 @@ class Config:
                 qq_imap_auth_code=os.getenv("QQ_IMAP_AUTH_CODE", ""),
                 mail_poll_seconds=int(os.getenv("ASSISTANT_MAIL_POLL_SECONDS", "60")),
                 chat_self_names=os.getenv("ASSISTANT_CHAT_SELF_NAMES", ""),
+                host=os.getenv("ASSISTANT_HOST", "127.0.0.1").strip(),
+                port=int(os.getenv("ASSISTANT_PORT", "8000")),
+                trusted_hosts=[host.strip() for host in os.getenv(
+                    "ASSISTANT_TRUSTED_HOSTS", "localhost,127.0.0.1,[::1]").split(",") if host.strip()],
             )
         except (ValueError, TypeError) as exc:
             raise AssistantError("环境变量配置格式错误，请检查整数及 EXTRA_BODY JSON。") from exc
@@ -66,6 +74,19 @@ class Config:
         return config
 
     def validate(self):
+        try:
+            address = ipaddress.ip_address(self.host)
+        except ValueError:
+            raise AssistantError("ASSISTANT_HOST 必须为监听 IP 地址，例如 127.0.0.1 或 0.0.0.0。") from None
+        if not 1 <= self.port <= 65535:
+            raise AssistantError("ASSISTANT_PORT 必须在 1～65535 之间。")
+        if not address.is_loopback and len(self.access_token) < 24:
+            raise AssistantError("允许远程访问前必须配置至少24字符的 ASSISTANT_ACCESS_TOKEN。")
+        if (not self.trusted_hosts or any(not isinstance(host, str) or not host
+                or any(char in host for char in "/@?#*\\ \t\r\n")
+                or (":" in host and host != "[::1]") or host.startswith(".")
+                for host in self.trusted_hosts)):
+            raise AssistantError("ASSISTANT_TRUSTED_HOSTS 请填写逗号分隔的明确主机名或 IPv4，不含协议、端口或通配符。")
         if bool(self.qq_imap_user) != bool(self.qq_imap_auth_code):
             raise AssistantError("QQ_IMAP_USER 和 QQ_IMAP_AUTH_CODE 必须同时配置。")
         if self.qq_imap_user and (not self.qq_imap_user.lower().endswith("@qq.com")
