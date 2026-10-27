@@ -31,6 +31,8 @@
 
 要求 WSL/Linux、Python 3.10+。
 
+部署和日常更新统一使用 `main`：首次克隆用 `git clone -b main <仓库地址>`，进入项目根目录后执行下面的安装步骤。
+
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -c requirements.lock -e .
@@ -80,6 +82,44 @@ tmux new -s personal-assistant
 按 `Ctrl+B` 然后按 `D` 脱离会话；用 `tmux attach -t personal-assistant` 返回，`Ctrl+C` 停止服务。tmux 不提供崩溃或机器重启后的自动启动。
 
 更新时先停止服务并备份 `data/`，再 `git pull --ff-only`、重新安装依赖并启动；Playwright 版本变化后重新安装 Chromium。新 clone 不含 `.env`、邮箱记录、草稿和画像；如需迁移数据，应在源实例停止后私下复制 `.env` 与 `data/`，不要通过 Git 上传。
+
+## Git 分支与版本
+
+- `main`：已完成相关检查、供单用户测试部署的主线；Mario 从这里克隆和更新。当前测试版标签为 `v0.4.0-beta.1`，不表示所有功能都已完成真实环境验收。
+- `feat/<简短功能名>`、`fix/<简短问题名>`：从最新 `main` 创建，一次只处理一个功能或问题，检查完成后合并回 `main` 并删除分支。
+- 标签：保留固定代码节点，不随后续提交移动。`archive/v0.1-web`、`archive/v0.2-browser` 和 `archive/browser-namespaced-reads` 保存本次清理前的旧分支末端，只是历史节点，不代表对应版本的正式发布。
+
+日常流程示例（先保证工作树干净；不要把私人文件顺手提交）：
+
+```bash
+git switch main
+git pull --ff-only
+git switch -c fix/example-issue
+# 修改、验证，并明确选择文件提交
+git add <本次修改的文件>
+git commit -m "fix: describe the issue"
+git switch main
+git merge --ff-only fix/example-issue
+git branch -d fix/example-issue
+git push origin main
+```
+
+如果 `--ff-only` 提示分叉，先检查双方提交再处理，不强制覆盖。当前仍为单人开发流程，不额外维护长期 `develop` 分支；版本发布时在 `main` 上创建带说明的标签。
+
+本次本地分支整理后，首次同步由维护者执行：
+
+```bash
+git push -u origin main --follow-tags
+```
+
+随后在仓库网页设置默认分支为 `main`。确认远端主线和标签已存在后，可删除已归档的远端旧分支：
+
+```bash
+git push origin --delete fix/browser-namespaced-reads
+git fetch --prune
+```
+
+已有服务器检出旧分支时，停止应用、保留并备份本机数据，在干净工作树中执行 `git fetch origin`、`git switch main` 后按部署说明更新依赖并启动。Git 标签只保存代码，不包含 `.env`、画像或邮箱数据备份；切换旧版本前也需备份数据并核对格式兼容性。
 
 ## 配置 Kimi
 
