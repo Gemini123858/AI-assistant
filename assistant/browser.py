@@ -14,8 +14,8 @@ from .storage import now_iso
 from .browser_network import PublicHTTPSProxy
 
 
-SITE = "jobs.bytedance.com"
-ENTRY = "https://jobs.bytedance.com/experienced/"
+SITE = "example.com"
+ENTRY = "https://example.com/"
 STATIC_RESOURCE_TYPES = frozenset({"script", "stylesheet", "image", "font", "media"})
 # Fixed, read-only DOM inspection code. Models never supply selectors or JavaScript.
 ELEMENT_SELECTOR = 'a[href],button,input,select,textarea,summary,[onclick],[role="button"],[role="tab"],[role="menuitem"],[role="link"],[role="checkbox"],[tabindex],[class*="pagination"] li'
@@ -51,7 +51,7 @@ ELEMENT_INFO = """e => {
       label:(e.getAttribute('aria-label') || (e.labels && Array.from(e.labels).map(l=>l.innerText).join(' ')) || e.innerText || e.getAttribute('placeholder') || e.title || '').trim().slice(0,200),
       href:e.tagName === 'A' ? e.href : '', type:e.getAttribute('type') || '',
       name:e.getAttribute('name') || '',
-      placeholder:e.getAttribute('placeholder') || '', disabled:!!e.disabled || e.getAttribute('aria-disabled') === 'true',
+      placeholder:e.getAttribute('placeholder') || '', disabled:!!e.disabled || e.getAttribute('aria-disabled') === 'true', readonly:!!e.readOnly,
       search:!!parent, pagination:!!e.closest('[class*="pagination" i]'),
       filter:!!e.closest('[class*="filter" i],[aria-label*="筛选"],[aria-label*="filter" i]'),
       form:!!form, form_method:form ? form.method.toUpperCase() : '', form_action:form ? form.action : '',
@@ -63,9 +63,6 @@ ELEMENT_INFO = """e => {
 
 WRITE_PATH = re.compile(r"(?:^|[/_.\s-])(?:login|logout|signin|signup|register|apply|deliver|submit|upload|delete|remove|save|send|create|update|insert|edit|collect|favorite|follow|unfollow|subscribe|unsubscribe|checkout|purchase|payment|captcha|verify)(?:$|[/_.\s-])", re.I)
 CREDENTIAL_FIELD = re.compile(r"(?:^|[/_.\s-])(?:password|passwd|authorization|access_token|refresh_token|auth_code|credit_card)(?:$|[/_.\s-])", re.I)
-# Whole operation segments are still ambiguous, but article slugs are not
-# operations merely because they mention create/delete/edit.
-NAV_ACTION_PATH = re.compile(r"(?:^|/)(?:login|logout|signin|signup|register|apply|deliver|submit|upload|delete|remove|save|send|collect|favorite|follow|unfollow|subscribe|unsubscribe|checkout|purchase|payment|captcha|verify)(?:/|$)", re.I)
 
 
 def risky_name(value):
@@ -104,6 +101,7 @@ def normalize_domain(value):
 class BrowserScope:
     """Immutable reading authority; host restrictions are optional, writes are not."""
     def __init__(self, start_url=ENTRY, domains=None, resource_domains=None, read_post_urls=None, blocked_urls=None, read_exceptions=None, public_web=None):
+        # Old callers may supply read_post_urls; current scopes discard it.
         if public_web is not None and not isinstance(public_web, bool):
             raise AssistantError("public_web 必须为布尔值，只控制公开阅读范围，不授予写入权限。", 400)
         # Missing in historical records: keep their exact-host authority and
@@ -123,18 +121,6 @@ class BrowserScope:
         # Check authority before risk heuristics: a confirmed exception must be
         # available when validating a start URL that was previously blocked.
         self.start_url = request_url(start_url, None if self.public_web else self.domains)
-        if read_post_urls is not None and (not isinstance(read_post_urls, list) or len(read_post_urls) > 20):
-            raise AssistantError("只读 POST 接口必须为不超过20项的完整 HTTPS URL 列表。", 400)
-        urls = set()
-        for value in read_post_urls or []:
-            value = navigation_url(value, self)
-            parsed = urlsplit(value)
-            if parsed.query or parsed.fragment:
-                raise AssistantError("只读 POST 授权填写精确接口地址，不带查询参数或片段。", 400)
-            urls.add(value)
-        self.read_post_urls = frozenset(urls)
-        # Legacy read_post_urls survive round-trip for old records, but no
-        # longer grant permissions or override the negative policy.
         if blocked_urls is not None and (not isinstance(blocked_urls, list) or len(blocked_urls) > 20):
             raise AssistantError("禁止访问 URL 必须为不超过20项的精确 HTTPS 地址列表。", 400)
         blocked = set()
@@ -168,9 +154,7 @@ class BrowserScope:
                 raise AssistantError("阅读豁免只接受精确 GET/HEAD/POST 文档或数据请求。", 400)
             hosts = self.domains if method == "POST" or kind == "document" else self.resource_domains
             url = request_url(entry["url"], None if self.public_web else hosts)
-            # Mirror the per-surface predicate used when the binding is granted.
-            query_risk = (operation_query if method == "POST" or kind in {"xhr", "fetch"}
-                          else write_query)(urlsplit(url).query)
+            query_risk = operation_query(urlsplit(url).query)
             if urlsplit(url).fragment or query_risk or blocked_url(url, self):
                 raise AssistantError("阅读豁免不能覆盖查询操作、凭据或用户显式禁止路径，也不能带片段。", 400)
             normalized = {"url": url, "method": method, "resource_type": kind}
@@ -189,8 +173,6 @@ class BrowserScope:
                   "resource_domains": sorted(self.resource_domains)}
         if self._public_web_explicit:
             result["public_web"] = self.public_web
-        if self.read_post_urls:
-            result["read_post_urls"] = sorted(self.read_post_urls)
         if self.blocked_urls:
             result["blocked_urls"] = sorted(self.blocked_urls)
         if self.read_exceptions:
@@ -203,25 +185,13 @@ def element_actions(info, url, scope=None):
     if not info.get("connected") or not info.get("visible") or info.get("disabled"):
         return []
     actions = ["click"]
-    search = info.get("search") or info.get("type") == "search" or bool(re.search(
-        r"搜索|关键词|关键字|search|query|keywords", " ".join(info.get(k, "") for k in ("label", "placeholder", "name")), re.I))
-    read_control = search or info.get("filter") or info.get("pagination")
-    if info.get("form") and search:
-        try:
-            navigation_url(info.get("form_action"), scope)
-        except AssistantError:
-            return actions
-        method = info.get("form_method")
-        post_allowed = allowed_request(info.get("form_action"), "POST", "document", "", scope)
-        if not search or method != "GET" and not (method == "POST" and post_allowed):
-            return actions
     if info.get("tag") in {"input", "textarea"}:
-        if read_control and info.get("type") in {"", "text", "search"}:
+        if not info.get("readonly") and info.get("type") in {"", "text", "search", "number"}:
             return actions + ["fill", "press"]
-        if info.get("filter") and info.get("type") in {"checkbox", "radio"}:
+        if info.get("type") in {"checkbox", "radio"}:
             return actions + ["check"]
         return actions
-    if info.get("tag") == "select" and read_control:
+    if info.get("tag") == "select":
         return actions + ["select"]
     return actions
 
@@ -253,7 +223,8 @@ def navigation_url(value, scope=None):
         error = AssistantError(denial["reason"], 403)
         error.policy = denial
         raise error
-    return request_url(value, None if scope and scope.public_web else scope.domains if scope else {SITE})
+    parsed = urlsplit(value)
+    return urlunsplit(("https", parsed.hostname, parsed.path or "/", parsed.query, parsed.fragment))
 
 
 def is_detail(url):
@@ -277,11 +248,6 @@ def operation_query(query):
                or key.lower() in {"action", "operation", "op", "cmd"} and risky_name(value)
                or key.lower() in {"query", "mutation"} and graphql_mutation(value)
                for key, value in parse_qsl(query, keep_blank_values=True))
-
-
-def write_query(query):
-    return (any(risky_name(key) for key, _ in parse_qsl(query, keep_blank_values=True))
-            or operation_query(query))
 
 
 def terminal_verb_path(path):
@@ -329,7 +295,6 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
             result["read_exception"] = request_binding(url, method, resource_type, post_data, content_type)
         return result
     try:
-        parsed = urlsplit(url)
         domains = scope.domains if scope else {SITE}
         resources = scope.resource_domains if scope else {SITE}
         hosts = domains if resource_type == "document" or method == "POST" else resources
@@ -338,20 +303,14 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
         if method in {"GET", "HEAD"} and resource_type in STATIC_RESOURCE_TYPES:
             # Browser-reported subresources, not a URL-extension or CDN whitelist.
             # The transport separately validates and pins every host's public IPs.
-            hosts = {normalize_domain(parsed.hostname)}
+            hosts = None
         url = request_url(url, hosts)
+        parsed = urlsplit(url)
         if blocked_url(url, scope):
             return denied("explicit_deny", "命中用户显式禁止路径；需用户移除禁令，阅读豁免无效。")
-        # Who generates the request decides how much of the URL is policy surface.
-        # Documents are model-chosen; subresources and site-generated data
-        # requests are not something the model can craft.
-        if method in {"GET", "HEAD"} and resource_type in {"document"} | STATIC_RESOURCE_TYPES:
-            query_risk = write_query(parsed.query)
-        elif method == "POST" or resource_type in {"xhr", "fetch"}:
-            query_risk = operation_query(parsed.query)
-        else:
-            query_risk = False
-        if query_risk:
+        # Query keys such as create_time are ordinary site data. Only explicit
+        # operation selectors, credentials and mutations affect authorization.
+        if operation_query(parsed.query):
             return denied("query_operation", "查询参数包含账号/操作或凭据风险；阅读豁免不能覆盖。")
         if method not in {"GET", "HEAD", "POST"}:
             return denied("method", "请求方法不属于公开读取能力。")
@@ -362,9 +321,7 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
                 or not read_post_body(post_data, content_type)):
             return denied("body", "POST正文含写入/凭据/mutation、文件类型、无效格式或超出大小限制；不可豁免。")
         path_risk = False
-        if method in {"GET", "HEAD"} and resource_type == "document":
-            path_risk = bool(NAV_ACTION_PATH.search(unquote(parsed.path)))
-        elif method == "POST" and resource_type in {"document", "xhr", "fetch"}:
+        if method == "POST" and resource_type in {"document", "xhr", "fetch"}:
             # /api/apply/jobs is a namespace; only /jobs/apply is an operation.
             path_risk = terminal_verb_path(parsed.path)
         if path_risk:
@@ -372,7 +329,7 @@ def request_denial(url, method, resource_type, post_data=None, scope=None, conte
             if binding not in getattr(scope, "read_exceptions", ()):
                 return denied("path_keyword", "路径疑似账号/业务操作（仅启发式，可能误伤）；可核实后添加本任务精确阅读豁免并重新发起。", True)
         return None
-    except (AssistantError, ValueError, TypeError, AttributeError, RecursionError, UnicodeError):
+    except (AssistantError, ValueError, UnicodeError):
         reason = "链接格式或主机不符合公开 HTTPS 阅读要求。"
         if not (scope and scope.public_web):
             reason += "当前为限定网站模式，目标也须在任务域内；新建任务可选择公网阅读。"
@@ -393,27 +350,14 @@ def allowed_request(url, method, resource_type, post_data=None, scope=None, cont
     return request_denial(url, method, resource_type, post_data, scope, content_type) is None
 
 
-def public_addresses(host, mode="system"):
-    """System DNS only. Legacy mode arguments never invoke external DoH."""
+def public_addresses(host):
+    """Resolve through system DNS and select public addresses for the transport."""
     addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     ips = {address[4][0] for address in addresses}
-    if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+    ips = {ip for ip in ips if ipaddress.ip_address(ip).is_global}
+    if not ips:
         raise AssistantError("域名解析到非公开地址，已拒绝。请核对 DNS/代理解析；尚不能确定底层原因。", 403)
     return sorted(ips, key=lambda ip: (":" in ip, ip))
-
-
-def resolver_rules(hosts, mode="system", check=lambda: None):
-    """Legacy fixed-host helper; runtime uses dynamic public-IP HTTPS tunnels."""
-    rules = []
-    for host in sorted(hosts):
-        check()
-        ips = public_addresses(host, mode)
-        # Chromium resolver rules support bracketed IPv6; prefer IPv4 where available.
-        chosen = sorted(ips, key=lambda ip: (":" in ip, ip))[0]
-        if ":" in chosen:
-            chosen = "[" + chosen + "]"
-        rules.append(f"MAP {host} {chosen}")
-    return ", ".join([*rules, "MAP * ~NOTFOUND"])
 
 
 class JobBrowser:
@@ -422,9 +366,10 @@ class JobBrowser:
     TAB_STATE_FIELDS = ("read_errors", "data_errors", "_pending_data", "data_responses", "network_errors",
                         "internal_errors", "policy_blocks", "_document_ok", "_proxy_auth_failed")
 
-    def __init__(self, check, dns_mode="system", scope=None):
+    def __init__(self, check, scope=None, proxy_url=""):
         self.check = check
         self.dns_mode = "system"
+        self.proxy_url = proxy_url
         self.scope = scope or BrowserScope()
         self.playwright = self.browser = self.context = self.page = None
         self.blocked = 0
@@ -542,16 +487,20 @@ class JobBrowser:
                 "data_responses": self.data_responses[-12:], "data_errors": list(self.data_errors.values())[-12:]}
 
     def permitted(self, request):
+        return self._request_decision(request) is None
+
+    def _request_decision(self, request):
+        cached = request.__dict__.get("_assistant_read_policy")
+        if cached is not None and cached[0] is self:
+            return cached[1]
         try:
             content_type = request.headers.get("content-type", "")
-            if any(kind in content_type.lower() for kind in ("multipart/", "application/octet-stream")):
-                return False
-            return allowed_request(request.url, request.method, request.resource_type, request.post_data,
-                                   self.scope, content_type)
-        except Exception:
-            # Binary/undecodable bodies are not public query text. Fail closed
-            # here instead of breaking Playwright's request callback.
-            return False
+            denial = request_denial(request.url, request.method, request.resource_type, request.post_data,
+                                    self.scope, content_type)
+        except UnicodeDecodeError:
+            denial = {"rule": "body", "overridable": False, "reason": "请求正文为二进制数据。"}
+        request._assistant_read_policy = (self, denial)
+        return denial
 
     def _request_started(self, request):
         if request.resource_type in {"xhr", "fetch"} and self.permitted(request):
@@ -568,7 +517,7 @@ class JobBrowser:
         try:
             from playwright.sync_api import sync_playwright
             self.check()
-            self._transport = PublicHTTPSProxy(lambda host: public_addresses(host, self.dns_mode), normalize_domain)
+            self._transport = PublicHTTPSProxy(public_addresses, normalize_domain, self.proxy_url)
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(
                 headless=True, channel="chromium",
@@ -634,15 +583,10 @@ class JobBrowser:
             route.continue_()
         else:
             self.blocked += 1
-            try:
-                denial = request_denial(request.url, request.method, request.resource_type, request.post_data,
-                                         self.scope, request.headers.get("content-type", ""))
-            except Exception:
-                denial = None
+            denial = self._request_decision(request)
             self.policy_blocks.append({"target": self.target(request.url), "type": request.resource_type,
                                        "method": request.method,
-                                       **(denial or {"rule": "body", "overridable": False,
-                                                     "reason": "文件类型或无法解码的正文不可放行。"})})
+                                       **denial})
             self.policy_blocks = self.policy_blocks[-50:]
             route.abort()
 
@@ -758,6 +702,8 @@ class JobBrowser:
         self.data_responses.clear()
         self.network_errors = []
         self.policy_blocks = []
+        self.internal_errors = []
+        self._proxy_auth_failed = False
         if self._transport:
             self._transport.clear_failures()
         before = urlsplit(self.page.url)
@@ -833,13 +779,12 @@ class JobBrowser:
                         "kind": "page", "ready": False, "fetched_at": now_iso(), "text_truncated": False,
                         "read_error": "导航未成功（可能被权限拦截或连接失败）：" + detail +
                         "若是重定向目标越域，可换范围内入口或由用户扩大范围。", **self.list_tabs(), **self.diagnostics()}
-            url = navigation_url(self.page.url, self.scope)
+            url = self.page.url
             deadline = time.monotonic() + wait_seconds
             previous, stable = "", 0
             text, useful = "", False
             while time.monotonic() < deadline:
                 self.check()
-                url = navigation_url(self.page.url, self.scope)
                 text = self.page.locator("body").inner_text(timeout=2000)
                 useful = bool(text.strip() and self._document_ok)
                 stable = stable + 1 if useful and text == previous else 0
@@ -964,6 +909,8 @@ class JobBrowser:
             raise BrowserError("页面观察失败或超时；可重新观察/刷新。诊断：" + detail, "interaction") from None
 
     def _element(self, identity, action):
+        from playwright.sync_api import Error as PlaywrightError
+
         self.check()
         if not isinstance(identity, str) or identity not in self._elements:
             raise AssistantError("元素编号过期或未观察到，请重新观察页面。", 409)
@@ -971,17 +918,17 @@ class JobBrowser:
         try:
             actual = handle.evaluate(ELEMENT_INFO)
             actual["clickable"] = handle.evaluate(CLICKABLE_INFO)
-            critical = ("connected", "tag", "role", "href", "type", "name", "form", "form_method", "form_action")
+            critical = ("tag", "href", "type")
             if (not actual.get("connected") or any(actual.get(k) != expected.get(k) for k in critical)
                     or (expected.get("clickable") and not actual.get("clickable"))
-                    or navigation_url(self.page.url, self.scope) != self._element_url):
+                    or self.page.url != self._element_url):
                 raise AssistantError("元素已变化，请重新观察页面，未执行动作。", 409)
-            if action not in element_actions(actual, navigation_url(self.page.url, self.scope), self.scope):
+            if action not in element_actions(actual, self.page.url, self.scope):
                 raise AssistantError("当前控件不可执行此动作：可能不可见、已禁用或未开放填写。", 403)
             return handle
         except AssistantError:
             raise
-        except Exception:
+        except PlaywrightError:
             raise AssistantError("元素已失效，请重新观察页面，未执行动作。", 409) from None
 
     def hover(self, identity):

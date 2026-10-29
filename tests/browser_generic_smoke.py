@@ -1,7 +1,6 @@
 """Real Chromium, locally fulfilled public sites; no cloud/model/account access."""
 
 from urllib.parse import urlsplit
-from unittest.mock import patch
 
 from assistant.browser import BrowserScope, JobBrowser, allowed_request
 from assistant.errors import AssistantError
@@ -11,7 +10,7 @@ START = "https://catalog.example/topics"
 DETAIL = "https://catalog.example/articles/graph"
 HTML = """<!doctype html><html lang="zh"><h1>公开资料目录</h1>
 <form role="search" action="/topics" method="get"><input type="search" name="q" placeholder="搜索资料"><button>查找</button></form>
-<div class="filters"><label>城市<select aria-label="城市"><option value="all">全部</option><option value="sh">上海</option></select></label>
+<input placeholder="职位名称"><div><label>城市<select aria-label="城市"><option value="all">全部</option><option value="sh">上海</option></select></label>
 <label><input type="checkbox">仅开放资料</label></div>
 <a href="/articles/graph">图结构资料</a><form method="post" action="/api/save"><input placeholder="姓名"><button>保存</button></form>
 <a href="/blog/how-to-delete-facebook-account" onclick="document.body.dataset.articleClicked='yes'">如何删除账号</a>
@@ -76,78 +75,79 @@ class GenericResponseBrowser(JobBrowser):
 
 def main():
     scope = BrowserScope(START)
-    with patch("assistant.browser.resolver_rules", return_value="MAP * ~NOTFOUND"):
-        with LocalBrowser(lambda: None, scope=scope) as browser:
+    with LocalBrowser(lambda: None, scope=scope) as browser:
+        first = browser.read(START)
+        assert first["ready"] and first["kind"] == "page"
+        assert browser.blocked >= 2
+        assert not first["network_errors"], "policy blocks must not become network failures"
+        first = browser.fill(element(first, "职位名称")["id"], "图结构", False)
+        assert browser.page.locator('input[placeholder="职位名称"]').input_value() == "图结构"
+        article = browser.click(element(first, "如何删除账号")["id"])
+        assert article["ready"] and "纯阅读文章" in article["text"]
+        for path in ("/docs/create-react-app", "/wiki/Edit"):
+            assert browser.read("https://catalog.example" + path)["ready"]
+        first = browser.read(START)
+        assert browser.click(element(first, "React 无角色资料卡片")["id"])["ready"]
+        first = browser.read(START)
+        assert browser.click(element(first, "原生无角色卡片")["id"])["url"] == DETAIL
+        first = browser.read(START)
+        search_id = element(first, "搜索资料")["id"]
+        browser.page.locator('input[type="search"]').evaluate("e=>e.placeholder='搜索资料（已更新）'")
+        first = browser.fill(search_id, "公开查询", False)
+        assert "fill" in element(first, "姓名")["actions"]
+        assert element(first, "发送")["actions"] == ["click"]
+        for label in ("保存", "发送"):
             first = browser.read(START)
-            assert first["ready"] and first["kind"] == "page"
-            assert browser.blocked >= 2
-            assert not first["network_errors"], "policy blocks must not become network failures"
-            article = browser.click(element(first, "如何删除账号")["id"])
-            assert article["ready"] and "纯阅读文章" in article["text"]
-            for path in ("/docs/create-react-app", "/wiki/Edit"):
-                assert browser.read("https://catalog.example" + path)["ready"]
-            first = browser.read(START)
-            assert browser.click(element(first, "React 无角色资料卡片")["id"])["ready"]
-            first = browser.read(START)
-            assert browser.click(element(first, "原生无角色卡片")["id"])["url"] == DETAIL
-            first = browser.read(START)
-            search_id = element(first, "搜索资料")["id"]
-            browser.page.locator('input[type="search"]').evaluate("e=>e.placeholder='搜索资料（已更新）'")
-            first = browser.fill(search_id, "公开查询", False)
-            assert element(first, "姓名")["actions"] == ["click"]
-            assert element(first, "发送")["actions"] == ["click"]
-            for label in ("保存", "发送"):
-                first = browser.read(START)
-                browser.click(element(first, label)["id"])
-                assert any(block["rule"] == "path_keyword" and "/api/save" in block["target"]
-                           for block in browser.policy_blocks), "UI dispatch must not expand network authority"
-            first = browser.read(START)
-            search = browser.fill(element(first, "搜索资料")["id"], "KG alignment 图结构 上海", False)
-            search = browser.press(element(search, "搜索资料")["id"], "Enter")
-            assert "q=" in search["url"] and search["ready"]
-            selected = browser.select(element(search, "城市")["id"], "sh")
-            checked = browser.check_field(element(selected, "仅开放资料")["id"], True)
-            browser.scroll("down")
-            assert browser.read(DETAIL)["ready"]
-            assert "/topics" in browser.back()["url"]
-            assert browser.refresh()["ready"]
-            assert browser.wait(1)["ready"]
-            image = browser.screenshot()
-            assert image.startswith("data:image/png;base64,")
-            partial = browser.observe(text_start=5)
-            assert partial["text_start"] == 5 and partial["text_truncated"] and partial["ready"]
-            window = browser.observe(text_start=5, text_length=12)
-            assert window["text"] == partial["text"][:12] and window["ready"]
-            fragment = browser.read(browser.page.url + "#资料")
-            assert fragment["ready"] and "#" in fragment["url"]
-            blank = browser.read("https://catalog.example/blank")
-            assert not blank["ready"] and blank["text"] == "" and "read_error" in blank
-            spa = browser.read("https://catalog.example/spa")
-            assert spa["ready"] and not spa["body_stable"] and "公开 SPA 资料已加载" in spa["text"]
-            article = browser.read("https://catalog.example/static-article")
-            assert article["ready"] and "已渲染公开正文" in article["text"]
-            assert article["resource_warning"] and any(e["type"] == "script" for e in article["network_errors"])
-            browser.hover(element(browser.read(START), "图结构资料")["id"])
-            browser.escape()
-            for path in ("/redirect", "/foreign"):
-                try:
-                    browser.read("https://catalog.example" + path)
-                except AssistantError as error:
-                    assert getattr(error, "kind", None) == "permission"
-                assert any("重定向" in p["reason"] for p in browser.policy_blocks), "redirect response was not guarded"
-                assert not any(e["code"] == "net::ERR_BLOCKED_BY_CLIENT" for e in browser.network_errors)
-        exception = {"url": "https://catalog.example/wiki/delete", "method": "GET", "resource_type": "document"}
-        with LocalBrowser(lambda: None, scope=BrowserScope(exception["url"], read_exceptions=[exception])) as browser:
-            assert browser.read(exception["url"])["ready"]
-        start = "https://catalog.example/public-list"
-        with GenericResponseBrowser(lambda: None, scope=BrowserScope(start)) as browser:
-            browser.response_status, browser.response_body = 503, '{}'
-            failed = browser.read(start)
-            assert failed["ready"] and failed["data_errors"] and "不能视为零结果" in failed["read_warning"]
-            browser.response_status, browser.response_body = 200, '[]'
-            recovered = browser.refresh()
-            assert recovered["ready"] and not recovered["data_errors"]
-            assert recovered["content_note"], "Transport success must not promise business completeness"
+            browser.click(element(first, label)["id"])
+            assert any(block["rule"] == "path_keyword" and "/api/save" in block["target"]
+                       for block in browser.policy_blocks), "UI dispatch must not expand network authority"
+        first = browser.read(START)
+        search = browser.fill(element(first, "搜索资料")["id"], "KG alignment 图结构 上海", False)
+        search = browser.press(element(search, "搜索资料")["id"], "Enter")
+        assert "q=" in search["url"] and search["ready"]
+        selected = browser.select(element(search, "城市")["id"], "sh")
+        checked = browser.check_field(element(selected, "仅开放资料")["id"], True)
+        browser.scroll("down")
+        assert browser.read(DETAIL)["ready"]
+        assert "/topics" in browser.back()["url"]
+        assert browser.refresh()["ready"]
+        assert browser.wait(1)["ready"]
+        image = browser.screenshot()
+        assert image.startswith("data:image/png;base64,")
+        partial = browser.observe(text_start=5)
+        assert partial["text_start"] == 5 and partial["text_truncated"] and partial["ready"]
+        window = browser.observe(text_start=5, text_length=12)
+        assert window["text"] == partial["text"][:12] and window["ready"]
+        fragment = browser.read(browser.page.url + "#资料")
+        assert fragment["ready"] and "#" in fragment["url"]
+        blank = browser.read("https://catalog.example/blank")
+        assert not blank["ready"] and blank["text"] == "" and "read_error" in blank
+        spa = browser.read("https://catalog.example/spa")
+        assert spa["ready"] and not spa["body_stable"] and "公开 SPA 资料已加载" in spa["text"]
+        article = browser.read("https://catalog.example/static-article")
+        assert article["ready"] and "已渲染公开正文" in article["text"]
+        assert article["resource_warning"] and any(e["type"] == "script" for e in article["network_errors"])
+        browser.hover(element(browser.read(START), "图结构资料")["id"])
+        browser.escape()
+        for path in ("/foreign",):
+            try:
+                browser.read("https://catalog.example" + path)
+            except AssistantError as error:
+                assert getattr(error, "kind", None) == "permission"
+            assert any("重定向" in p["reason"] for p in browser.policy_blocks), "redirect response was not guarded"
+            assert not any(e["code"] == "net::ERR_BLOCKED_BY_CLIENT" for e in browser.network_errors)
+    exception = {"url": "https://catalog.example/wiki/delete", "method": "GET", "resource_type": "document"}
+    with LocalBrowser(lambda: None, scope=BrowserScope(exception["url"], read_exceptions=[exception])) as browser:
+        assert browser.read(exception["url"])["ready"]
+    start = "https://catalog.example/public-list"
+    with GenericResponseBrowser(lambda: None, scope=BrowserScope(start)) as browser:
+        browser.response_status, browser.response_body = 503, '{}'
+        failed = browser.read(start)
+        assert failed["ready"] and failed["data_errors"] and "不能视为零结果" in failed["read_warning"]
+        browser.response_status, browser.response_body = 200, '[]'
+        recovered = browser.refresh()
+        assert recovered["ready"] and not recovered["data_errors"]
+        assert recovered["content_note"], "Transport success must not promise business completeness"
     print("Offline generic Chromium passed: second-site DOM, free search/Enter, select/check, back/refresh/wait, screenshot, blank observation, redirect and write boundaries.")
 
 

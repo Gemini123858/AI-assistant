@@ -233,7 +233,7 @@ async function loadStatus() {
     "演示模式不执行网页任务，不伪造招聘查询。请配置 API 和 Chromium 后重启。";
 }
 
-function sourceLink(url, label, domains = ["jobs.bytedance.com"]) {
+function sourceLink(url, label, domains) {
   const link = node("a", "", label);
   let target;
   try { target = new URL(url); } catch (_) { return link; }
@@ -261,7 +261,6 @@ function taskCard(task) {
   if (task.public_request) card.append(node("p", "caption", "公开任务目标：" + task.public_request));
   if (task.profile_supplement) card.append(node("p", "caption", "本次公开画像补充：" + task.profile_supplement));
   if (task.private_conditions) card.append(node("p", "caption", "私人筛选条件：" + task.private_conditions));
-  if (task.scope?.read_post_urls?.length) card.append(node("p", "caption", "历史 POST 授权记录（新策略不再依赖）：" + task.scope.read_post_urls.join("、")));
   if (task.scope?.blocked_urls?.length) card.append(node("p", "caption", "禁止访问路径：" + task.scope.blocked_urls.join("、")));
   if (task.scope?.read_exceptions?.length) card.append(node("p", "caption", `本任务精确阅读豁免：${task.scope.read_exceptions.length} 项（不覆盖硬边界）`));
   function exceptionButton(policy) {

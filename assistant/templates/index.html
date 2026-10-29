@@ -59,7 +59,7 @@
         <h2>公开网页任务</h2>
         <p class="muted">由 Kimi 自主浏览、检索和恢复失败操作，再结合私人条件分析已读证据。</p>
         <form id="task-form">
-          <label>起始 URL<input id="task-url" type="url" required value="https://jobs.bytedance.com/experienced/position" maxlength="2000"></label>
+          <label>起始 URL<input id="task-url" type="url" required placeholder="https://example.com/" maxlength="2000"></label>
           <p class="caption">默认可浏览任务相关的公网 HTTPS 页面，自动处理跳转、子域和页面依赖，不需要填写域名。只使用系统 DNS，不调用 Google DNS。</p>
           <details><summary>高级：可选阅读限制（一般无需填写）</summary>
             <label><input id="task-limit-domains" type="checkbox"> 仅限指定网站（默认关闭；开启后跨网站跳转可能被拒绝）</label>

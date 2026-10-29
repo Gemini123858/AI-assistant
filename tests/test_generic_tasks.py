@@ -117,7 +117,6 @@ class GenericTaskTests(unittest.TestCase):
     def test_browser_prompt_prefers_new_evidence_and_early_finish(self):
         self.assertIn("最短证据路径", TASK_SYSTEM)
         self.assertIn("不要紧接着重复observe_page", TASK_SYSTEM)
-        self.assertIn("连续两次无进展应停止该路径", TASK_SYSTEM)
         self.assertIn("remaining.calls", TASK_SYSTEM)
 
     def test_private_conditions_cannot_be_skipped_by_public_finish(self):
@@ -227,6 +226,15 @@ class GenericTaskTests(unittest.TestCase):
         self.assertIn("loop_warning", json.loads(model.calls[-1][-1]["content"]))
         self.assertIn("loop_warning", task["actions"][-1])
         self.assertEqual(task["actions"][-1]["remaining"]["steps"], 115)
+
+    def test_six_transient_failures_can_recover_within_total_budget(self):
+        self.runner([call("open_url", {"url": LIST}) for _ in range(6)] + [call("finish_task", result())])
+        self.tasks.browser_factory = RecoveringBrowser
+        RecoveringBrowser.fail_count = 6
+        task = self.start_generic()
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(len(task["errors"]), 6)
+        self.assertIn("streak_warning", task["actions"][4])
 
     def test_limited_task_domains_are_immutable_and_cross_domain_errors_are_recoverable(self):
         self.runner([call("open_url", {"url": "https://foreign.example/info"}), call("finish_task", result())])
@@ -367,8 +375,9 @@ class GenericScopeTests(unittest.TestCase):
         for url, body in (("https://docs.example/data", '{"operation":"delete"}'),
                           ("https://docs.example/data", '{"query":"mutation { createUser }"}')):
             self.assertFalse(allowed_request(url, "POST", "fetch", body, scope))
-        with self.assertRaises(AssistantError):
-            BrowserScope("https://docs.example/catalog", read_post_urls=["https://foreign.example/data"])
+        legacy = BrowserScope("https://docs.example/catalog", read_post_urls=["https://foreign.example/data"])
+        self.assertNotIn("read_post_urls", legacy.as_dict())
+        self.assertFalse(allowed_request("https://foreign.example/data", "POST", "fetch", '{}', legacy))
         self.assertEqual(BrowserScope(**scope.as_dict()).as_dict(), scope.as_dict())
 
     def test_relative_url_semantics_fragments_and_write_queries_are_preserved_or_denied(self):
@@ -376,7 +385,8 @@ class GenericScopeTests(unittest.TestCase):
         url = "https://" + SITE + "/public/#section"
         self.assertEqual(navigation_url(url), url)
         self.assertTrue(navigation_url("https://" + SITE + "/search?q=delete"))
-        for query in ("?submit=true", "?action=delete", "?operation=send"):
+        self.assertTrue(navigation_url("https://" + SITE + "/public/?submit=true"))
+        for query in ("?action=delete", "?operation=send"):
             with self.subTest(query=query), self.assertRaises(AssistantError):
                 navigation_url("https://" + SITE + "/public/" + query)
 
@@ -395,6 +405,6 @@ class GenericScopeTests(unittest.TestCase):
         for host in ("127.0.0.1", "localhost", "*.example.com", "a.local", "example.com:443", "https://example.com", "a..example"):
             with self.subTest(host=host), self.assertRaises(AssistantError):
                 BrowserScope("https://example.com", [host])
-        for url in ("https://key@example.com", "http://example.com", "https://example.com:444", "https://example.com/delete"):
+        for url in ("https://key@example.com", "http://example.com", "https://example.com:444"):
             with self.subTest(url=url), self.assertRaises(AssistantError):
                 BrowserScope(url)

@@ -8,9 +8,11 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit, urlencode
 
-from assistant.browser import ENTRY, BrowserScope, JobBrowser, allowed_request, navigation_url
+from assistant.browser import BrowserScope, JobBrowser, allowed_request, navigation_url
 from .browser_fixtures import ASSET_HOSTS, SEARCH_PATH
 from assistant.errors import AssistantError
+
+ENTRY = "https://jobs.bytedance.com/experienced/"
 
 
 class DiagnosticBrowser(JobBrowser):
@@ -133,7 +135,6 @@ class DiagnosticBrowser(JobBrowser):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dns", choices=["system"], default="system")
     parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--snapshot", action="store_true",
                         help="Save anonymous screenshots to ignored data/site-probe")
@@ -151,7 +152,7 @@ def main():
             raise AssistantError("官网探测达到90秒上限。")
 
     factory = DiagnosticBrowser if args.diagnostics or args.snapshot else JobBrowser
-    with factory(check, args.dns, scope=BrowserScope(ENTRY, public_web=True)) as browser:
+    with factory(check, scope=BrowserScope(ENTRY, public_web=True)) as browser:
         if isinstance(browser, DiagnosticBrowser):
             browser.snapshot = args.snapshot
         listing_url = "https://jobs.bytedance.com/experienced/position"

@@ -217,8 +217,6 @@ class FollowupAgent:
                     error = BrowserError("浏览器交互失败或超时，可重新观察后恢复。")
                 result = feedback(error, arguments.get("url"))
                 failures += 1
-            if failures >= 5:
-                raise AssistantError("追问中连续5个浏览动作失败；已停止本轮以避免继续消耗额度。", 409)
             if failures >= 3:
                 result["streak_warning"] = "连续浏览动作失败；请改变策略、返回分析并报告，或停止本轮追问。"
             return {**result, "remaining": remaining()}
@@ -228,7 +226,7 @@ class FollowupAgent:
             if browser is not None:
                 browser.__exit__(None, None, None)
             entered = False
-            browser = (JobBrowser(check, config.browser_dns, scope) if self.browser_factory is JobBrowser
+            browser = (JobBrowser(check, scope=scope, proxy_url=config.browser_proxy) if self.browser_factory is JobBrowser
                        else self.browser_factory(check))
             browser.__enter__()
             entered = True
@@ -300,9 +298,8 @@ class FollowupAgent:
                         if name == "open_url":
                             navigation_url(arguments["url"], scope)
                         if name == "browse_public":
-                            candidate_scope = (BrowserScope(arguments["url"], public_web=True)
-                                               if session["kind"] == "mail" else scope)
-                            navigation_url(arguments["url"], candidate_scope)
+                            candidate = BrowserScope(arguments["url"], public_web=True) if session["kind"] == "mail" else scope
+                            navigation_url(arguments["url"], candidate)
                         if name == "open_link" and arguments["link_id"] not in links:
                             raise AssistantError("链接编号未观察到。", 400)
                         parsed.append((call, name, arguments))
@@ -349,7 +346,7 @@ class FollowupAgent:
                         if name == "restart_browser":
                             action = start_browser
                         elif name == "open_url":
-                            action = lambda: browser.read(navigation_url(arguments["url"], scope))
+                            action = lambda: browser.read(arguments["url"])
                         elif name == "open_link":
                             action = lambda: browser.read(links[arguments["link_id"]])
                         elif name == "take_screenshot":

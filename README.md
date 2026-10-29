@@ -146,6 +146,8 @@ ASSISTANT_BROWSER_SECONDS=900
 ASSISTANT_BROWSER_VISION=false
 ```
 
+浏览器默认通过系统 DNS 直连。需要经过 FlClash 等 HTTP 代理时，在 `.env` 设置 `ASSISTANT_BROWSER_PROXY=http://代理主机:端口`，例如 `http://127.0.0.1:7890`，然后重启应用。WSL 中代理主机应使用 WSL 可访问的地址。该配置用于当前浏览器的全部连接；留空恢复直连。
+
 网页任务和追问共用 `ASSISTANT_DAILY_CALLS`。视觉截图默认关闭；开启前需确认模型支持图片与工具调用。
 
 ## 配置 QQ 邮箱
@@ -219,7 +221,7 @@ ASSISTANT_CHAT_SELF_NAMES=
 git diff --check
 ```
 
-离线测试使用临时目录、合成邮箱、SMTP 和模拟模型，不访问真实账号或产生 API 费用。当前共有 184 项单元测试。
+离线测试使用临时目录、合成邮箱、SMTP 和模拟模型，不访问真实账号或产生 API 费用。
 
 可选的 Chromium 合成界面回归：
 
@@ -238,6 +240,6 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/data/browser-cache"
 - 邮件发送第一版仅支持 QQ SMTP 纯文本邮件；尚无附件、HTML、联系人目录、HTTPS 公网部署、主动推送、Bark 或网盘备份。
 - 合成 SMTP 已验证，真实 QQ 发送仍需由用户指定测试收件人并明确触发；SMTP 接受不等于最终投递或阅读。
 - QQ/微信客户端自动接入已取消；聊天内容需通过邮件、复制或导入提供。
-- Chromium 不继承 WSL 的 `HTTP_PROXY`；当前使用系统 DNS，并拒绝解析到私网或 Fake-IP 的公网目标。
+- 浏览器代理由 `ASSISTANT_BROWSER_PROXY` 显式配置，域名使用系统 DNS，连接层选择解析结果中的公网地址。
 - Linux 无中文字体时，Chromium 截图可能显示方框，但 DOM 文字读取不受影响。
 - 页面可读、HTTP 成功或测试通过都不等于模型结论可靠，也不代表覆盖了整个网站。

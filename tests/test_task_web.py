@@ -70,20 +70,15 @@ class TaskWebTests(unittest.TestCase):
         self.assertEqual(restarted.json["task"]["private_conditions"], payload["private_conditions"])
         self.assertEqual(restarted.json["task"]["profile_supplement"], payload["profile_supplement"])
 
-    def test_start_url_risk_returns_candidate_and_confirmed_scope_persists(self):
+    def test_action_named_reading_page_starts_without_exception_setup(self):
         payload = {"request": "合成阅读", "public_request": "读取公开文章",
                    "start_url": "https://jobs.bytedance.com/wiki/delete"}
-        denied = self.client.post("/api/tasks", json=payload, headers=self.headers)
-        self.assertEqual(denied.status_code, 403)
-        self.assertEqual(denied.json["policy"]["rule"], "path_keyword")
-        self.assertEqual(self.model.calls, [])
-        payload["read_exceptions"] = [denied.json["policy"]["read_exception"]]
         started = self.client.post("/api/tasks", json=payload, headers=self.headers)
         self.assertEqual(started.status_code, 202)
         self.app.extensions["tasks"].wait()
         key = started.json["task"]["id"]
         saved = self.app.extensions["store"].get_task(key)
-        self.assertEqual(saved["scope"]["read_exceptions"], payload["read_exceptions"])
+        self.assertEqual(saved["scope"]["start_url"], payload["start_url"])
         self.assertEqual(self.client.get(f"/api/tasks/{key}").status_code, 200)
 
     def test_task_api_exposes_progress_results_and_originals_but_not_memory_snapshot(self):

@@ -273,6 +273,7 @@ class Store:
                 if modern:
                     from .browser import BrowserScope
                     scope = record["scope"]
+                    scope.pop("read_post_urls", None)
                     if BrowserScope(**scope).as_dict() != scope:
                         raise ValueError("invalid scope")
                     text_field(record["public_request"], "公开查询说明", 4000)

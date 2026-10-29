@@ -27,7 +27,7 @@ class Config:
     browser_seconds: int = 900
     browser_steps: int = 120
     browser_vision: bool = False
-    browser_dns: str = "system"
+    browser_proxy: str = ""
     access_token: str = field(default="", repr=False)
     qq_imap_user: str = ""
     qq_imap_auth_code: str = field(default="", repr=False)
@@ -57,7 +57,7 @@ class Config:
                 browser_seconds=int(os.getenv("ASSISTANT_BROWSER_SECONDS", "900")),
                 browser_steps=int(os.getenv("ASSISTANT_BROWSER_STEPS", "120")),
                 browser_vision=os.getenv("ASSISTANT_BROWSER_VISION", "false").lower() == "true",
-                browser_dns=os.getenv("ASSISTANT_BROWSER_DNS", "system"),
+                browser_proxy=os.getenv("ASSISTANT_BROWSER_PROXY", "").strip(),
                 access_token=os.getenv("ASSISTANT_ACCESS_TOKEN", ""),
                 qq_imap_user=os.getenv("QQ_IMAP_USER", ""),
                 qq_imap_auth_code=os.getenv("QQ_IMAP_AUTH_CODE", ""),
@@ -113,11 +113,15 @@ class Config:
         if (not 1 <= self.browser_calls <= 200 or not 30 <= self.browser_seconds <= 3600
                 or not 1 <= self.browser_steps <= 500):
             raise AssistantError("网页任务调用上限必须为 1～200，耗时为 30～3600 秒，动作为 1～500 步。")
-        if self.browser_dns not in {"system", "google"}:
-            raise AssistantError("ASSISTANT_BROWSER_DNS 使用 system；旧 google 值只保留配置兼容。")
-        # User requested system DNS only. Old .env files must not cause either
-        # startup failures or unexpected calls to Google DNS.
-        self.browser_dns = "system"
+        if self.browser_proxy:
+            try:
+                proxy = urlsplit(self.browser_proxy)
+                if (proxy.scheme != "http" or not proxy.hostname or not proxy.port
+                        or proxy.username or proxy.password or proxy.path not in {"", "/"}
+                        or proxy.query or proxy.fragment):
+                    raise ValueError()
+            except ValueError:
+                raise AssistantError("ASSISTANT_BROWSER_PROXY 请填写 HTTP 代理地址，例如 http://127.0.0.1:7890。") from None
         if (not isinstance(self.extra_body, dict)
                 or set(self.extra_body) - {"thinking", "reasoning_effort", "temperature"}):
             raise AssistantError("EXTRA_BODY 仅允许 thinking、reasoning_effort、temperature 参数。")

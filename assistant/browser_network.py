@@ -4,16 +4,18 @@ import select
 import socket
 import socketserver
 import threading
-import time
+from urllib.parse import urlsplit
 
 from .errors import AssistantError
 
 
 class PublicHTTPSProxy:
-    """Task-local transport, not an upstream/system proxy or a permission grant."""
+    """Public-IP transport with an optional HTTP upstream proxy."""
 
-    def __init__(self, resolve, normalize):
+    def __init__(self, resolve, normalize, upstream=""):
         self.resolve, self.normalize = resolve, normalize
+        proxy = urlsplit(upstream) if upstream else None
+        self._upstream = (proxy.hostname, proxy.port) if proxy else None
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._addresses, self._failures = {}, []
@@ -65,20 +67,44 @@ class PublicHTTPSProxy:
             addresses = self.resolve(host)
             with self._lock:
                 addresses = self._addresses.setdefault(host, addresses)
-        deadline = time.monotonic() + 5
+        last_error = None
         for address in addresses:
             if self._stop.is_set():
                 raise OSError("浏览器连接层已关闭。")
             try:
                 # Connect to the checked literal IP, never re-resolve the hostname.
-                connection = socket.create_connection((address, 443), timeout=max(0.1, deadline - time.monotonic()))
+                connection = self._open_connection(address)
                 with self._lock:
                     self._failures = [item for item in self._failures if item["target"] != host]
                 return connection
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break
-        raise OSError("已验证公网地址连接失败或超时；根因未确定。")
+            except OSError as error:
+                last_error = error
+                continue
+        raise OSError("已验证公网地址连接失败：" + str(last_error)) from last_error
+
+    def _open_connection(self, address):
+        if not self._upstream:
+            return socket.create_connection((address, 443), timeout=5)
+        connection = socket.create_connection(self._upstream, timeout=5)
+        # Tunnel to the checked IP; Chromium still validates the site's TLS name.
+        authority = f"[{address}]:443" if ":" in address else f"{address}:443"
+        try:
+            connection.sendall(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("ascii"))
+            response = bytearray()
+            while not response.endswith(b"\r\n\r\n") and len(response) < 16384:
+                chunk = connection.recv(1)
+                if not chunk:
+                    raise OSError("上游 HTTP 代理提前关闭连接。")
+                response.extend(chunk)
+            if not response.endswith(b"\r\n\r\n"):
+                raise OSError("上游 HTTP 代理响应头过长。")
+            status = response.split(b"\r\n", 1)[0].split()
+            if len(status) < 2 or status[1] != b"200":
+                raise OSError("上游 HTTP 代理拒绝建立 HTTPS 隧道。")
+            return connection
+        except OSError:
+            connection.close()
+            raise
 
     def _handle(self, client):
         upstream, host, established = None, "", False

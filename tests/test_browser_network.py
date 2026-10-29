@@ -6,15 +6,24 @@ from unittest.mock import Mock, patch
 
 from assistant.browser import normalize_domain, public_addresses
 from assistant.browser_network import PublicHTTPSProxy
+from assistant.config import Config
+from assistant.errors import AssistantError
 
 
 class BrowserNetworkTests(unittest.TestCase):
+    def test_http_upstream_configuration(self):
+        Config(browser_proxy="http://127.0.0.1:7890").validate()
+        for value in ("socks5://127.0.0.1:7890", "http://127.0.0.1", "http://user:code@proxy.example:7890"):
+            with self.subTest(value=value), self.assertRaises(AssistantError):
+                Config(browser_proxy=value).validate()
+
     def proxy(self, resolve):
         proxy = object.__new__(PublicHTTPSProxy)
         proxy.resolve, proxy.normalize = resolve, normalize_domain
         proxy._lock, proxy._stop = threading.Lock(), threading.Event()
         proxy._addresses, proxy._failures = {}, []
         proxy._allowed_hosts = set()
+        proxy._upstream = None
         return proxy
 
     def test_tunnel_connects_to_checked_literal_ip_and_reuses_pinned_addresses(self):
@@ -26,12 +35,12 @@ class BrowserNetworkTests(unittest.TestCase):
         resolve.assert_called_once_with("cdn.example")
         self.assertEqual([call.args[0] for call in connect.call_args_list], [("8.8.8.8", 443)] * 2)
 
-    def test_mixed_dns_answers_are_rejected_before_any_upstream_connection(self):
+    def test_private_only_dns_answers_are_rejected_before_any_upstream_connection(self):
         proxy = self.proxy(public_addresses)
         proxy.allow_host("cdn.example")
         client = Mock()
         client.recv.return_value = b"CONNECT cdn.example:443 HTTP/1.1\r\n\r\n"
-        answers = [(2, 1, 6, "", (ip, 443)) for ip in ("8.8.8.8", "127.0.0.1")]
+        answers = [(2, 1, 6, "", (ip, 443)) for ip in ("10.0.0.1", "127.0.0.1")]
         with patch("assistant.browser.socket.getaddrinfo", return_value=answers), \
                 patch("assistant.browser_network.socket.create_connection") as connect:
             proxy._handle(client)
@@ -72,3 +81,24 @@ class BrowserNetworkTests(unittest.TestCase):
         with patch("assistant.browser_network.socket.create_connection", side_effect=[OSError("synthetic"), Mock()]) as connect:
             proxy._connect("cdn.example")
         self.assertEqual([call.args[0] for call in connect.call_args_list], [("8.8.8.8", 443), ("8.8.4.4", 443)])
+        self.assertEqual([call.kwargs["timeout"] for call in connect.call_args_list], [5, 5])
+
+    def test_upstream_http_proxy_tunnels_to_checked_ip(self):
+        proxy = self.proxy(Mock(return_value=["8.8.8.8"]))
+        proxy._upstream = ("127.0.0.1", 7890)
+        connection = Mock()
+        connection.recv.side_effect = [bytes([b]) for b in b"HTTP/1.1 200 Connection Established\r\n\r\n"]
+        with patch("assistant.browser_network.socket.create_connection", return_value=connection) as connect:
+            self.assertIs(proxy._connect("cdn.example"), connection)
+        connect.assert_called_once_with(("127.0.0.1", 7890), timeout=5)
+        self.assertIn(b"CONNECT 8.8.8.8:443", connection.sendall.call_args.args[0])
+
+    def test_upstream_rejection_closes_connection(self):
+        proxy = self.proxy(Mock(return_value=["8.8.8.8"]))
+        proxy._upstream = ("127.0.0.1", 7890)
+        connection = Mock()
+        connection.recv.side_effect = [bytes([b]) for b in b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"]
+        with patch("assistant.browser_network.socket.create_connection", return_value=connection):
+            with self.assertRaises(OSError):
+                proxy._connect("cdn.example")
+        connection.close.assert_called_once()

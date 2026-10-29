@@ -8,9 +8,7 @@ import json
 import re
 import time
 import uuid
-from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
 
 from assistant.config import Config
 from assistant.errors import AssistantError
@@ -117,29 +115,28 @@ def popup_check(service):
     from .test_tasks import LIST
 
     record = {"scenario": "synthetic promotion / real Kimi / real Chromium", "passed": False}
-    with patch("assistant.browser.resolver_rules", return_value="MAP * ~NOTFOUND"):
-        with LocalResponseBrowser(lambda: None) as browser:
-            observation = browser.read(LIST)
-            record["observation"] = observation
-            messages = [{"role": "system", "content": TASK_SYSTEM}, {"role": "user", "content": json.dumps({
-                "request": "合成浏览器动作测试：当前有岗位推荐推广弹层。请关闭弹层保留岗位页面，不体验推荐、不登录。只提出一个关闭弹层的点击动作，不访问其他链接。",
-                "page": observation}, ensure_ascii=False)}]
-            service.store.reserve_call(service.day(), service.config.daily_calls)
-            try:
-                message = validate_tool_message(service.model.complete_tools(messages, TOOLS,
-                    timeout=service.config.timeout))
-                record["model_message"] = message
-                calls = message["tool_calls"]
-                if len(calls) != 1 or calls[0]["function"]["name"] != "click_element":
-                    raise AssistantError("模型没有选择单个通用点击动作。", 502)
-                arguments = json.loads(calls[0]["function"]["arguments"])
-                if set(arguments) != {"element_id"}:
-                    raise AssistantError("点击参数不合法。", 502)
-                after = browser.click(arguments["element_id"])
-                record["after"] = after
-                record["passed"] = "AI 岗位推荐" not in after["text"] and after["ready"]
-            except AssistantError as error:
-                record["error"] = str(error)
+    with LocalResponseBrowser(lambda: None) as browser:
+        observation = browser.read(LIST)
+        record["observation"] = observation
+        messages = [{"role": "system", "content": TASK_SYSTEM}, {"role": "user", "content": json.dumps({
+            "request": "合成浏览器动作测试：当前有岗位推荐推广弹层。请关闭弹层保留岗位页面，不体验推荐、不登录。只提出一个关闭弹层的点击动作，不访问其他链接。",
+            "page": observation}, ensure_ascii=False)}]
+        service.store.reserve_call(service.day(), service.config.daily_calls)
+        try:
+            message = validate_tool_message(service.model.complete_tools(messages, TOOLS,
+                timeout=service.config.timeout))
+            record["model_message"] = message
+            calls = message["tool_calls"]
+            if len(calls) != 1 or calls[0]["function"]["name"] != "click_element":
+                raise AssistantError("模型没有选择单个通用点击动作。", 502)
+            arguments = json.loads(calls[0]["function"]["arguments"])
+            if set(arguments) != {"element_id"}:
+                raise AssistantError("点击参数不合法。", 502)
+            after = browser.click(arguments["element_id"])
+            record["after"] = after
+            record["passed"] = "AI 岗位推荐" not in after["text"] and after["ready"]
+        except AssistantError as error:
+            record["error"] = str(error)
     service.store._write_json(service.store.root / "popup-check.json", record)
     print("Synthetic promotion + real Kimi generic click:", "passed" if record["passed"] else "not passed", flush=True)
     return record["passed"]
@@ -205,7 +202,6 @@ def controlled_browser_factory(scenario):
 
 def main():
     parser = argparse.ArgumentParser(description="Explicit paid Kimi/browser integration check")
-    parser.add_argument("--dns", choices=["system"], default="system")
     parser.add_argument("--calls", type=int, choices=range(1, 201), required=True,
                         help="Explicit authorized total attempt cap (1–200); no default paid budget")
     parser.add_argument("--task-calls", type=int, choices=range(1, 201),
@@ -239,7 +235,6 @@ def main():
         parser.error("合成测试记录不存在，不会创建空复核记录。")
     config.browser_calls = config.daily_calls = args.calls
     config.browser_seconds = 300
-    config.browser_dns = args.dns
     config.validate()
     store = Store(config.data_dir)
     tasks = None
@@ -287,9 +282,8 @@ def main():
         tasks = Tasks(service, factory)
         print("Private synthetic evidence directory:", str(config.data_dir), flush=True)
         # Locally fulfilled fault/vision sites cannot resolve or reach the Internet.
-        with patch("assistant.browser.resolver_rules", return_value="MAP * ~NOTFOUND") if factory else nullcontext():
-            task = tasks.start(payload)
-            saved = wait_task(tasks, store, task["id"])
+        task = tasks.start(payload)
+        saved = wait_task(tasks, store, task["id"])
         print("Integration status:", saved["status"], "model attempts:", saved["calls"],
               "pages:", len(saved["pages"]), flush=True)
         print("Private synthetic evidence directory:", str(config.data_dir), flush=True)

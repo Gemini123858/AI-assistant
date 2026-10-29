@@ -9,7 +9,6 @@ import threading
 import json
 from html import escape
 from pathlib import Path
-from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import expect, sync_playwright
@@ -40,7 +39,7 @@ class LocalResponseBrowser(JobBrowser):
         if url == ENTRY.rstrip("/"):
             html = '<h1>招聘入口</h1><a href="' + LIST + '">所有职位</a>'
             # These public-page scripts must NOT acquire local network or write access.
-            html += '<script>fetch("https://127.0.0.1/private");fetch("https://jobs.bytedance.com/api/v1/job/apply",{method:"POST",body:"{}"});</script>'
+            html += '<script>fetch("https://127.0.0.1/private");fetch("https://example.com/api/v1/job/apply",{method:"POST",body:"{}"});</script>'
         elif url == DETAIL:
             html = "<h1>算法开发实习生</h1><p>职位要求：熟悉 Python</p>"
         else:
@@ -55,37 +54,36 @@ class LocalResponseBrowser(JobBrowser):
                 html += '<div role="dialog" style="position:fixed;inset:0;background:white;z-index:10"><h2>AI 岗位推荐</h2><button type="button" onclick="this.parentNode.remove()">稍后再试</button><button type="button" onclick="fetch(\'/api/v1/recommend/experience\',{method:\'POST\'})">立即体验</button></div>'
             body = json.dumps({"keyword": keyword, "limit": 10, "offset": (current - 1) * 10,
                                "portal_type": 2, "portal_entrance": 1})
-            html += '<script>function go(n){location.href="/experienced/position?keywords="+encodeURIComponent(document.querySelector("input[type=search]").value)+"&current="+n} document.querySelector("input[type=search]").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();go(1)}}); fetch("https://jobs.bytedance.com/api/v1/search/job/posts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(' + body + ')});</script>'
+            html += '<script>function go(n){location.href="/experienced/position?keywords="+encodeURIComponent(document.querySelector("input[type=search]").value)+"&current="+n} document.querySelector("input[type=search]").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();go(1)}}); fetch("https://example.com/api/v1/search/job/posts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(' + body + ')});</script>'
         route.fulfill(status=200, content_type="text/html; charset=utf-8", body=html)
 
 
 def main():
-    with patch("assistant.browser.resolver_rules", return_value="MAP * ~NOTFOUND"):
-        with LocalResponseBrowser(lambda: None) as executor:
-            entry = executor.read(ENTRY)
-            assert entry["links"][0]["url"] == LIST
-            listing = executor.read(LIST)
-            assert listing["links"][0]["url"] == DETAIL
-            def element(page, label):
-                return next(item for item in page["elements"] if item["label"] == label)
-            old = element(listing, "稍后再试")["id"]
-            listing = executor.click(old)
-            assert "AI 岗位推荐" not in listing["text"]
-            try:
-                executor.click(old)
-                raise AssertionError("Old element ID executed")
-            except AssistantError as error:
-                assert error.status == 409
-            search = executor.fill(element(listing, "搜索职位")["id"], "图神经网络 上海 研究实习", True)
-            assert search["ready"] and "keywords=" in search["url"]
-            second = executor.click(element(search, "2")["id"])
-            assert second["ready"] and "current=2" in second["url"]
-            assert executor.searches[-1]["offset"] == 10 and executor.searches[-1]["keyword"] == "图神经网络 上海 研究实习"
-            executor.scroll("down")
-            detail = executor.read(DETAIL)
-            assert detail["kind"] == "detail"
-            assert "职位要求" in detail["text"]
-            assert executor.blocked >= 2
+    with LocalResponseBrowser(lambda: None) as executor:
+        entry = executor.read(ENTRY)
+        assert entry["links"][0]["url"] == LIST
+        listing = executor.read(LIST)
+        assert listing["links"][0]["url"] == DETAIL
+        def element(page, label):
+            return next(item for item in page["elements"] if item["label"] == label)
+        old = element(listing, "稍后再试")["id"]
+        listing = executor.click(old)
+        assert "AI 岗位推荐" not in listing["text"]
+        try:
+            executor.click(old)
+            raise AssertionError("Old element ID executed")
+        except AssistantError as error:
+            assert error.status == 409
+        search = executor.fill(element(listing, "搜索职位")["id"], "图神经网络 上海 研究实习", True)
+        assert search["ready"] and "keywords=" in search["url"]
+        second = executor.click(element(search, "2")["id"])
+        assert second["ready"] and "current=2" in second["url"]
+        assert executor.searches[-1]["offset"] == 10 and executor.searches[-1]["keyword"] == "图神经网络 上海 研究实习"
+        executor.scroll("down")
+        detail = executor.read(DETAIL)
+        assert detail["kind"] == "detail"
+        assert "职位要求" in detail["text"]
+        assert executor.blocked >= 2
     print("Offline Chromium passed: generic popup click, stale ID, input/Enter, page-2 offset, scroll, entry/list/detail; private fetch and writes blocked.", flush=True)
 
     with tempfile.TemporaryDirectory() as temporary:
@@ -114,15 +112,6 @@ def main():
                 page.locator("#task-public-request").fill("查询计算机相关的算法岗位，读取具体要求与来源。")
                 page.locator("#task-public-confirm").check()
                 assert not page.locator("#task-request").get_attribute("required")
-                page.locator("#task-url").fill("https://jobs.bytedance.com/wiki/delete")
-                page.locator("#task-button").click()
-                expect(page.locator("#task-read-exceptions")).not_to_have_value("")
-                expect(page.locator("#task-public-confirm")).not_to_be_checked()
-                assert json.loads(page.locator("#task-read-exceptions").input_value())[0]["method"] == "GET"
-                assert not model.calls and page.locator(".task-card").count() == 0
-                page.locator("#task-url").fill(ENTRY)
-                page.locator("#task-read-exceptions").fill("")
-                page.locator("#task-public-confirm").check()
                 page.locator("#task-button").click()
                 expect(page.locator(".task-card .tag").first).to_have_text("已完成", timeout=15000)
                 expect(page.get_by_role("heading", name="继续追问")).to_be_visible()

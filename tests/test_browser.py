@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from assistant.browser import (SITE, BrowserScope, JobBrowser, BrowserError, allowed_request,
-                               element_actions, navigation_url, resolver_rules, is_detail, request_denial)
+                               element_actions, navigation_url, public_addresses, is_detail, request_denial)
 from .browser_fixtures import SEARCH_PATH, ASSET_HOSTS
 from assistant.errors import AssistantError
 
@@ -86,6 +86,47 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "interaction")
         self.assertIn("重新打开任务URL", str(caught.exception))
 
+    def test_successful_navigation_recovers_from_previous_internal_error(self):
+        browser = JobBrowser(lambda: None, scope=BrowserScope("https://catalog.example/"))
+        page = Mock(url=browser.scope.start_url, frames=[])
+        page.is_closed.return_value = False
+        page.goto.return_value = SimpleNamespace(status=200)
+        body, heading = Mock(), Mock()
+        body.inner_text.return_value = "公开文档正文"
+        heading.first.count.return_value = 0
+        page.locator.side_effect = lambda selector: body if selector == "body" else heading
+        page.title.return_value = "文档"
+        browser.page = page
+        browser.internal_errors = ["previous CDP error"]
+        browser._proxy_auth_failed = True
+        result = browser.read(browser.scope.start_url)
+        self.assertTrue(result["ready"])
+        self.assertFalse(browser._proxy_auth_failed)
+
+    def test_plain_query_controls_work_without_search_words_or_css(self):
+        info = {"connected": True, "visible": True, "tag": "input", "type": "text",
+                "label": "职位名称", "disabled": False}
+        self.assertIn("fill", element_actions(info, "https://catalog.example/"))
+        self.assertIn("select", element_actions({**info, "tag": "select"}, "https://catalog.example/"))
+        self.assertIn("check", element_actions({**info, "type": "checkbox"}, "https://catalog.example/"))
+        for kind in ("password", "file", "email"):
+            self.assertNotIn("fill", element_actions({**info, "type": kind}, "https://catalog.example/"))
+        self.assertNotIn("fill", element_actions({**info, "readonly": True}, "https://catalog.example/"))
+
+    def test_request_diagnostics_reuse_policy_and_programming_errors_surface(self):
+        browser = JobBrowser(lambda: None)
+        request = SimpleNamespace(url="https://" + SITE + "/data", method="GET", resource_type="xhr",
+                                  post_data=None, headers={}, failure="net::ERR_CONNECTION_RESET")
+        with patch("assistant.browser.request_denial", wraps=request_denial) as policy:
+            browser._request_started(request)
+            browser._network_failure(request)
+        self.assertEqual(policy.call_count, 1)
+        with patch("assistant.browser.request_denial", side_effect=RuntimeError("implementation fault")):
+            request = SimpleNamespace(url="https://" + SITE + "/other", method="GET", resource_type="xhr",
+                                      post_data=None, headers={})
+            with self.assertRaises(RuntimeError):
+                browser.permitted(request)
+
     def test_static_dependencies_need_no_domain_list_but_grant_no_other_access(self):
         scope = BrowserScope("https://catalog.example/")
         url = "https://cdn-unlisted.example/assets/bundle?version=2"
@@ -104,7 +145,8 @@ class BrowserPolicyTests(unittest.TestCase):
 
     def test_action_themed_articles_and_link_titles_are_readable(self):
         scope = BrowserScope("https://catalog.example/")
-        for path in ("/docs/create-react-app", "/blog/how-to-delete-facebook-account", "/wiki/Edit"):
+        for path in ("/docs/create-react-app", "/blog/how-to-delete-facebook-account", "/wiki/Edit", "/wiki/delete", "/docs/submit", "/apply/jobs",
+                     "/search?create_time=2026-10-01", "/asset.js?update=123"):
             url = "https://catalog.example" + path
             self.assertEqual(navigation_url(url, scope), url)
             self.assertTrue(allowed_request(url, "GET", "document", scope=scope))
@@ -143,20 +185,13 @@ class BrowserPolicyTests(unittest.TestCase):
             self.assertFalse(allowed_request(target, method, kind, body, granted, content_type))
         self.assertEqual(BrowserScope(**granted.as_dict()).as_dict(), granted.as_dict())
         get_url = "https://catalog.example/wiki/delete"
-        with self.assertRaises(AssistantError) as caught:
-            navigation_url(get_url, scope)
-        get_entry = caught.exception.policy["read_exception"]
-        reading = BrowserScope(get_url, read_exceptions=[get_entry])
-        self.assertEqual(navigation_url(get_url, reading), get_url)
-        self.assertFalse(allowed_request(get_url, "POST", "document", '{}', reading))
-        self.assertFalse(allowed_request(get_url + "?version=2", "GET", "document", scope=reading))
-        with self.assertRaises(AssistantError):
-            BrowserScope(scope.start_url, blocked_urls=[get_url], read_exceptions=[get_entry])
+        self.assertEqual(navigation_url(get_url, scope), get_url)
+        scope = BrowserScope(scope.start_url, blocked_urls=[get_url])
         browser = JobBrowser(lambda: None, scope=scope)
         route = Mock()
         route.request = SimpleNamespace(url=get_url, method="GET", resource_type="document", post_data=None, headers={})
         browser._route_request(route)
-        self.assertEqual(browser.policy_blocks[-1]["read_exception"], get_entry)
+        self.assertEqual(browser.policy_blocks[-1]["rule"], "explicit_deny")
         browser._cdp = Mock()
         browser._continue_response({"request": {"url": get_url + "/redirect", "method": "GET"},
             "resourceType": "Document", "responseStatusCode": 302,
@@ -285,8 +320,7 @@ class BrowserPolicyTests(unittest.TestCase):
             self.assertTrue(navigation_url("https://" + SITE + path).startswith("https://" + SITE))
         for url in ("http://" + SITE + "/experienced", "https://127.0.0.1/experienced",
                     "https://" + SITE + ".evil.invalid/experienced", "https://" + SITE + ":444/experienced",
-                    "https://secret@" + SITE + "/experienced", "https://" + SITE + "/experienced/login",
-                    "https://" + SITE + "/experienced/apply"):
+                    "https://secret@" + SITE + "/experienced"):
             with self.subTest(url=url), self.assertRaises(AssistantError):
                 navigation_url(url)
 
@@ -369,30 +403,13 @@ class BrowserPolicyTests(unittest.TestCase):
         self.assertTrue(allowed_request(url + "?upload=resume", "POST", "xhr", search_body()))
         self.assertFalse(allowed_request(url + "?action=delete", "POST", "xhr", search_body()))
 
-    def test_dns_pinning_rejects_private_reserved_and_mixed_answers(self):
-        for ips in (["127.0.0.1"], ["198.18.0.71"], ["10.0.0.1"], ["::1"], ["8.8.8.8", "127.0.0.1"]):
-            answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443)) for ip in ips]
-            with self.subTest(ips=ips), patch("assistant.browser.socket.getaddrinfo", return_value=answer):
+    def test_dns_selects_public_addresses_and_rejects_private_only_answers(self):
+        for ips in (["127.0.0.1"], ["198.18.0.71"], ["10.0.0.1"], ["::1"]):
+            answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443)) for ip in ips]
+            with self.subTest(ips=ips), patch("assistant.browser.socket.getaddrinfo", return_value=answers):
                 with self.assertRaises(AssistantError):
-                    resolver_rules({SITE})
-        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
-        with patch("assistant.browser.socket.getaddrinfo", return_value=answer):
-            rules = resolver_rules({SITE})
-        self.assertIn("MAP " + SITE + " 8.8.8.8", rules)
-        self.assertIn("MAP * ~NOTFOUND", rules)
-
-    def test_legacy_google_option_uses_system_dns_and_still_rejects_private_answers(self):
-        from assistant.config import Config
-        config = Config(browser_dns="google")
-        config.validate()
-        self.assertEqual(config.browser_dns, "system")
-        self.assertEqual(JobBrowser(lambda: None, dns_mode="google").dns_mode, "system")
-        for ip, allowed in (("8.8.8.8", True), ("127.0.0.1", False)):
-            answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))]
-            with patch("assistant.browser.socket.getaddrinfo", return_value=answers) as resolve:
-                if allowed:
-                    resolver_rules({SITE}, "google")
-                else:
-                    with self.assertRaises(AssistantError):
-                        resolver_rules({SITE}, "google")
-                resolve.assert_called_once_with(SITE, 443, type=socket.SOCK_STREAM)
+                    public_addresses(SITE)
+        answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))
+                   for ip in ["8.8.8.8", "127.0.0.1"]]
+        with patch("assistant.browser.socket.getaddrinfo", return_value=answers):
+            self.assertEqual(public_addresses(SITE), ["8.8.8.8"])
