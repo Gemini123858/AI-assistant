@@ -9,12 +9,11 @@ from .config import Config
 from .errors import AssistantError
 from .followup import FollowupAgent
 from .service import Service
-from .storage import Store
+from .storage import Store, text_field
 from .tasks import Tasks
 from .mail import Mail
 from .drafts import Drafts
 from .conversations import Conversations
-from .storage import text_field
 
 
 def create_app(config=None, model=None, browser_factory=None, mail_connector=None, smtp_connector=None):
@@ -422,6 +421,10 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     @app.get("/api/memory")
     def memory():
         return jsonify(**store.memory())
+
+    @app.get("/api/memory/<kind>/history")
+    def memory_history(kind):
+        return jsonify(revisions=store.memory_history(kind))
 
     @app.put("/api/memory/<kind>")
     def update_memory(kind):

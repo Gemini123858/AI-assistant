@@ -1,130 +1,64 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>个人助手 · 通知、网页与邮件</title>
+  <title>个人助手</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="个人助手首页"><span class="brand-mark">助</span>个人助手<span class="version">v0.4</span></a>
-    <div class="topbar-right"><span id="mode-badge" class="badge">正在连接</span><span class="local-note">仅本机 · 邮件发送须手动点击</span>{% if auth_enabled %}<button id="logout-button" class="quiet">退出</button>{% endif %}</div>
-  </header>
-  <main>
-    <section class="intro">
-      <div><p class="eyebrow">NOTIFICATIONS / CONTEXT / MEMORY</p><h1>重要的事，少漏一点。</h1><p class="muted">整理通知，核对原文，告诉助手你真正关心什么。</p></div>
-      <div class="status-box"><span id="model-name">读取模型配置…</span><small id="usage">—</small></div>
-    </section>
-    <div id="mode-notice" class="notice">加载中…</div>
-    <nav class="tabs" aria-label="工作区">
-      <button class="tab active" data-tab="notifications" aria-selected="true">通知工作台</button>
-      <button class="tab" data-tab="tasks" aria-selected="false">网页任务</button>
-      <button class="tab" data-tab="mail" aria-selected="false">邮箱工作台</button>
-      <button class="tab" data-tab="memory" aria-selected="false">画像与规则</button>
-      <span class="roadmap-note">邮件只读同步 · 草稿可编辑 · 发送须手动点击</span>
-    </nav>
-    <section id="notifications-panel" class="workspace">
-      <div class="feed-column">
-        <details class="panel import-panel" open>
-          <summary>导入一条通知 <span class="muted">手动输入 / JSON 文件</span></summary>
-          <form id="import-form">
-            <div class="form-grid">
-              <label>来源<select id="source"><option value="manual">手动资料</option><option value="qq">QQ（手动导入）</option><option value="wechat">微信（手动导入）</option><option value="email">邮件（手动导入）</option></select></label>
-              <label>群 / 会话<input id="conversation" required maxlength="120" placeholder="例如：课程群"></label>
-              <label>发送者<input id="sender" maxlength="120" placeholder="未知"></label>
-              <label>原消息时间（本机时区）<input id="sent-at" type="datetime-local" required></label>
-            </div>
-            <label>通知正文<textarea id="notification-text" rows="4" required maxlength="12000" placeholder="粘贴原通知。不要把收到通知的时间替换成活动或截止时间。"></textarea></label>
-            <label>原消息 ID（可选）<input id="message-id" maxlength="200" placeholder="有稳定 ID 时填写；否则按来源、发送者、原时间和正文去重"></label>
-            <div class="form-actions"><button class="primary" id="import-button" type="submit">保存通知</button><label class="file-button">导入 JSON<input type="file" id="json-file" accept="application/json,.json"></label><button id="sample-button" type="button" class="quiet">载入合成样例</button></div>
-            <p class="caption">保存后再明确点击分析。通知分析只处理文字，不自动读取附件或链接；网页查询请到“网页任务”主动发起。</p>
-          </form>
-        </details>
-        <div class="section-heading"><div><h2>通知与事项 <span id="message-count" class="count">0</span></h2><p class="caption">旧结果保留当时的记忆版本，纠正后可手动重新分析。</p></div><button id="refresh-button" class="quiet">刷新</button></div>
-        <div id="message-list" class="message-list" aria-live="polite"></div>
-        <div class="pagination"><button id="previous-page" class="quiet">上一页</button><span id="page-info" class="caption"></span><button id="next-page" class="quiet">下一页</button></div>
-      </div>
-      <aside class="panel chat-panel">
-        <div class="chat-heading"><div><h2>和助手聊聊</h2><p class="caption">追问事项或整理待办；结构化邮件请从通知创建草稿。</p></div><span class="chat-dot" aria-hidden="true"></span></div>
-        <p id="chat-context" class="context-note">未选择时使用最近 10 条通知；完整历史保存，模型仅读取最近 6 轮。</p>
-        <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
-        <form id="chat-form" class="chat-form"><label class="sr-only" for="chat-input">对话消息</label><textarea id="chat-input" rows="3" required maxlength="4000" placeholder="这条通知需要我做什么？&#10;/记住 我目前正在找实习&#10;/规则 报名截止不等于活动开始"></textarea><div class="chat-footer"><span class="caption">普通对话不自动写画像；没有发送工具。</span><button id="chat-button" class="primary" type="submit">发送</button></div></form>
-      </aside>
-    </section>
-    <section id="tasks-panel" class="tasks-workspace" hidden>
-      <div class="panel">
-        <h2>公开网页任务</h2>
-        <p class="muted">由 Kimi 自主浏览、检索和恢复失败操作，再结合私人条件分析已读证据。</p>
-        <form id="task-form">
-          <label>起始 URL<input id="task-url" type="url" required placeholder="https://example.com/" maxlength="2000"></label>
-          <p class="caption">默认可浏览任务相关的公网 HTTPS 页面，自动处理跳转、子域和页面依赖，不需要填写域名。只使用系统 DNS，不调用 Google DNS。</p>
-          <details><summary>高级：可选阅读限制（一般无需填写）</summary>
-            <label><input id="task-limit-domains" type="checkbox"> 仅限指定网站（默认关闭；开启后跨网站跳转可能被拒绝）</label>
-            <label>限定模式的额外访问域（逗号分隔）<input id="task-domains" placeholder="仅开启限定网站模式时生效；起始网站自动加入"></label>
-            <label>限定模式的额外只读数据域<input id="task-resources" placeholder="仅开启限定网站模式时生效；允许 GET 数据，不授权导航或 POST"></label>
-            <label>每行一个精确 HTTPS URL，不带查询参数<textarea id="task-blocked-urls" rows="2" placeholder="例如：https://example.com/api/risky-operation；该路径的所有查询参数和请求方法均阻断。"></textarea></label>
-            <p class="caption">公网阅读模式下正常 GET/POST 和跨域资源默认允许。两种模式均拦截明显账号/写入操作、凭据、文件上传和非公网地址；阅读启发式不能证明所有请求无副作用，不检查网站专用端点或响应字段。</p>
-            <label>本任务精确阅读豁免（JSON数组，可从拦截记录填入）<textarea id="task-read-exceptions" rows="3" placeholder='[{"url":"https://example.com/wiki/delete","method":"GET","resource_type":"document"}]'></textarea></label>
-            <p class="caption">仅在核实为阅读后确认。绑定完整URL（含查询参数）、方法、请求类型；POST还绑定正文SHA256和Content-Type。不能覆盖域范围、显式禁令、凭据、文件或写入正文；不授权实际写操作。</p>
-          </details>
-          <label>公开任务目标（必填，浏览与回答围绕此目标）<textarea id="task-public-request" rows="4" required maxlength="2000" placeholder="例如：查找此网站的计算机相关岗位，进入具体岗位查看职责和要求，给出名称、地点、要求及来源。不要只写注意事项；不要填私人信息。"></textarea></label>
-          <label>本次公开画像补充（可选，不写回长期画像）<textarea id="task-profile-supplement" rows="2" maxlength="2000" placeholder="例如：本次只看上海岗位；最近开始关注多模态方向。这些内容会用于网页检索词和筛选，不要填写账号、学号或联系方式。"></textarea></label>
-          <label for="task-request">私人筛选条件（可选，仅在分析时提供）<textarea id="task-request" rows="2" maxlength="2000" placeholder="例如：结合我的画像比较技能差距；个人经历或不希望发送网站的条件放在这里，不要把查询目标只写在这里。"></textarea></label>
-          <label><input id="task-public-confirm" type="checkbox" required> 我确认公开目标可用于网站检索，允许匿名读取任务相关的公网 HTTPS 网页、数据和资源（开启限定模式则遵守指定范围）；不授权登录、发送、上传或业务提交。如填写阅读豁免，已核实其用途。接受匿名浏览风险，查询策略由模型决定。</label>
-          <button id="task-button" type="submit" class="primary">开始读取与分析</button>
-          <p class="caption">长期公开检索画像由程序在已授权资料分析中维护，本次补充只影响当前任务。私人条件与私人画像只在关闭网站动作后的分析阶段提供。任务共享日额度；只用于匿名可信公开查询，不授权登录、发送、上传或提交。</p>
-          <p id="task-availability" class="caption"></p>
-        </form>
-      </div>
-      <div class="section-heading"><div><h2>任务与访问证据</h2><p class="caption">覆盖有限。失败不等于没有岗位，匹配判断也不保证满足招聘条件。</p></div><button id="tasks-refresh" class="quiet">刷新</button></div>
-      <div id="task-list" class="message-list" aria-live="polite"></div>
-    </section>
-    <section id="mail-panel" class="tasks-workspace" hidden>
-      <div class="panel"><h2>QQ 邮箱 · 新邮件工作台</h2><p id="mail-status" class="notice">读取配置…</p>
-        <p class="caption">首次启用跳过已有邮件，只同步之后进入 INBOX 的邮件头。读取正文使用只读 IMAP，不标已读、不移动或删除；每60秒左右检查新邮件。初筛建议不删除邮件，任何邮件仍可细读。</p>
-        <div class="form-actions"><button id="mail-start" class="primary">启用同步（仅之后的新邮件）</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-latest" class="quiet">导入最新一封已有邮件</button><button id="mail-triage" class="quiet">初筛新邮件（调用模型）</button><button id="mail-refresh" class="quiet">刷新</button></div>
-        <p class="caption">目前默认手动分析。邮件文字会发送给已配置模型；自己发送的邮件可能包含多人聊天，不默认全是你的事实。附件未识别，链接访问另行确认范围。</p>
-      </div>
-      <div class="panel draft-workspace">
-        <div class="section-heading"><div><h2>邮件草稿</h2><p id="draft-source" class="caption">新草稿可以引用通知、邮件分析或网页任务；来源不会作为附件发送。</p></div><button id="draft-new" class="quiet" type="button">新建空白草稿</button></div>
-        <form id="draft-form">
-          <input id="draft-id" type="hidden"><input id="draft-version" type="hidden">
-          <label>发件账号<input id="draft-from" readonly placeholder="由 QQ 邮箱配置决定"></label>
-          <label>收件人<input id="draft-to" placeholder="多个地址用逗号分隔"></label>
-          <details><summary>抄送与密送</summary><label>抄送<input id="draft-cc" placeholder="多个地址用逗号分隔"></label><label>密送<input id="draft-bcc" placeholder="多个地址用逗号分隔"></label></details>
-          <label>主题<input id="draft-subject" maxlength="500"></label>
-          <label>正文<textarea id="draft-body" rows="12" maxlength="50000" placeholder="纯文本邮件正文"></textarea></label>
-          <p id="draft-status" class="notice">尚未创建草稿。</p>
-          <div class="form-actions"><button id="draft-save" class="quiet" type="submit">保存当前修改</button><button id="draft-send" class="primary" type="button">发送当前版本</button><button id="draft-delete" class="danger" type="button">删除此草稿</button></div>
-          <p class="caption">发送按钮只发送当前页面所示版本，不经过 Kimi；结果不明时不会自动重发。第一版不发送附件或 HTML。</p>
-        </form>
-        <div id="draft-chat-history" class="followup-history"></div>
-        <form id="draft-assist-form" class="followup-form"><label class="sr-only" for="draft-instruction">邮件撰写要求</label><textarea id="draft-instruction" rows="3" maxlength="4000" placeholder="例如：根据来源写一封正式邮件；语气更简洁；保留收件人并重写正文。"></textarea><button id="draft-assist" class="primary" type="submit">让 Kimi 生成或修改</button></form>
-        <div class="section-heading"><div><h3>当前草稿的版本历史</h3><p class="caption">内容实际变化时才创建版本；恢复旧版本会生成新的当前版本，不删除已有历史。</p></div></div><div id="draft-revisions" class="revision-list"></div>
-        <div class="section-heading"><div><h3>可编辑草稿</h3><p class="caption">这里每一项是一封独立草稿，不是同一邮件的不同版本。</p></div></div><div id="draft-list" class="draft-list"></div>
-      </div>
-      <div class="panel delivery-workspace"><div class="section-heading"><div><h2>发送记录</h2><p class="caption">已发送、部分发送和结果不明的邮件在这里只读展示，不占用草稿编辑器。</p></div></div><div id="delivery-list" class="delivery-list"></div></div>
-      <div class="section-heading"><h2>重要事件表</h2></div><div id="mail-events" class="panel table-scroll"></div>
-      <div class="section-heading"><h2>新邮件及分析结果</h2><span id="mail-count" class="caption"></span></div><div id="mail-list" class="message-list"></div>
-    </section>
-    <section id="memory-panel" class="memory-workspace" hidden>
-      <div class="memory-intro"><h2>让判断有自己的上下文。</h2><p class="muted">信息与纠正保存在本机 Markdown 文件，可直接编辑。保存即生效，不修改你的原资料。</p><p class="caption">这些内容会按下面标注的范围发送给已配置的模型。不要填写密码或 Key；公开检索画像可能转化为网站搜索词，但不会用于身份或业务表单。</p></div>
-      <form class="panel memory-form" data-kind="public_profile"><h3>公开检索画像（程序维护）</h3><p class="caption">模型在你明确发起的资料分析中，从可归属于你的长期信息里维护专业、职业方向、技能、兴趣、科研方向和偏好。网页任务全程可用；这里用于查看、纠正或删除，不要求每次任务手填。</p><label class="sr-only" for="public_profile-text">公开检索画像内容</label><textarea id="public_profile-text" rows="10" maxlength="12000" placeholder="尚无程序确认的公开检索画像；也可以在这里直接纠正。"></textarea><button class="primary" type="submit">保存纠正</button></form>
-      <form class="panel memory-form" data-kind="profile"><h3>私人画像（程序维护）</h3><p class="caption">学号、账号、联系方式、精确身份或其他不适合公开检索的信息进入这一层，只在关闭网页操作后的分析阶段使用。这里用于查看、纠正或删除。</p><label class="sr-only" for="profile-text">私人画像内容</label><textarea id="profile-text" rows="10" maxlength="12000" placeholder="旧画像保留在这里，不会自动迁入公开层。"></textarea><button class="primary" type="submit">保存纠正</button></form>
-      <form class="panel memory-form" data-kind="rules"><h3>纠正规则</h3><p class="caption">具体、可验证的纠正。规则不能授予助手发送或提交权限。</p><label class="sr-only" for="rules-text">纠正规则内容</label><textarea id="rules-text" rows="13" maxlength="12000" placeholder="例如：&#10;- 不要把报名截止时间当成活动开始时间。"></textarea><button class="primary" type="submit">保存规则</button></form>
-    </section>
+<body class="assistant-app">
+  <aside class="sidebar">
+    <a class="brand" href="/">助 <span>个人助手</span></a>
+    <button id="new-conversation" class="primary">＋ 新对话</button>
+    <p class="caption">历史会话</p>
+    <nav id="conversation-list" aria-label="历史会话"></nav>
+    <div class="sidebar-footer"><button id="manage-records" class="quiet">资料管理</button><button id="open-settings" class="quiet">设置与画像</button>{% if auth_enabled %}<button id="logout-button" class="quiet">退出登录</button>{% endif %}</div>
+  </aside>
+  <main class="conversation-workspace">
+    <header class="conversation-header"><div><h1 id="conversation-title">新对话</h1><p id="model-status" class="caption">正在连接…</p></div><div class="toolbar"><button id="rename-conversation" class="quiet">重命名</button><button id="delete-conversation" class="quiet">删除会话</button></div></header>
+    <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
+    <div id="run-status" class="run-status" role="status" hidden></div>
+    <form id="chat-form" class="composer">
+      <div id="attached-records" class="attached-records"></div>
+      <label id="focus-record-label" class="inline-check" hidden><input id="use-open-record" type="checkbox" checked>本轮同时引用右侧打开的资料</label>
+      <label class="sr-only" for="chat-input">消息</label><textarea id="chat-input" required maxlength="12000" rows="3" placeholder="说说你想做什么，也可以添加邮件、通知或已有结果……"></textarea>
+      <div class="composer-footer"><button id="add-records" type="button" class="quiet">＋ 添加资料</button><span class="caption">Shift + Enter 换行</span><button id="stop-turn" type="button" class="quiet" hidden>停止</button><button id="chat-button" type="submit" class="primary">发送</button></div>
+    </form>
   </main>
-  <footer>文件持久化 · 原文可追溯 · 邮件发送仅由用户点击当前草稿触发 · 无主动推送</footer>
-  <div id="toast" class="toast" role="status" hidden></div>
-  <dialog id="draft-delete-dialog" aria-labelledby="draft-delete-title" aria-describedby="draft-delete-message">
-    <h2 id="draft-delete-title">永久删除草稿？</h2>
-    <p id="draft-delete-message"></p>
-    <p class="notice">该草稿的全部版本和编写对话都会从本机删除，无法恢复；发送记录不受影响。</p>
-    <div class="form-actions"><button id="draft-delete-cancel" class="quiet" type="button">取消</button><button id="draft-delete-confirm" class="danger" type="button">确认永久删除</button></div>
+  <aside id="record-panel" class="record-panel" aria-label="资料详情" hidden>
+    <header class="panel-heading"><h2 id="record-title">资料详情</h2><button id="close-record" class="quiet" aria-label="关闭资料详情">关闭</button></header>
+    <p id="record-meta" class="caption"></p><div id="record-content"></div>
+    <form id="draft-form" hidden>
+      <label>发件人<input id="draft-from" readonly></label>
+      <label>收件人<input id="draft-to" placeholder="多个地址用逗号分隔"></label>
+      <details><summary>抄送与密送</summary><label>抄送<input id="draft-cc"></label><label>密送<input id="draft-bcc"></label></details>
+      <label>主题<input id="draft-subject" maxlength="500"></label>
+      <label>正文<textarea id="draft-body" rows="12" maxlength="50000"></textarea></label>
+      <p id="draft-status" class="notice" role="status"></p>
+      <div class="toolbar"><button id="draft-save" type="submit" class="quiet">保存修改</button><button id="draft-send" type="button" class="primary">发送当前版本</button><button id="draft-reload" type="button" class="quiet">重新载入</button></div>
+      <div class="toolbar secondary-actions"><button id="draft-copy" type="button" class="quiet">复制为新草稿</button><button id="draft-delete" type="button" class="danger">删除草稿</button></div>
+      <details><summary>版本历史</summary><div id="draft-revisions"></div></details>
+    </form>
+    <button id="attach-open-record" class="quiet">添加到下一条消息</button>
+  </aside>
+  <dialog id="records-dialog" aria-labelledby="records-title">
+    <header class="panel-heading"><h2 id="records-title">添加资料</h2><button id="close-picker" class="quiet" type="button">关闭</button></header>
+    <form id="record-search" class="search-row"><label class="sr-only" for="record-kind">资料类型</label><select id="record-kind"><option value="all">全部资料</option><option value="mail">邮件</option><option value="notification">通知</option><option value="task">网页任务</option><option value="draft">草稿与发送记录</option></select><label class="sr-only" for="record-query">搜索资料</label><input id="record-query" maxlength="300" placeholder="搜索标题、发件人或已保存正文"><button class="quiet" type="submit">搜索</button></form>
+    <div class="toolbar"><button id="new-draft" class="quiet">新建空白草稿</button><button id="open-notification-import" class="quiet">保存通知</button><label class="file-button">导入通知 JSON<input id="json-file" type="file" accept="application/json,.json"></label></div>
+    <p class="caption">搜索本机已保存资料；未读取的邮件正文不参与搜索。</p>
+    <div id="record-results" class="record-results"></div>
+    <div class="picker-footer"><button id="records-previous" class="quiet">上一页</button><span id="records-page" class="caption"></span><button id="records-next" class="quiet">下一页</button><button id="picker-add" class="primary">添加到消息</button></div>
   </dialog>
-  <dialog id="source-dialog"><div class="dialog-heading"><h2>通知原文</h2><button id="close-dialog" class="quiet">关闭</button></div><p id="source-meta" class="caption"></p><pre id="source-body"></pre><p id="source-attachments" class="notice"></p><p id="source-id" class="caption"></p></dialog>
-</body>
-</html>
+  <dialog id="preview-dialog" aria-labelledby="preview-title"><header class="panel-heading"><h2 id="preview-title">资料预览</h2><button id="close-preview" class="quiet">关闭</button></header><pre id="preview-content"></pre><button id="preview-open" class="primary">在会话旁打开</button></dialog>
+  <dialog id="notification-dialog" aria-labelledby="notification-title"><header class="panel-heading"><h2 id="notification-title">保存通知</h2><button id="close-notification-import" class="quiet">关闭</button></header><form id="import-form"><label>来源／会话<input id="notification-conversation" maxlength="120" value="手动资料" required></label><label>原消息时间<input id="sent-at" type="datetime-local" required></label><label>正文<textarea id="notification-text" rows="6" maxlength="12000" required></textarea></label><button class="primary" type="submit">保存并添加到消息</button></form></dialog>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <header class="panel-heading"><h2 id="settings-title">设置与画像</h2><button id="close-settings" class="quiet">关闭</button></header>
+    <p id="settings-status" class="notice"></p><p class="caption">模型、额度、浏览器代理与邮箱凭据在私有 .env 配置，修改后重启。不要将 Key 或授权码粘贴到聊天。</p>
+    <details open><summary>邮箱同步</summary><p id="mail-status" class="caption"></p><div class="toolbar"><button id="mail-start" class="quiet">启用新邮件同步</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-latest" class="quiet">导入最新一封已有邮件</button></div><p class="caption">首次启用跳过历史；后台只保存新邮件头，不自动分析。</p></details>
+    <form class="memory-form" data-kind="public_profile"><h3>公开检索画像</h3><p class="caption">专业、技能、兴趣与偏好，可用于公开检索。</p><label class="sr-only" for="public_profile-text">公开检索画像</label><textarea id="public_profile-text" rows="5" maxlength="12000"></textarea><button class="quiet" type="submit">保存公开画像</button></form>
+    <form class="memory-form" data-kind="profile"><h3>私人画像</h3><p class="caption">身份、账号等私人背景，不自动交给浏览执行器。</p><label class="sr-only" for="profile-text">私人画像</label><textarea id="profile-text" rows="5" maxlength="12000"></textarea><button class="quiet" type="submit">保存私人画像</button></form>
+    <form class="memory-form" data-kind="rules"><h3>纠正规则</h3><label class="sr-only" for="rules-text">纠正规则</label><textarea id="rules-text" rows="5" maxlength="12000"></textarea><button class="quiet" type="submit">保存规则</button></form>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body></html>

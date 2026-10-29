@@ -44,7 +44,8 @@ run_browser 是独立浏览执行器：goal 只含必要公开目标，不传私
 TEXT = {"type": "string", "maxLength": 4000}
 REF = {"type": "object", "properties": {
     "kind": {"type": "string", "enum": ["notification", "mail", "task", "draft", "memory"]},
-    "id": {"type": "string", "maxLength": 128}}, "required": ["kind", "id"], "additionalProperties": False}
+    "id": {"type": "string", "maxLength": 128}, "version": {"type": "integer", "minimum": 1}},
+    "required": ["kind", "id"], "additionalProperties": False}
 REFS = {"type": "array", "items": REF, "maxItems": 30}
 ADDRESSES = {"type": "array", "items": {"type": "string", "maxLength": 320}, "maxItems": 30}
 FIELDS = {"to": ADDRESSES, "cc": ADDRESSES, "bcc": ADDRESSES,
@@ -88,6 +89,8 @@ TOOLS = [
     function("update_draft", "修改已读取草稿的当前版本；保留未要求改变的字段，不发送。", {
         "id": TEXT, "version": {"type": "integer", "minimum": 1}, **FIELDS}),
     function("copy_draft", "复制为独立草稿，不影响原草稿。", {"id": TEXT}),
+    function("read_memory_history", "按需查看画像或规则的变更前后内容和来源，用于用户明确要求的纠正／撤销。", {
+        "kind": {"type": "string", "enum": ["public_profile", "profile", "rules"]}}),
     function("update_memory", "仅按本轮用户明确要求保存或纠正画像／规则，引用其原话，不据他人发言推断。", {
         "kind": {"type": "string", "enum": ["public_profile", "profile", "rules"]},
         "content": {"type": "string", "maxLength": 12000}, "append": {"type": "boolean"}, "source_quote": TEXT}),
@@ -425,6 +428,8 @@ class Conversations:
                 raise AssistantError("没有该网页来源。", 404)
             return {"source": {key: page.get(key) for key in
                 ("id", "url", "title", "text", "fetched_at", "ready", "text_truncated")}}
+        if name == "read_memory_history":
+            return {"revisions": self.store.memory_history(args["kind"])}
         if name == "create_draft":
             record = self.drafts.create({**args, "source": {"kind": "records", "refs": args["source_refs"]}}, origin=origin)
         elif name == "update_draft":

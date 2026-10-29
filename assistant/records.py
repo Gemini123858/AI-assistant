@@ -37,8 +37,8 @@ class Records:
         return {"id": key, "content": self.store.memory()[key]}
 
     def read(self, ref, *, fetch_body=False):
-        ref = record_ref(ref)
         raw = self.raw(ref, fetch_body=fetch_body)
+        ref = {"kind": ref["kind"], "id": raw["id"]}
         kind = ref["kind"]
         notes, sources = [], []
         if kind == "notification":

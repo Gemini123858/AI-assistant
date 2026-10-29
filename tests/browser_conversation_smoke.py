@@ -1,0 +1,128 @@
+"""Offline unified UI flow. Fake LLM, IMAP, browser and SMTP; no external requests."""
+import json
+import tempfile
+import threading
+from pathlib import Path
+
+from playwright.sync_api import expect, sync_playwright
+from werkzeug.serving import WSGIRequestHandler, make_server
+
+from assistant.config import Config
+from assistant.web import create_app
+from .test_conversations import FlowModel, fields, finish
+from .test_drafts import FakeSMTP
+from .test_generic_tasks import result
+from .test_mail import FakeIMAP, TOKEN, analysis
+from .test_tasks import FixtureBrowser, LIST, call
+
+
+class Quiet(WSGIRequestHandler):
+    def log_request(self, *args):
+        pass
+
+
+def main():
+    with tempfile.TemporaryDirectory() as folder:
+        imap, smtp, model = FakeIMAP(), FakeSMTP(), FlowModel([])
+        app = create_app(Config(data_dir=Path(folder)/"data", mode="api", api_key="synthetic",
+            qq_imap_user="owner@qq.com", qq_imap_auth_code="synthetic", access_token=TOKEN,
+            daily_calls=100), model, FixtureBrowser, lambda: imap, lambda: smtp)
+        imap.uids = [10]
+        mail = app.extensions["mail"].read_latest()
+        mail_ref = {"kind": "mail", "id": mail["id"]}
+        def create_after_browser(messages):
+            refs = []
+            for message in messages:
+                if message["role"] == "tool":
+                    refs.extend(item["ref"] for item in json.loads(message["content"]).get("records", []))
+            return call("create_draft", {**fields(), "source_refs": refs})
+        def update_current(messages):
+            attached = json.loads(next(message["content"] for message in reversed(messages) if message["role"] == "user" and '"question"' in message["content"]))["attached_records"]
+            snapshot = next(item for item in attached if item["ref"]["kind"] == "draft")
+            return call("update_draft", {"id": snapshot["ref"]["id"], "version": snapshot["ref"]["version"], **fields(body="合成模型修改后的正文")})
+        model.outputs = [call("read_record", {"ref": mail_ref}), call("save_mail_analysis", {"id": mail["id"], "analysis": analysis()}),
+            call("run_browser", {"goal": "读取公开岗位要求", "start_url": LIST}), call("finish_task", result()),
+            create_after_browser, finish("合成查询与草稿已完成，尚未发送。"), update_current, finish("已修改同一份草稿。")]
+        server = make_server("127.0.0.1", 0, app, threaded=True, request_handler=Quiet)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        errors = []
+        try:
+            with sync_playwright() as runtime:
+                browser = runtime.chromium.launch(headless=True, channel="chromium")
+                page = browser.new_page(viewport={"width":1440,"height":1000})
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(f"http://127.0.0.1:{server.server_port}/")
+                page.locator('input[name="token"]').fill(TOKEN)
+                page.get_by_role("button", name="登录", exact=True).click()
+                expect(page.locator("#conversation-list button")).to_have_count(1)
+                page.locator("#add-records").click()
+                page.locator("#record-kind").select_option("mail")
+                page.locator("#record-results input[type=checkbox]").first.check()
+                page.locator("#picker-add").click()
+                expect(page.locator("#attached-records")).to_contain_text("聊天记录")
+                page.locator("#chat-input").fill("分析这封邮件，查官网并起草咨询邮件")
+                page.locator("#chat-button").click()
+                expect(page.locator("#chat-history")).to_contain_text("合成查询与草稿已完成", timeout=20000)
+                page.locator(".record-link").filter(has_text="邮件草稿").last.click()
+                expect(page.locator("#draft-body")).to_have_value("合成正文")
+                page.locator("#draft-body").fill("手动输入，在切换会话前自动保存")
+                page.locator("#new-conversation").click()
+                expect(page.locator("#conversation-list button")).to_have_count(2)
+                expect(page.locator("#record-panel")).to_be_hidden()
+                page.locator("#add-records").click()
+                page.locator("#record-kind").select_option("draft")
+                page.locator("#record-results input[type=checkbox]").first.check()
+                page.locator("#picker-add").click()
+                page.locator("#chat-input").fill("把这份草稿简短一点")
+                page.locator("#chat-button").click()
+                expect(page.locator("#chat-history")).to_contain_text("已修改同一份草稿", timeout=15000)
+                page.locator(".record-link").filter(has_text="邮件草稿").last.click()
+                expect(page.locator("#draft-body")).to_have_value("合成模型修改后的正文")
+                expect(page.locator("#draft-status")).to_contain_text("v3")
+                page.locator("#draft-copy").click()
+                expect(page.locator("#draft-status")).to_contain_text("v1")
+                assert len(app.extensions["store"].list_drafts()) == 2
+                page.locator("#draft-send").click()
+                expect(page.locator("#draft-status")).to_contain_text("SMTP 已接受")
+                expect(page.locator("#draft-send")).to_be_disabled()
+                assert len(smtp.messages) == 1
+                page.locator("#close-record").click()
+                page.locator("#conversation-list button").filter(has_text="分析这封邮件").click()
+                page.locator(".record-link").filter(has_text="邮件草稿").last.click()
+                expect(page.locator("#draft-body")).to_have_value("合成模型修改后的正文")
+                expect(page.locator(".record-link").filter(has_text="邮件草稿").filter(has_text="当时 v1").first).to_be_visible()
+                page.locator("#close-record").click()
+                page.reload()
+                expect(page.locator("#conversation-title")).to_contain_text("分析这封邮件")
+                page.locator("#chat-input").fill("尚未发送的输入")
+                page.locator("#new-conversation").click()
+                page.locator("#conversation-list button").filter(has_text="分析这封邮件").click()
+                expect(page.locator("#chat-input")).to_have_value("尚未发送的输入")
+                output = Path("data/browser-check"); output.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(output/"unified-desktop.png"))
+                page.set_viewport_size({"width":390,"height":844})
+                expect(page.locator("#chat-input")).to_be_visible()
+                assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+                page.screenshot(path=str(output/"unified-mobile.png"))
+                page.locator("#open-settings").click()
+                page.locator("#rules-text").fill("合成纠正规则")
+                page.locator('[data-kind="rules"] button[type="submit"]').click()
+                expect(page.locator("#toast")).to_contain_text("已保存")
+                rules = page.locator('[data-kind="rules"]')
+                rules.get_by_role("button", name="查看修改历史").click()
+                rules.locator(".memory-history-list summary").first.click()
+                page.once("dialog", lambda dialog: dialog.accept())
+                rules.get_by_role("button", name="恢复到变更前").first.click()
+                expect(page.locator("#rules-text")).to_have_value("")
+                page.locator("#close-settings").click()
+                assert not errors, errors
+                browser.close()
+            print("Offline unified UI passed: picker → mail → browser → draft; shared edits, autosave, copy/send, refresh, composer recovery, settings and mobile layout.")
+        finally:
+            server.shutdown(); server.server_close(); thread.join(5)
+            app.extensions["conversations"].close(); app.extensions["mail"].close()
+            app.extensions["tasks"].close(); app.extensions["store"].close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,4 @@
 """Unified conversation flows, with synthetic model, mailbox, browser and SMTP only."""
-import copy
 import json
 import re
 import tempfile
@@ -8,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from assistant.config import Config
-from assistant.storage import now_iso
 from assistant.web import create_app
 from .test_drafts import FakeSMTP
 from .test_generic_tasks import result
@@ -164,6 +162,11 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("正在找实习", self.store.memory()["public_profile"])
         history = list((self.store.root/"memory"/"history").glob("*.json"))
         self.assertEqual(json.loads(history[-1].read_text())["source"]["conversation_id"], key)
+        revisions = self.client.get("/api/memory/public_profile/history").json["revisions"]
+        self.assertEqual(revisions[0]["before"], "")
+        self.assertEqual(self.client.put("/api/memory/public_profile", json={"content": revisions[0]["before"]},
+            headers={**self.headers, "X-Conversation-ID": key}).status_code, 200)
+        self.assertEqual(self.store.memory()["public_profile"], "")
 
     def test_header_triage_can_be_saved_without_reading_body(self):
         self.imap.uids = [10]

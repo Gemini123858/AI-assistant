@@ -375,6 +375,14 @@ class Store:
                                                "fetched_at": now_iso(), "image": data_url, "masked": True})
             return name
 
+    def memory_history(self, kind):
+        if kind not in {"public_profile", "profile", "rules"}:
+            raise AssistantError("记忆类型无效。")
+        with self._mutex:
+            history = [self._read_json(path) for path in (self.root / "memory" / "history").glob("*.json")]
+            return sorted((item for item in history if item["kind"] == kind),
+                          key=lambda item: item["created_at"], reverse=True)
+
     def update_memory(self, kind, content, append=False, *, source=None):
         if kind not in {"public_profile", "profile", "rules"}:
             raise AssistantError("记忆类型必须是 public_profile、profile 或 rules。")

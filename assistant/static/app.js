@@ -1,827 +1,511 @@
 "use strict";
-
 const $ = (id) => document.getElementById(id);
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
-const selected = new Set();
-let offset = 0;
-let total = 0;
-const pageSize = 20;
-let toastTimer;
-let followups = { task: null, mail: null };
-let activeDraft = null;
-let pendingDraftDelete = null;
-let draftSendingEnabled = false;
-let draftLoadSequence = 0;
-const savedMemory = { public_profile: "", profile: "", rules: "" };
-
-function refreshMemory(memory) {
-  for (const kind of ["public_profile", "profile", "rules"]) {
-    const field = $(kind + "-text");
-    if (field.value === savedMemory[kind]) field.value = memory[kind];
-    savedMemory[kind] = memory[kind];
-  }
-}
-
+const names = { notification: "通知", mail: "邮件", task: "网页任务", draft: "邮件草稿", memory: "画像与规则" };
+const toolNames = { search_records: "搜索资料", read_record: "读取资料", save_notification: "保存通知", save_notification_analysis: "保存通知分析", save_mail_analysis: "保存邮件分析", suggest_mail_profile: "提议画像更新", sync_mail: "同步邮件", run_browser: "查询公开网页", read_web_source: "读取网页证据", create_draft: "创建草稿", update_draft: "修改草稿", copy_draft: "复制草稿", update_memory: "更新记忆" };
+const statusNames = { draft: "尚未发送", sent: "SMTP 已接受", partial: "部分完成", failed: "失败", unknown: "结果待核查", sending: "发送中", running: "运行中", queued: "待运行", completed: "已完成", cancelled: "已取消", interrupted: "中断", saved: "已保存", pending: "待分析", success: "已分析", analyzed: "已分析" };
+let conversation = null, conversations = [], status = null, pollTimer, toastTimer, selection = new Map();
+let pickerSelection = new Map(), pickerOffset = 0, previewRef = null;
+let opened = null, draft = null, draftBaseVersion = null, draftDirty = false, draftTimer, saveQueue = Promise.resolve();
+let loadSequence = 0, pickerSequence = 0, recordSequence = 0;
+const refKey = (ref) => `${ref.kind}:${ref.id}`;
+const simpleRef = (ref) => ({ kind: ref.kind, id: ref.id });
+const formatTime = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "";
 function node(tag, className = "", text = "") {
   const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text) element.textContent = text;
+  element.className = className;
+  element.textContent = text;
   return element;
 }
-
-function followupBox(kind, key, refresh) {
-  const session = followups[kind];
-  if (!session || session.key !== key) return null;
-  const box = node("section", "followup-box");
-  const heading = node("div", "followup-heading");
-  heading.append(node("h3", "", "继续追问"));
-  const close = node("button", "quiet", "关闭并归档");
-  close.addEventListener("click", () => working(close, async () => {
-    await api(`/api/followups/${kind}/${key}/close`, "POST", {});
-    followups[kind] = null;
-    await refresh();
-  }));
-  heading.append(close); box.append(heading);
-  const history = node("div", "followup-history");
-  for (const turn of session.turns) history.append(node("div", `bubble ${turn.role}`, turn.text));
-  if (!session.turns.length) history.append(node("p", "caption", "可以继续提问或要求补查公开网页。网页追问沿用原任务范围；邮件追问会把公开浏览与邮件私人上下文隔离。一次回答可能调用多轮模型和浏览器工具。"));
-  box.append(history);
-  const form = node("form", "followup-form");
-  const input = node("textarea");
-  input.required = true; input.maxLength = 4000; input.rows = 2;
-  input.placeholder = "继续追问这个结果……";
-  const send = node("button", "primary", "发送追问");
-  form.append(input, send);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    working(send, async () => {
-      const response = await api(`/api/followups/${kind}/${key}`, "POST", { message: input.value });
-      followups[kind] = response.session;
-      await Promise.all([refresh(), loadStatus()]);
-    });
-  });
-  box.append(form);
-  return box;
+function button(text, action, className = "quiet") {
+  const element = node("button", className, text);
+  element.type = "button";
+  element.addEventListener("click", () => work(element, action));
+  return element;
 }
-
-function toast(text, error = false) {
+function toast(message, error = false) {
   clearTimeout(toastTimer);
-  $("toast").textContent = text;
+  $("toast").textContent = message;
   $("toast").className = error ? "toast error" : "toast";
   $("toast").hidden = false;
-  toastTimer = setTimeout(() => { $("toast").hidden = true; }, error ? 10000 : 4500);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, error ? 10000 : 4000);
 }
-
-async function api(path, method = "GET", payload) {
-  const options = { method, headers: { "X-CSRF-Token": csrf } };
-  if (payload !== undefined) {
-    options.headers["Content-Type"] = "application/json";
-    options.body = JSON.stringify(payload);
-  }
+async function api(path, method = "GET", payload, inConversation = false) {
+  const headers = { "X-CSRF-Token": csrf };
+  if (inConversation && conversation) headers["X-Conversation-ID"] = conversation.id;
+  const options = { method, headers };
+  if (payload !== undefined) { headers["Content-Type"] = "application/json"; options.body = JSON.stringify(payload); }
   const response = await fetch(path, options);
+  if (response.status === 401) { window.location.assign("/login"); throw new Error("请重新登录。"); }
   const data = await response.json();
-  if (response.status === 401) { window.location.assign("/login"); throw new Error("请登录。"); }
-  if (!response.ok) {
-    const error = new Error(data.error || "请求失败");
-    error.policy = data.policy;
-    throw error;
-  }
+  if (!response.ok) throw new Error(data.error || "操作失败");
   return data;
 }
-
-async function working(button, action) {
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = "处理中…";
-  try { await action(); }
-  catch (error) {
-    if (error.policy?.overridable && error.policy.read_exception) {
-      const field = $("task-read-exceptions");
-      try {
-        const entries = JSON.parse(field.value.trim() || "[]");
-        if (Array.isArray(entries)) {
-          const entry = error.policy.read_exception;
-          if (!entries.some((other) => JSON.stringify(other) === JSON.stringify(entry))) entries.push(entry);
-          field.value = JSON.stringify(entries, null, 2);
-          field.closest("details").open = true;
-          $("task-public-confirm").checked = false;
-          error.message += " 已填入候选阅读豁免，尚未放行；请核实后重新确认。";
-        }
-      } catch (_) { /* Preserve the user's invalid JSON; never grant silently. */ }
-    }
-    toast(error.message, true);
-  }
-  finally { button.disabled = false; button.textContent = label; }
+async function work(element, action) {
+  if (element.dataset.busy) return;
+  element.dataset.busy = "true";
+  element.setAttribute("aria-busy", "true");
+  try { await action(); } catch (error) { toast(error.message, true); }
+  finally { delete element.dataset.busy; element.removeAttribute("aria-busy"); updateControls(); }
 }
-
-async function createDraftFrom(source) {
-  const response = await api("/api/drafts", "POST", { to: [], cc: [], bcc: [], subject: "", body: "", source });
-  const draft = response.draft;
-  // The create response is authoritative. Render it immediately so an older
-  // list request cannot leave the newly created editor in its disabled state.
-  draftLoadSequence += 1;
-  showDraft(draft);
-  document.querySelector('[data-tab="mail"]').click();
-  await loadDrafts(draft.id);
-  $("draft-instruction").focus();
-  toast("已创建本地草稿；填写要求后可让 Kimi 生成内容。尚未发送。");
+function rememberComposer() {
+  if (conversation) sessionStorage.setItem(`composer:${conversation.id}`, JSON.stringify({ text: $("chat-input").value, records: [...selection.values()] }));
 }
-
-function formatTime(value) {
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
-}
-
-function contextLabel() {
-  $("chat-context").textContent = selected.size ?
-    `对话使用已选择的 ${selected.size} 条通知和最新记忆；模型读取最近 6 轮。` :
-    "未选择时使用最近 10 条通知；完整历史保存，模型仅读取最近 6 轮。";
-}
-
-function sourceDialog(record) {
-  const original = record.original;
-  $("source-meta").textContent = `${original.source} · ${original.conversation} · ${original.sender} · ${formatTime(original.sent_at)}`;
-  $("source-body").textContent = original.text;
-  $("source-attachments").textContent = original.attachments.length ?
-    "附件未读取：" + original.attachments.join("、") : "本版仅分析文字，未访问链接或读取图片附件。";
-  $("source-id").textContent = `通知 ID：${record.id}`;
-  if (!$("source-dialog").open) $("source-dialog").showModal();
-}
-
-function messageCard(record) {
-  const card = node("article", "message-card");
-  card.id = "message-" + record.id;
-  const top = node("div", "card-top");
-  const title = node("div", "card-title");
-  const label = node("label");
-  const checkbox = node("input");
-  checkbox.type = "checkbox";
-  checkbox.checked = selected.has(record.id);
-  checkbox.setAttribute("aria-label", "选择通知用于对话：" + record.original.conversation);
-  checkbox.addEventListener("change", () => {
-    if (checkbox.checked && selected.size >= 10) {
-      checkbox.checked = false;
-      toast("本版对话最多选择 10 条通知。", true);
-      return;
-    }
-    checkbox.checked ? selected.add(record.id) : selected.delete(record.id);
-    contextLabel();
-  });
-  label.append(checkbox, node("span", "", record.original.conversation));
-  title.append(label, node("span", "", record.original.source));
-  const analysis = record.analysis;
-  const category = record.status === "failed" ? "failed" : analysis ? analysis.importance : "pending";
-  const names = { urgent: "及时查看", digest: "汇总", review: "待确认", failed: "分析失败", pending: "待分析" };
-  top.append(title, node("span", "tag " + category, names[category] || "状态未知"));
-  card.append(top, node("p", "summary-text", analysis ? analysis.summary : record.original.text.slice(0, 180)));
-  if (analysis) {
-    card.append(node("p", "reason", analysis.relevance_reason));
-    if (analysis.actions.length) {
-      const list = node("ul", "item-list");
-      analysis.actions.forEach((action) => list.append(node("li", "", action)));
-      card.append(list);
-    }
-    analysis.times.forEach((time) => {
-      const kind = { deadline: "截止", event: "活动", other: "其他时间" }[time.kind];
-      card.append(node("p", "time-row", `${kind}：${time.text}${time.normalized ? " · " + formatTime(time.normalized) : "（精确时间待确认）"}`));
-    });
-    if (analysis.uncertainties.length) card.append(node("p", "reason", "待确认：" + analysis.uncertainties.join("；")));
-    card.append(node("p", "caption", "分析模式：" + (record.analysis_context?.mode === "api" ? record.analysis_context.model : "演示，非真实语义结果")));
-  }
-  if (record.error) card.append(node("p", "notice", record.error));
-  if (record.original.attachments.length) card.append(node("p", "notice", "有附件未处理，不代表没有重要事项。"));
-  const actions = node("div", "card-actions");
-  const view = node("button", "quiet", "查看原文");
-  view.addEventListener("click", () => sourceDialog(record));
-  const analyze = node("button", "primary", record.status === "pending" ? "分析通知" : "重新分析");
-  analyze.addEventListener("click", () => working(analyze, async () => {
-    await api(`/api/messages/${record.id}/analyze`, "POST", { retry: record.status !== "pending" });
-    await Promise.all([loadMessages(), loadStatus()]);
-    toast("分析结果已保存。");
-  }));
-  const draft = node("button", "quiet", selected.size ? "用所选通知写邮件" : "用此通知写邮件");
-  draft.addEventListener("click", () => working(draft, () => createDraftFrom({
-    kind: "notifications", keys: selected.size ? [...selected] : [record.id]
+function renderSelection() {
+  $("attached-records").replaceChildren(...[...selection.entries()].map(([key, record]) => button(`${names[record.ref.kind]} · ${record.title.slice(0, 55)} ×`, () => {
+    selection.delete(key); renderSelection(); rememberComposer();
   })));
-  actions.append(view, analyze, draft, node("span", "source-time", formatTime(record.original.sent_at)));
-  card.append(actions);
-  return card;
 }
-
-async function loadMessages() {
-  const data = await api(`/api/messages?offset=${offset}&limit=${pageSize}`);
-  total = data.total;
-  $("message-count").textContent = String(total);
-  $("message-list").replaceChildren(...data.messages.map(messageCard));
-  if (!data.messages.length) $("message-list").append(node("div", "empty-state", "还没有通知。先导入一条，或载入合成样例。"));
-  $("previous-page").disabled = offset === 0;
-  $("next-page").disabled = offset + pageSize >= total;
-  $("page-info").textContent = total ? `${offset + 1}–${Math.min(offset + pageSize, total)} / ${total}` : "暂无通知";
+function addSelected(record) { selection.set(refKey(record.ref), record); renderSelection(); rememberComposer(); }
+async function loadList() {
+  conversations = (await api("/api/conversations")).conversations;
+  $("conversation-list").replaceChildren(...conversations.map((item) => {
+    const choice = button(`${item.running ? "● " : ""}${item.title}`, () => selectConversation(item.id), `conversation-choice${item.id === conversation?.id ? " selected" : ""}`);
+    choice.setAttribute("aria-current", item.id === conversation?.id ? "true" : "false");
+    return choice;
+  }));
 }
-
-async function loadStatus() {
-  const status = await api("/api/status");
-  $("mode-badge").textContent = status.mode === "api" ? "真实 API 模式" : "演示模式";
-  $("model-name").textContent = status.model;
-  $("usage").textContent = `今日 API 尝试 ${status.usage.calls} / ${status.daily_limit}`;
-  $("mode-notice").textContent = status.mode === "api" ?
-    `真实模型已启用。明确分析、问答及网页任务调用 API；失败也计入额度。邮箱后台只同步新邮件，不自动分析；普通问答没有浏览工具。邮件发送${status.capabilities.send_email ? "已配置，但只能由草稿中的发送按钮触发" : "尚未配置"}。` :
-    "当前为演示模式：只验证界面、文件保存和显式记忆命令，不判断真实相关性或日期。配置 API 后重启，可进行真实分析和问答。";
-  $("task-button").disabled = !status.capabilities.browser_tasks;
-  const budget = status.browser_budget;
-  $("task-availability").textContent = status.capabilities.browser_tasks ?
-    `本任务配置 ${budget.calls} 次模型调用 / ${budget.steps} 步 / ${Math.round(budget.seconds / 60)} 分钟；受日剩余额度限制，当前有效模型预算 ${budget.effective_calls} 次。视觉截图${status.capabilities.browser_vision ? "已开启（仅匿名页，输入遮罩）" : "未开启"}。一次仅运行一个任务。` :
-    "演示模式不执行网页任务，不伪造招聘查询。请配置 API 和 Chromium 后重启。";
+async function newConversation() {
+  await flushDraft(); rememberComposer();
+  const result = await api("/api/conversations", "POST", {});
+  await selectConversation(result.conversation.id);
 }
-
-function sourceLink(url, label, domains) {
-  const link = node("a", "", label);
-  let target;
-  try { target = new URL(url); } catch (_) { return link; }
-  // A stored/model-produced link is still untrusted; never render javascript: URLs.
-  if (target.protocol === "https:" && (domains === null || domains.includes(target.hostname)) && (!target.port || target.port === "443") && !target.username && !target.password) {
-    link.href = target.href;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-  }
-  return link;
+async function selectConversation(id) {
+  await flushDraft(); rememberComposer();
+  const sequence = ++loadSequence;
+  clearTimeout(pollTimer);
+  const data = await api(`/api/conversations/${id}`);
+  if (sequence !== loadSequence) return;
+  conversation = data.conversation;
+  localStorage.setItem("current-conversation", id);
+  const composer = JSON.parse(sessionStorage.getItem(`composer:${id}`) || "{}");
+  $("chat-input").value = composer.text || "";
+  selection = new Map((composer.records || []).map((record) => [refKey(record.ref), record]));
+  hideRecord(); renderSelection(); renderConversation(true);
+  await loadList(); schedulePoll();
 }
-
-function taskCard(task) {
-  const card = node("article", "message-card task-card");
-  card.dataset.taskId = task.id;
-  const names = { queued: "待运行", running: "运行中", completed: "已完成", partial: "部分完成",
-    failed: "失败", cancelled: "已取消", interrupted: "中断" };
-  const top = node("div", "card-top");
-  const domains = task.scope?.public_web ? null : task.scope?.domains || ["jobs.bytedance.com"];
-  top.append(node("h3", "", task.request), node("span", "tag", names[task.status] || "未知"));
-  card.append(top, node("p", "reason", task.note), node("p", "caption",
-    `已保存 ${task.pages.length} 份页面观察 · 动作 ${task.steps}/${task.limits.steps} · 模型 ${task.calls}/${task.limits.calls} · ${task.phase === "analysis" ? "私人分析（无网站动作）" : "公开浏览"} · ${formatTime(task.created_at)}`));
-  if (task.scope) card.append(node("p", "caption", domains === null ?
-    "阅读范围：任务相关的公网 HTTPS 网页与数据（不授权外部写入）" : "限定访问域：" + domains.join("、")));
-  if (task.public_request) card.append(node("p", "caption", "公开任务目标：" + task.public_request));
-  if (task.profile_supplement) card.append(node("p", "caption", "本次公开画像补充：" + task.profile_supplement));
-  if (task.private_conditions) card.append(node("p", "caption", "私人筛选条件：" + task.private_conditions));
-  if (task.scope?.blocked_urls?.length) card.append(node("p", "caption", "禁止访问路径：" + task.scope.blocked_urls.join("、")));
-  if (task.scope?.read_exceptions?.length) card.append(node("p", "caption", `本任务精确阅读豁免：${task.scope.read_exceptions.length} 项（不覆盖硬边界）`));
-  function exceptionButton(policy) {
-    if (!policy?.overridable || !policy.read_exception) return null;
-    const button = node("button", "quiet", "填入阅读豁免（需核实后重新发起）");
-    button.addEventListener("click", () => {
-      const scope = task.scope;
-      $("task-url").value = scope.start_url;
-      $("task-limit-domains").checked = !scope.public_web;
-      $("task-domains").value = scope.domains.join(", ");
-      $("task-resources").value = scope.resource_domains.join(", ");
-      $("task-blocked-urls").value = (scope.blocked_urls || []).join("\n");
-      const entries = [...(scope.read_exceptions || []), policy.read_exception];
-      $("task-read-exceptions").value = JSON.stringify(entries.filter((entry, index) =>
-        entries.findIndex((other) => JSON.stringify(other) === JSON.stringify(entry)) === index), null, 2);
-      $("task-read-exceptions").closest("details").open = true;
-      $("task-public-request").value = task.public_request;
-      $("task-profile-supplement").value = task.profile_supplement || "";
-      $("task-request").value = task.private_conditions ?? (task.request !== task.public_request ? task.request : "");
-      $("task-public-confirm").checked = false;
-      $("task-form").scrollIntoView({ behavior: "smooth" });
-      toast("已填入新任务，尚未放行。请核实具体URL、方法及POST正文摘要后重新确认。");
-    });
-    return button;
+function recordLinks(records, historical = true) {
+  const list = node("div", "record-links");
+  const unique = new Map(records.map((record) => [refKey(record.ref), record]));
+  for (const record of unique.values()) {
+    const choice = button("", () => openRecord(record.ref));
+    choice.className = "record-link";
+    choice.append(node("span", "", `${names[record.ref.kind]} · ${record.title}`), node("small", "", `${historical && record.ref.version ? "当时 v" + record.ref.version + " · " : ""}打开当前记录`));
+    list.append(choice);
   }
-  for (const error of task.errors || []) {
-    const button = exceptionButton(error.policy);
-    if (button) card.append(node("p", "notice", error.policy.reason),
-      node("pre", "task-evidence", JSON.stringify(error.policy.read_exception, null, 2)), button);
-  }
-  if (task.actions?.length) {
-    const actions = node("details", "task-actions");
-    actions.append(node("summary", "", "查看浏览器动作记录"));
-    const labels = { open_link: "打开链接", open_url: "打开 URL", observe_page: "观察页面", click_element: "点击元素", click_text: "点击正文文字", list_tabs: "列出标签页", switch_tab: "切换标签页", close_tab: "关闭标签页", fill_field: "填写搜索框", scroll_page: "滚动页面", go_back: "返回", refresh_page: "刷新", wait_page: "等待", press_key: "按键", select_option: "选择筛选项", check_field: "勾选筛选", restart_browser: "重启匿名浏览器", take_screenshot: "截图（输入已遮罩）", read_source: "读取保存证据" };
-    const states = { running: "执行中", success: "动作已执行", incomplete: "正文尚不可读", failed: "失败", interrupted: "已中止，结果未验证" };
-    for (const action of task.actions) {
-      actions.append(node("p", "caption", `${action.step}. ${labels[action.tool] || action.tool} · ${states[action.status] || action.status}${action.page_id ? " · " + action.page_id : ""}${action.error_kind ? " · " + action.error_kind : ""}${action.error ? " · " + action.error : ""}`));
-      if (action.read_error) actions.append(node("p", "notice", action.read_error));
-      for (const item of action.network_errors || []) actions.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
-      for (const item of action.connection_errors || []) actions.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
-      if (action.loop_warning) actions.append(node("p", "caption", action.loop_warning));
-      if (action.streak_warning) actions.append(node("p", "notice", action.streak_warning));
-      if (action.tabs?.length) actions.append(node("p", "caption", "打开的标签页：" + action.tabs.map((tab) =>
-        `${tab.tab_id}${tab.active ? "（当前）" : ""} · ${tab.title || tab.url}`).join("；")));
-      if (action.remaining) actions.append(node("p", "caption", `动作结束时剩余：模型 ${action.remaining.calls} 次 / 动作 ${action.remaining.steps} 步 / 时间 ${action.remaining.seconds} 秒`));
-    }
-    card.append(actions);
-  }
-  if (task.result) {
-    card.append(node("p", "summary-text", task.result.summary), node("p", "notice", task.result.coverage));
-    for (const finding of task.result.findings || []) {
-      const result = node("section", "job-result");
-      result.append(node("p", "summary-text", finding.text), sourceLink(finding.url, `${finding.page_id} · 原来源`, domains),
-        node("p", "task-evidence", `原文（${finding.line_start}–${finding.line_end}行）：\n${finding.quote}`));
-      if (finding.uncertainties.length) result.append(node("p", "notice", "未知项：" + finding.uncertainties.join("；")));
-      card.append(result);
-    }
-    for (const job of task.result.jobs || []) {
-      const result = node("section", "job-result");
-      const fit = { potential_match: "潜在匹配", needs_confirmation: "待确认", not_match: "当前不匹配" }[job.fit];
-      result.append(sourceLink(job.url, job.title, domains), node("span", "tag", fit), node("p", "reason", job.reason),
-        node("p", "caption", "获取时间：" + formatTime(job.fetched_at)),
-        node("p", "task-evidence", "岗位原文：\n" + job.job_evidence));
-      if (job.profile_evidence.length) result.append(node("p", "reason", "画像依据：" + job.profile_evidence.join("；")));
-      if (job.uncertainties.length) result.append(node("p", "notice", "未知项：" + job.uncertainties.join("；")));
-      card.append(result);
-    }
-    if (task.result.questions.length) card.append(node("p", "notice", "需要你补充：" + task.result.questions.join("；")));
-  }
-  const taskFollowup = followupBox("task", task.id, loadTasks);
-  if (taskFollowup) card.append(taskFollowup);
-  for (const error of task.errors) {
-    card.append(node("p", "notice", `历史失败/恢复线索${error.step ? "（步骤" + error.step + "）" : ""}：${error.kind || "读取失败"} · ${error.url} · ${error.error}`));
-    for (const item of error.network_errors || []) card.append(node("p", "caption", `允许请求的网络失败：${item.target} · ${item.code}`));
-    for (const item of error.policy_blocks || []) card.append(node("p", "caption", `主动拦截（不是网络故障）：${item.target} · ${item.reason}`));
-    for (const item of error.connection_errors || []) card.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
-  }
-  const evidence = node("details", "task-pages");
-  evidence.append(node("summary", "", "查看已访问页面及保存的正文"));
-  for (const page of task.pages) {
-    const row = node("p");
-    row.append(sourceLink(page.url, `${page.id} · ${page.title || page.url}${page.ready === false ? " · 正文尚不可读" : " · 快照可读，内容需核对"}`, domains));
-    evidence.append(row);
-  }
-  const view = node("button", "quiet", "载入保存的正文");
-  view.addEventListener("click", () => working(view, async () => {
-    const saved = (await api(`/api/tasks/${task.id}`)).task;
-    view.remove();
-    for (const page of saved.pages) {
-      evidence.append(node("h3", "", page.id + " · " + page.title),
-        node("p", "caption", `${formatTime(page.fetched_at)}${page.text_truncated ? " · 正文已截断，覆盖不完整" : ""}`),
-        node("pre", "task-evidence", page.text));
-      if (page.ready === false) evidence.append(node("p", "notice", page.read_error || "正文尚不可读，不能当成零结果。"));
-      if (page.content_note) evidence.append(node("p", "caption", page.content_note));
-      if (page.read_warning) evidence.append(node("p", "notice", page.read_warning));
-      for (const item of page.network_errors || []) evidence.append(node("p", "caption", `网络失败：${item.target} · ${item.code}`));
-      for (const item of page.connection_errors || []) evidence.append(node("p", "caption", `${item.kind === "permission" ? "公网连接被拒绝" : "连接失败"}：${item.target} · ${item.reason}`));
-      for (const item of page.policy_blocks || []) {
-        evidence.append(node("p", "caption", `主动拦截：${item.target} · ${item.rule || "历史规则"} · ${item.reason}`));
-        const button = exceptionButton(item);
-        if (button) evidence.append(node("pre", "task-evidence", JSON.stringify(item.read_exception, null, 2)), button);
+  return list;
+}
+function renderConversation(forceScroll = false) {
+  $("conversation-title").textContent = conversation.title;
+  const history = $("chat-history"), nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 100;
+  const expanded = new Set([...history.querySelectorAll("details[open]")].map((element) => element.dataset.seq));
+  const entries = [], groups = new Map();
+  for (const event of conversation.events) {
+    if (event.type === "model" || event.type === "record_update") continue;
+    if (event.type === "tool_result" && event.output.finished) continue;
+    if (event.type === "tool_result" || event.type === "progress") {
+      let group = groups.get(event.turn_id);
+      if (!group) {
+        const wrapper = node("section", "chat-entry"), details = node("details", "execution"), summary = node("summary"), results = node("div");
+        details.dataset.seq = event.turn_id; details.open = expanded.has(event.turn_id); details.append(summary); wrapper.append(details, results);
+        group = { details, summary, results, snapshots: new Map(), count: 0 }; groups.set(event.turn_id, group); entries.push(wrapper);
       }
+      if (event.type === "tool_result") {
+        const model = [...conversation.events].reverse().find((item) => item.seq < event.seq && item.type === "model" && item.message.tool_calls.some((call) => call.id === event.call_id));
+        const call = model?.message.tool_calls.find((item) => item.id === event.call_id);
+        group.count += 1;
+        const detail = node("details");
+        detail.append(node("summary", "", `${event.output.failed ? "未完成" : "已执行"} · ${toolNames[call?.function.name] || "操作"}`), node("pre", "", JSON.stringify(event.output, null, 2)));
+        group.details.append(detail);
+        if (event.output.failed) group.details.append(node("p", "notice", event.output.error));
+        if (event.output.matches) group.details.append(recordLinks(event.output.matches, false));
+      } else group.details.append(node("p", "", event.text));
+      group.summary.textContent = `执行过程 · ${group.count} 项操作`;
+      for (const snapshot of event.records || event.output?.records || []) group.snapshots.set(refKey(snapshot.ref), snapshot);
+      group.results.replaceChildren(recordLinks([...group.snapshots.values()]));
+      continue;
     }
-  }));
-  evidence.append(view);
-  card.append(evidence);
-  const active = ["queued", "running"].includes(task.status);
-  const oldScope = task.scope && !Object.hasOwn(task.scope, "public_web");
-  const button = node("button", "quiet", active ? "取消任务" : oldScope ? "按新阅读策略重新发起" : "重新发起（重新计费）");
-  button.disabled = active && task.cancel_requested;
-  button.addEventListener("click", () => working(button, async () => {
-    if (!active && oldScope) {
-      $("task-url").value = task.scope.start_url;
-      $("task-limit-domains").checked = false;
-      $("task-domains").value = "";
-      $("task-resources").value = "";
-      $("task-blocked-urls").value = (task.scope.blocked_urls || []).join("\n");
-      $("task-read-exceptions").value = JSON.stringify(task.scope.read_exceptions || [], null, 2);
-      $("task-public-request").value = task.public_request;
-      $("task-profile-supplement").value = task.profile_supplement || "";
-      $("task-request").value = task.private_conditions ?? (task.request !== task.public_request ? task.request : "");
-      $("task-public-confirm").checked = false;
-      $("task-form").scrollIntoView({ behavior: "smooth" });
-      toast("已填入新任务并关闭旧域名白名单；请检查目标并确认开始。旧记录不变，尚未调用 API。");
-      return;
-    }
-    if (!active && !window.confirm("将创建新任务、使用当前画像并重新调用 API；旧记录保留。是否继续？")) return;
-    await api(`/api/tasks/${task.id}/${active ? "cancel" : "restart"}`, "POST", {});
-    await loadTasks();
-  }));
-  const actions = node("div", "card-actions");
-  const draft = node("button", "quiet", "用此任务结果写邮件");
-  draft.disabled = !task.result;
-  draft.addEventListener("click", () => working(draft, () => createDraftFrom({kind: "task", keys: [task.id]})));
-  actions.append(button, draft);
-  card.append(actions);
-  return card;
-}
-
-let taskPoll;
-async function loadTasks() {
-  clearTimeout(taskPoll);
-  const [data, sessions] = await Promise.all([api("/api/tasks"), api("/api/followups")]);
-  followups = sessions;
-  const open = new Set([...$("task-list").querySelectorAll(".task-card")]
-    .filter((card) => card.querySelector("details.task-pages")?.open).map((card) => card.dataset.taskId));
-  const openActions = new Set([...$("task-list").querySelectorAll(".task-card")]
-    .filter((card) => card.querySelector("details.task-actions")?.open).map((card) => card.dataset.taskId));
-  const cards = data.tasks.map(taskCard);
-  cards.forEach((card) => {
-    card.querySelector("details.task-pages").open = open.has(card.dataset.taskId);
-    if (card.querySelector("details.task-actions")) card.querySelector("details.task-actions").open = openActions.has(card.dataset.taskId);
-  });
-  $("task-list").replaceChildren(...cards);
-  if (!data.tasks.length) $("task-list").append(node("div", "empty-state", "尚未发起网页任务。后台不会自行启动查询或分析。"));
-  if (data.tasks.some((task) => ["queued", "running"].includes(task.status))) {
-    taskPoll = setTimeout(() => loadTasks().catch((error) => toast(error.message, true)), 2500);
-  } else await loadStatus();
-}
-
-$("task-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  working($("task-button"), async () => {
-    const start = new URL($("task-url").value);
-    const splitDomains = (id) => $(id).value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
-    const domains = [...new Set([start.hostname, ...splitDomains("task-domains")])];
-    await api("/api/tasks", "POST", { goal: $("task-public-request").value,
-      profile_supplement: $("task-profile-supplement").value,
-      private_conditions: $("task-request").value, start_url: start.href,
-      public_web: !$("task-limit-domains").checked,
-      domains, resource_domains: splitDomains("task-resources"),
-      read_exceptions: JSON.parse($("task-read-exceptions").value.trim() || "[]"),
-      blocked_urls: $("task-blocked-urls").value.split(/\n/).map((s) => s.trim()).filter(Boolean) });
-    toast("已发起公开网页任务，可查看动作、恢复记录或取消。");
-    await loadTasks();
-  });
-});
-$("tasks-refresh").addEventListener("click", () => working($("tasks-refresh"), () => loadTasks()));
-
-function chatTurn(turn) {
-  const wrapper = node("div", "chat-turn");
-  wrapper.append(node("div", "bubble user", turn.user), node("div", "bubble assistant", turn.reply));
-  if (turn.cited_ids?.length) {
-    const citations = node("div");
-    turn.cited_ids.forEach((key, index) => {
-      const button = node("button", "citation-button", `原文 ${index + 1}`);
-      button.addEventListener("click", () => working(button, async () => sourceDialog((await api(`/api/messages/${key}`)).message)));
-      citations.append(button);
-    });
-    wrapper.append(citations);
+    const entry = node("section", `chat-entry ${event.type === "user" ? "user" : event.type === "answer" ? "answer" : event.type === "state" ? "state" : "execution"}`);
+    if (["user", "answer", "state", "user_action", "progress"].includes(event.type)) entry.append(node("div", event.type === "answer" ? "answer-text" : "", event.text));
+    const group = event.type === "answer" ? groups.get(event.turn_id) : null;
+    if (group) group.results.replaceChildren();
+    const records = [...(group ? group.snapshots.values() : []), ...(event.records || [])];
+    if (records.length) entry.append(recordLinks(records));
+    entries.push(entry);
   }
-  return wrapper;
+  if (!entries.length) {
+    const welcome = node("div", "welcome");
+    welcome.append(node("h2", "", "今天想处理什么？"), node("p", "", "直接提出要求，或添加邮件、通知与已有结果。查资料、分析和起草邮件，都可以在这里继续。"));
+    entries.push(welcome);
+  }
+  history.replaceChildren(...entries);
+  if (forceScroll || nearBottom) history.scrollTop = history.scrollHeight;
+  updateControls();
 }
-
-async function loadChat() {
-  const data = await api("/api/chat");
-  $("chat-history").replaceChildren(...data.turns.map(chatTurn));
-  if (!data.turns.length) $("chat-history").append(node("div", "bubble assistant", "先保存一条通知，再问我需要做什么。也可以先告诉我你的个人信息：/记住 我目前正在找实习。"));
-  $("chat-history").scrollTop = $("chat-history").scrollHeight;
+function updateControls() {
+  const active = conversation?.turns.find((turn) => turn.status === "running");
+  $("chat-button").disabled = !conversation || !!active;
+  $("stop-turn").hidden = !active;
+  $("delete-conversation").disabled = !conversation || !!active;
+  $("rename-conversation").disabled = !conversation;
+  $("run-status").hidden = !active;
+  if (active) {
+    const note = active.note.replace(/正在执行：(\w+)/, (_, name) => "正在" + (toolNames[name] || "处理"));
+    $("run-status").textContent = `${note} · 模型调用 ${active.calls} · 已用时 ${Math.max(0, Math.floor((Date.now() - new Date(active.created_at)) / 1000))} 秒`;
+  }
 }
-
-$("import-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  working($("import-button"), async () => {
-    const payload = { source: $("source").value, conversation: $("conversation").value,
-      sender: $("sender").value || "未知", sent_at: new Date($("sent-at").value).toISOString(),
-      message_id: $("message-id").value, text: $("notification-text").value };
-    const result = await api("/api/messages", "POST", payload);
-    offset = 0;
-    await loadMessages();
-    toast(result.created ? "通知已保存，请点击分析。" : "该通知已存在，未重复导入。");
-  });
-});
-
-$("json-file").addEventListener("change", async (event) => {
-  const file = event.target.files[0];
-  if (!file) return;
-  try {
-    if (file.size > 100000) throw new Error("JSON 文件超过本版 100KB 上限。");
-    const input = JSON.parse(await file.text());
-    const batch = Array.isArray(input) ? input : [input];
-    if (!batch.length || batch.length > 20) throw new Error("每批请导入 1～20 条通知。");
-    let created = 0;
-    for (const payload of batch) created += (await api("/api/messages", "POST", payload)).created ? 1 : 0;
-    offset = 0;
-    await loadMessages();
-    toast(`新增 ${created} 条通知，其余已存在。`);
-  } catch (error) {
-    toast("导入未全部完成，之前成功项已保留，可重复导入重试。" + error.message, true);
-    await loadMessages().catch(() => {});
-  } finally { event.target.value = ""; }
-});
-
-$("sample-button").addEventListener("click", () => working($("sample-button"), async () => {
-  const sample = await api("/static/examples.json");
-  for (const payload of sample) await api("/api/messages", "POST", payload);
-  offset = 0;
-  await loadMessages();
-  toast("合成样例已载入，尚未调用模型。");
+function schedulePoll(delay) {
+  clearTimeout(pollTimer);
+  if (!conversation) return;
+  pollTimer = setTimeout(() => poll().catch((error) => { toast(error.message, true); schedulePoll(5000); }), delay || (conversation.turns.some((turn) => turn.status === "running") ? 1500 : 6000));
+}
+async function poll() {
+  if (!conversation) return;
+  const id = conversation.id;
+  const data = await api(`/api/conversations/${id}/events?after=${conversation.events.length}`);
+  if (conversation?.id !== id) return;
+  const wasRunning = conversation.turns.some((turn) => turn.status === "running");
+  conversation.events.push(...data.events); conversation.turns = data.turns; conversation.title = data.title;
+  if (data.events.length) renderConversation(); else updateControls();
+  if (data.live_task) $("run-status").textContent += `\n网页：${data.live_task.data.note} · ${data.live_task.data.steps} 步 / ${data.live_task.data.calls} 次模型调用`;
+  const finished = wasRunning && !data.turns.some((turn) => turn.status === "running");
+  if (finished || data.events.length) await loadList();
+  if (finished) {
+    await loadStatus();
+    if (opened && !draftDirty) await openRecord(opened.ref);
+  }
+  schedulePoll();
+}
+async function loadStatus() {
+  status = await api("/api/status");
+  $("model-status").textContent = `${status.mode === "demo" ? "演示模式 · 未调用真实模型" : status.model} · 今日 ${status.usage.calls}/${status.daily_limit} 次模型调用`;
+  $("settings-status").textContent = `本轮最多 ${status.conversation_budget.calls} 次模型调用（含网页内部调用），${Math.round(status.conversation_budget.seconds / 60)} 分钟；完整上下文上限 ${status.conversation_budget.context_chars} 字符，超出时停止，不自动裁剪。`;
+}
+$("new-conversation").addEventListener("click", () => work($("new-conversation"), newConversation));
+$("rename-conversation").addEventListener("click", () => work($("rename-conversation"), async () => {
+  const title = window.prompt("会话标题", conversation.title);
+  if (!title?.trim()) return;
+  conversation = (await api(`/api/conversations/${conversation.id}`, "PATCH", { title })).conversation;
+  renderConversation(); await loadList();
 }));
-
+$("delete-conversation").addEventListener("click", () => work($("delete-conversation"), async () => {
+  if (!window.confirm("删除此会话及其历史？独立保存的邮件、通知、网页记录和草稿会保留。")) return;
+  await flushDraft();
+  const id = conversation.id;
+  await api(`/api/conversations/${id}`, "DELETE");
+  sessionStorage.removeItem(`composer:${id}`); conversation = null;
+  await loadList();
+  if (conversations.length) await selectConversation(conversations[0].id); else await newConversation();
+}));
+$("chat-input").addEventListener("input", rememberComposer);
+$("chat-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!$("chat-button").disabled) $("chat-form").requestSubmit(); }
+});
 $("chat-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  working($("chat-button"), async () => {
-    const payload = { message: $("chat-input").value };
-    if (selected.size) payload.message_ids = [...selected];
-    await api("/api/chat", "POST", payload);
-    $("chat-input").value = "";
-    await Promise.all([loadChat(), loadStatus()]);
-    const memory = await api("/api/memory");
-    // Refresh server changes without overwriting unsaved local edits.
-    refreshMemory(memory);
+  work($("chat-button"), async () => {
+    await flushDraft();
+    const refs = new Map([...selection.values()].map((item) => [refKey(item.ref), simpleRef(item.ref)]));
+    if (opened && $("use-open-record").checked) refs.set(refKey(opened.ref), simpleRef(opened.ref));
+    const id = conversation.id;
+    const result = await api(`/api/conversations/${id}/turns`, "POST", { message: $("chat-input").value, records: [...refs.values()] });
+    if (conversation?.id !== id) return;
+    conversation = result.conversation; selection.clear(); $("chat-input").value = "";
+    rememberComposer(); renderSelection(); renderConversation(true); await loadList(); schedulePoll(100);
   });
 });
-
-document.querySelectorAll(".memory-form").forEach((form) => {
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const kind = form.dataset.kind;
-    working(form.querySelector("button"), async () => {
-      const content = $(kind + "-text").value;
-      const memory = await api(`/api/memory/${kind}`, "PUT", { content });
-      savedMemory[kind] = memory[kind];
-      if ($(kind + "-text").value === content) $(kind + "-text").value = memory[kind];
-      toast("已保存并立即生效；旧通知不会自动重新分析。");
-    });
-  });
-});
-
-document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
-  document.querySelectorAll(".tab").forEach((item) => {
-    const active = item === tab;
-    item.classList.toggle("active", active);
-    item.setAttribute("aria-selected", String(active));
-  });
-  $("notifications-panel").hidden = tab.dataset.tab !== "notifications";
-  $("memory-panel").hidden = tab.dataset.tab !== "memory";
-  $("tasks-panel").hidden = tab.dataset.tab !== "tasks";
-  $("mail-panel").hidden = tab.dataset.tab !== "mail";
+$("stop-turn").addEventListener("click", () => work($("stop-turn"), async () => {
+  const turn = conversation.turns.find((item) => item.status === "running");
+  if (turn) { conversation = (await api(`/api/conversations/${conversation.id}/turns/${turn.id}/cancel`, "POST", {})).conversation; updateControls(); schedulePoll(100); }
 }));
-$("refresh-button").addEventListener("click", () => working($("refresh-button"), () => Promise.all([loadMessages(), loadStatus()])));
-$("previous-page").addEventListener("click", async () => { offset = Math.max(0, offset - pageSize); await loadMessages().catch((e) => toast(e.message, true)); });
-$("next-page").addEventListener("click", async () => { offset += pageSize; await loadMessages().catch((e) => toast(e.message, true)); });
-$("close-dialog").addEventListener("click", () => $("source-dialog").close());
 
-const current = new Date();
-$("sent-at").value = new Date(current.getTime() - current.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-Promise.all([loadMessages(), loadStatus(), loadTasks(), loadChat(), loadMail(), loadDrafts(), api("/api/memory").then(refreshMemory)])
-  .catch((error) => toast(error.message, true));
-
-function mailSource(record) {
-  $("source-meta").textContent = `${record.subject} · 发件人 ${record.sender} · 邮件日期 ${record.date_raw || "未知"} · 同步 ${formatTime(record.synced_at)}`;
-  $("source-body").textContent = record.text || "暂无可读取文字。";
-  $("source-attachments").textContent = `附件未分析：${record.attachments.join("、") || "未发现"}。${record.body_truncated ? "正文超过大小限制，内容不完整。" : "聊天原时间不能由邮件转发日期替代。"}`;
-  $("source-id").textContent = record.id;
-  $("source-dialog").showModal();
+async function showPicker(manage = false) {
+  pickerSelection = new Map(selection); pickerOffset = 0;
+  $("records-title").textContent = manage ? "资料管理" : "添加资料";
+  $("records-dialog").showModal(); await searchRecords();
 }
+async function searchRecords() {
+  const sequence = ++pickerSequence;
+  $("record-results").replaceChildren(node("p", "caption", "正在读取资料…"));
+  const query = new URLSearchParams({ kind: $("record-kind").value, query: $("record-query").value, offset: pickerOffset, limit: 20 });
+  const data = await api(`/api/records?${query}`);
+  if (sequence !== pickerSequence) return;
+  const rows = data.records.map((record) => {
+    const row = node("div", "picker-row"), label = node("label"), check = document.createElement("input"), description = node("span", "record-description");
+    check.type = "checkbox"; check.checked = pickerSelection.has(refKey(record.ref));
+    check.setAttribute("aria-label", `选择${record.title}`);
+    check.addEventListener("change", () => { check.checked ? pickerSelection.set(refKey(record.ref), record) : pickerSelection.delete(refKey(record.ref)); });
+    description.append(node("strong", "", record.title), node("small", "", `${names[record.ref.kind]} · ${record.sender || statusNames[record.status] || record.status} · ${formatTime(record.updated_at)}`));
+    label.append(check, description); row.append(label, button("预览", () => previewRecord(record.ref))); return row;
+  });
+  if (!rows.length) rows.push(node("p", "caption", "没有匹配的已保存资料。可以保存通知、新建草稿，或先同步邮件。"));
+  $("record-results").replaceChildren(...rows);
+  $("records-page").textContent = `共 ${data.total} 项${data.total ? ` · ${pickerOffset + 1}–${Math.min(pickerOffset + 20, data.total)}` : ""}`;
+  $("records-previous").disabled = pickerOffset === 0; $("records-next").disabled = pickerOffset + 20 >= data.total;
+}
+async function previewRecord(ref) {
+  const data = await api(`/api/records/${ref.kind}/${ref.id}`);
+  previewRef = ref; $("preview-title").textContent = data.record.title;
+  const value = data.record.data;
+  $("preview-content").textContent = value.original?.text || value.text || value.body || value.content || JSON.stringify(value.result || value, null, 2);
+  $("preview-dialog").showModal();
+}
+$("add-records").addEventListener("click", () => work($("add-records"), () => showPicker()));
+$("manage-records").addEventListener("click", () => work($("manage-records"), () => showPicker(true)));
+$("close-picker").addEventListener("click", () => $("records-dialog").close());
+$("close-preview").addEventListener("click", () => $("preview-dialog").close());
+$("preview-open").addEventListener("click", () => work($("preview-open"), async () => {
+  $("preview-dialog").close(); $("records-dialog").close(); await openRecord(previewRef);
+}));
+$("record-search").addEventListener("submit", (event) => { event.preventDefault(); pickerOffset = 0; work(event.submitter, searchRecords); });
+$("record-kind").addEventListener("change", () => { pickerOffset = 0; searchRecords().catch((error) => toast(error.message, true)); });
+$("records-previous").addEventListener("click", () => work($("records-previous"), async () => { pickerOffset = Math.max(0, pickerOffset - 20); await searchRecords(); }));
+$("records-next").addEventListener("click", () => work($("records-next"), async () => { pickerOffset += 20; await searchRecords(); }));
+$("picker-add").addEventListener("click", () => { selection = new Map(pickerSelection); renderSelection(); rememberComposer(); $("records-dialog").close(); $("chat-input").focus(); });
+$("new-draft").addEventListener("click", () => work($("new-draft"), async () => {
+  await flushDraft();
+  const result = await api("/api/drafts", "POST", { source: { kind: "manual", keys: [] } }, true);
+  $("records-dialog").close(); await openRecord({ kind: "draft", id: result.draft.id }); await poll();
+}));
+$("open-notification-import").addEventListener("click", () => $("notification-dialog").showModal());
+$("close-notification-import").addEventListener("click", () => $("notification-dialog").close());
+$("import-form").addEventListener("submit", (event) => {
+  event.preventDefault(); work(event.submitter, async () => {
+    const result = await api("/api/messages", "POST", { conversation: $("notification-conversation").value, text: $("notification-text").value, sent_at: new Date($("sent-at").value).toISOString() });
+    const data = await api(`/api/records/notification/${result.message.id}`);
+    addSelected(data.record); $("notification-dialog").close(); $("records-dialog").close(); toast("通知已保存并添加，尚未分析。");
+  });
+});
+$("json-file").addEventListener("change", async (event) => {
+  const file = event.target.files[0]; if (!file) return;
+  try {
+    if (file.size > 100000) throw new Error("JSON 文件请小于100KB。");
+    const input = JSON.parse(await file.text()), batch = Array.isArray(input) ? input : [input];
+    if (!batch.length || batch.length > 20) throw new Error("每批导入1～20条通知。");
+    for (const item of batch) await api("/api/messages", "POST", item);
+    await searchRecords(); toast("通知已保存，尚未分析。");
+  } catch (error) { toast(`导入未全部完成，已成功项保留：${error.message}`, true); }
+  finally { event.target.value = ""; }
+});
 
-function mailCard(record) {
-  const card = node("article", "message-card");
-  card.append(node("h3", "", record.subject), node("p", "caption", `${record.sender || "未知发件人"} · ${record.date_raw || "日期未知"}${record.self_forwarded_candidate ? " · 疑似自己转发（不证明每位发言人是你）" : ""}`));
-  if (record.triage) card.append(node("p", "notice", `${record.triage.decision}：${record.triage.reason}`));
-  if (record.error) card.append(node("p", "notice", record.error));
-  if (record.analysis) {
-    card.append(node("p", "summary-text", record.analysis.summary));
-    card.append(node("p", "caption", `仅分析邮件文字；附件和链接页面尚未覆盖。${record.body_truncated ? "正文受大小限制截断。" : ""}`));
-    for (const text of record.analysis.uncertainties) card.append(node("p", "caption", `待确认：${text}`));
-    for (const link of record.analysis.link_requests) {
-      card.append(node("p", "caption", `建议查看：${link.url}；${link.reason}`));
-      const browse = node("button", "quiet", "到网页任务确认此链接");
-      browse.addEventListener("click", () => {
-        $("task-url").value = link.url;
-        $("task-limit-domains").checked = false;
-        $("task-domains").value = ""; $("task-resources").value = ""; $("task-blocked-urls").value = ""; $("task-read-exceptions").value = "";
-        $("task-public-request").value = "读取这个公开链接，整理页面中的重要事项与原文来源。不要填写个人信息。";
-        $("task-profile-supplement").value = "";
-        $("task-request").value = "";
-        $("task-public-confirm").checked = false;
-        document.querySelector('[data-tab="tasks"]').click();
-        toast("请检查链接（尤其参数中的私有令牌）和公开说明，确认访问范围后再开始。不会自动访问。");
-      });
-      card.append(browse);
+function safeLink(url, text) {
+  try { const parsed = new URL(url); if (parsed.protocol !== "https:" || parsed.username || parsed.password) return node("span", "", text); }
+  catch (_) { return node("span", "", text); }
+  const link = node("a", "", text); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
+}
+function section(title, text) { const element = node("section", "result-section"); element.append(node("h3", "", title), node("p", "", text)); return element; }
+function hideRecord() {
+  opened = null; draft = null; draftDirty = false; clearTimeout(draftTimer);
+  $("record-panel").hidden = true; $("focus-record-label").hidden = true;
+}
+async function openRecord(ref) {
+  await flushDraft();
+  const sequence = ++recordSequence;
+  const data = await api(`/api/records/${ref.kind}/${ref.id}`);
+  if (sequence !== recordSequence) return;
+  opened = data.record; draft = ref.kind === "draft" ? data.detail : null;
+  $("record-panel").hidden = false; $("focus-record-label").hidden = false; $("use-open-record").checked = true;
+  $("record-title").textContent = opened.title;
+  $("record-meta").textContent = `${names[ref.kind]} · ${statusNames[opened.status] || opened.status} · ${formatTime(opened.updated_at)}`;
+  $("record-content").replaceChildren(); $("draft-form").hidden = !draft;
+  if (draft) {
+    if (opened.source_refs.length) {
+      $("record-content").append(node("p", "caption", "草稿来源"));
+      for (const source of opened.source_refs) $("record-content").append(button(`查看来源${names[source.kind]}`, () => openRecord(source)));
     }
+    renderDraft(); return;
   }
-  const mailFollowup = followupBox("mail", record.id, loadMail);
-  if (mailFollowup) card.append(mailFollowup);
-  for (const [index, update] of record.profile_updates.entries()) {
-    const layer = update.visibility === "public_search" ? "公开检索画像" : "私人画像";
-    card.append(node("p", "notice", `${layer}${update.applied ? "已补充" : "建议待确认"}：${update.text}；${update.reason}`));
-    card.append(node("p", "caption", `来源：${update.evidence}`));
-    if (!update.applied) {
-      const confirm = node("button", "quiet", "确认属于我并保存画像");
-      confirm.addEventListener("click", () => working(confirm, async () => {
-        await api(`/api/mail/${record.id}/profile/${index}/confirm`, "POST", {});
-        await loadMail(); refreshMemory(await api("/api/memory"));
+  const content = $("record-content"), value = opened.data;
+  for (const note of opened.coverage.notes) content.append(node("p", "notice", note));
+  if (ref.kind === "notification" || ref.kind === "mail") {
+    if (value.triage) content.append(section("邮件头初筛建议", `${value.triage.decision}：${value.triage.reason}`));
+    if (value.analysis) {
+      content.append(section("分析", value.analysis.summary));
+      for (const event of value.analysis.events || []) content.append(section(event.title,
+        `${event.time_kind === "deadline" ? "截止" : "时间"}：${event.normalized || event.time_text || "待确认"}\n${event.relevance}\n${event.action}\n原文：${event.evidence}\n${event.uncertainties.join("；")}`));
+      if (value.analysis.actions?.length) content.append(section("行动", value.analysis.actions.join("\n")));
+      if (value.analysis.relevance_reason) content.append(section("相关性", value.analysis.relevance_reason));
+      for (const time of value.analysis.times || []) content.append(section(time.kind === "deadline" ? "截止时间" : "事项时间", `${time.text}${time.normalized ? " · " + formatTime(time.normalized) : " · 精确时间待确认"}`));
+      if (value.analysis.uncertainties?.length) content.append(section("待确认", value.analysis.uncertainties.join("\n")));
+    }
+    content.append(node("h3", "", "原文"), node("pre", "", value.original?.text || value.text || "尚无正文"));
+    for (const [index, update] of (value.profile_updates || []).entries()) {
+      content.append(section(update.applied ? "已补充画像" : "画像建议待确认", `${update.text}\n来源：${update.evidence}\n${update.reason}`));
+      if (!update.applied) content.append(button("确认属于我并保存", async () => {
+        await api(`/api/mail/${ref.id}/profile/${index}/confirm`, "POST", {}, true); await openRecord(ref); await poll();
       }));
-      card.append(confirm);
     }
+  } else if (ref.kind === "task") {
+    if (value.result) {
+      content.append(section("查询结果", value.result.summary));
+      content.append(node("p", "caption", value.result.coverage || value.note));
+      for (const result of [...(value.result.findings || []), ...(value.result.jobs || [])]) {
+        const block = section(result.title || "发现", result.text || result.reason);
+        block.append(safeLink(result.url, "打开原来源"), node("pre", "", result.quote || result.job_evidence || "")); content.append(block);
+      }
+      if (value.result.questions?.length) content.append(section("待确认", value.result.questions.join("\n")));
+    } else content.append(node("p", "notice", value.note));
+    const evidence = node("details"); evidence.append(node("summary", "", "已保存网页证据"));
+    for (const page of data.detail.pages) evidence.append(node("h3", "", `${page.id} · ${page.title}`), safeLink(page.url, page.url), node("pre", "", page.text));
+    content.append(evidence);
+    const logs = node("details"); logs.append(node("summary", "", "浏览动作与诊断"), node("pre", "", JSON.stringify({ actions: data.detail.actions, errors: data.detail.errors }, null, 2))); content.append(logs);
+    if (["running", "queued"].includes(opened.status)) content.append(button("取消网页任务", async () => { await api(`/api/tasks/${ref.id}/cancel`, "POST", {}); await openRecord(ref); }));
+  } else content.append(node("pre", "", value.content));
+}
+$("close-record").addEventListener("click", () => work($("close-record"), async () => { await flushDraft(); hideRecord(); }));
+$("attach-open-record").addEventListener("click", () => { if (opened) { addSelected(opened); toast("已添加到下一条消息。"); } });
+function draftFields() {
+  const split = (name) => $("draft-" + name).value.split(/[,;，；\n]/).map((value) => value.trim()).filter(Boolean);
+  return { to: split("to"), cc: split("cc"), bcc: split("bcc"), subject: $("draft-subject").value, body: $("draft-body").value };
+}
+function updateDraftStatus(text) {
+  if (!draft) return;
+  $("draft-status").textContent = text || `${statusNames[draft.status] || draft.status} · v${draft.version}${draft.send?.detail ? " · " + draft.send.detail : ""}${draft.send?.refused?.length ? " · 被拒收件人：" + draft.send.refused.join("、") : ""}`;
+  $("draft-send").disabled = !status?.capabilities.send_email || !["draft", "failed"].includes(draft.status);
+}
+function renderDraft() {
+  draftDirty = false;
+  draftBaseVersion = draft.version;
+  $("draft-from").value = draft.from;
+  for (const kind of ["to", "cc", "bcc"]) $("draft-" + kind).value = draft[kind].join(", ");
+  $("draft-subject").value = draft.subject; $("draft-body").value = draft.body;
+  const editable = ["draft", "failed"].includes(draft.status);
+  for (const id of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body", "draft-save", "draft-delete"]) $(id).disabled = !editable;
+  updateDraftStatus(); renderRevisions();
+  const cached = sessionStorage.getItem(`draft-input:${draft.id}`);
+  if (cached && editable) {
+    const local = JSON.parse(cached);
+    draftBaseVersion = local.base_version || draft.version;
+    for (const kind of ["to", "cc", "bcc"]) $("draft-" + kind).value = local[kind].join(", ");
+    $("draft-subject").value = local.subject; $("draft-body").value = local.body;
+    draftDirty = true; updateDraftStatus("已恢复未保存的本地输入，请检查后保存。当前服务端 v" + draft.version);
   }
-  const actions = node("div", "card-actions");
-  const read = node("button", "quiet", "只读查看正文");
-  read.addEventListener("click", () => working(read, async () => mailSource((await api(`/api/mail/${record.id}/read`, "POST", {})).mail)));
-  const analyze = node("button", "primary", record.analysis ? "重新分析（调用模型）" : "细读分析（调用模型）");
-  analyze.addEventListener("click", () => working(analyze, async () => {
-    await api(`/api/mail/${record.id}/analyze`, "POST", {});
-    await Promise.all([loadMail(), loadStatus()]); refreshMemory(await api("/api/memory"));
-  }));
-  const draft = node("button", "quiet", record.analysis ? "根据此邮件写邮件" : "用此邮件写草稿");
-  draft.addEventListener("click", () => working(draft, () => createDraftFrom({kind: "mail", keys: [record.id]})));
-  actions.append(read, analyze, draft); card.append(actions);
-  return card;
+  if (!status?.capabilities.send_email) $("draft-status").textContent += " · SMTP 尚未配置";
 }
-
-function draftAddresses(value) {
-  return value.split(/[,，;；\n]+/).map((item) => item.trim()).filter(Boolean);
-}
-
-function draftPayload() {
-  return { version: Number($("draft-version").value), to: draftAddresses($("draft-to").value),
-    cc: draftAddresses($("draft-cc").value), bcc: draftAddresses($("draft-bcc").value),
-    subject: $("draft-subject").value, body: $("draft-body").value };
-}
-
-function draftSourceLabel(source) {
-  const names = { manual: "空白草稿", notifications: "通知", mail: "邮件分析", task: "网页任务" };
-  return `${names[source.kind] || "未知来源"}${source.keys.length ? " · " + source.keys.length + " 项" : ""}；来源只用于生成，不会作为附件发送。`;
-}
-
-function showDraft(draft) {
-  activeDraft = draft;
-  $("draft-id").value = draft?.id || "";
-  $("draft-version").value = draft?.version || "";
-  $("draft-from").value = draft?.from || "";
-  for (const kind of ["to", "cc", "bcc"]) $("draft-" + kind).value = (draft?.[kind] || []).join(", ");
-  $("draft-subject").value = draft?.subject || "";
-  $("draft-body").value = draft?.body || "";
-  $("draft-source").textContent = draft ? draftSourceLabel(draft.source) : "新草稿可以引用通知、邮件分析或网页任务；来源不会作为附件发送。";
-  const labels = { draft: "草稿，尚未发送", sending: "正在发送", sent: "SMTP 已接受邮件", partial: "部分收件人被拒绝，请核对发送记录",
-    failed: "发送失败；修改或重新保存后可再次明确发送", unknown: "发送结果不明；请先在已发送邮件中核查，不能直接重发" };
-  const delivery = draft?.send ? `${draft.send.detail || ""}${draft.send.accepted?.length ? ` · 已接受 ${draft.send.accepted.join("、")}` : ""}${draft.send.refused?.length ? ` · 已拒绝 ${draft.send.refused.join("、")}` : ""}` : "";
-  $("draft-status").textContent = draft ? `${labels[draft.status] || draft.status} · 版本 ${draft.version}${draft.error ? " · " + draft.error : delivery ? " · " + delivery : ""}` : "尚未创建草稿。";
-  const editable = draft && ["draft", "failed"].includes(draft.status);
-  for (const id of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body", "draft-save", "draft-delete", "draft-instruction", "draft-assist"]) $(id).disabled = !editable;
-  $("draft-send").disabled = !draftSendingEnabled || !draft || draft.status !== "draft";
-  const history = $("draft-chat-history");
-  history.replaceChildren();
-  for (const turn of draft?.turns || []) {
-    const wrapper = node("div", "chat-turn");
-    wrapper.append(node("div", "bubble user", turn.user), node("div", "bubble assistant", turn.reply));
-    history.append(wrapper);
-  }
-  if (!draft?.turns?.length) history.append(node("p", "caption", "输入邮件要求后，Kimi 会直接填充可编辑字段。模型只能保存本地草稿，不能发送。"));
-  const revisions = $("draft-revisions");
-  revisions.replaceChildren();
-  const reasons = { created: "创建", manual: "手工修改", assistant: "Kimi 修改", restore: "恢复历史", legacy: "旧数据导入" };
-  for (const revision of [...(draft?.revisions || [])].reverse()) {
+function renderRevisions() {
+  $("draft-revisions").replaceChildren(...[...draft.revisions].reverse().map((revision) => {
     const row = node("div", "revision-row");
-    const description = node("div");
-    const restored = revision.restored_from ? ` · 来源 v${revision.restored_from}` : "";
-    description.append(node("p", "summary-text", `v${revision.version} · ${reasons[revision.reason] || revision.reason}${restored}`),
-      node("p", "caption", `${revision.subject || "（无主题）"} · ${revision.to.join("、") || "未填写收件人"} · ${formatTime(revision.created_at)}`));
-    const restore = node("button", "quiet", revision.version === draft.version ? "当前版本" : "恢复此版本");
-    restore.type = "button";
-    restore.disabled = revision.version === draft.version;
-    restore.addEventListener("click", () => working(restore, async () => {
-      const response = await api(`/api/drafts/${draft.id}/restore`, "POST",
-        {version: draft.version, target_version: revision.version});
-      activeDraft = response.draft;
-      await loadDrafts(activeDraft.id);
-      toast(`已基于 v${revision.version} 创建新的当前版本，原历史仍保留。`);
-    }));
-    row.append(description, restore); revisions.append(row);
-  }
-  if (!draft) revisions.append(node("p", "caption", "选择草稿后显示该邮件的版本历史。"));
-}
-
-function renderDeliveries(records) {
-  const list = $("delivery-list");
-  list.replaceChildren();
-  const labels = { sending: "发送中", sent: "已发送", partial: "部分发送", unknown: "结果不明" };
-  for (const draft of records) {
-    const card = node("article", "delivery-card");
-    const top = node("div", "card-top");
-    top.append(node("h3", "", draft.subject || "（无主题）"), node("span", "tag", labels[draft.status] || draft.status));
-    card.append(top,
-      node("p", "caption", `收件人：${draft.to.join("、") || "无"}${draft.cc.length ? " · 抄送：" + draft.cc.join("、") : ""}${draft.bcc.length ? " · 密送：" + draft.bcc.join("、") : ""}`),
-      node("p", "caption", `${draft.send?.completed_at ? formatTime(draft.send.completed_at) : formatTime(draft.updated_at)} · v${draft.version} · ${draft.send?.detail || "等待发送结果"}`));
-    if (draft.send?.accepted?.length) card.append(node("p", "reason", "SMTP 已接受：" + draft.send.accepted.join("、")));
-    if (draft.send?.refused?.length) card.append(node("p", "notice", "SMTP 已拒绝：" + draft.send.refused.join("、")));
-    const details = node("details");
-    details.append(node("summary", "", "查看发送内容"), node("p", "caption", "发件账号：" + draft.from),
-      node("pre", "", draft.body || "（空正文）"));
-    card.append(details); list.append(card);
-  }
-  if (!records.length) list.append(node("p", "caption", "尚无发送记录。只有点击发送后才会出现在这里。"));
-}
-
-async function loadDrafts(preferred) {
-  const sequence = ++draftLoadSequence;
-  const data = await api("/api/drafts");
-  if (sequence !== draftLoadSequence) return;
-  draftSendingEnabled = data.enabled;
-  const drafts = data.drafts.filter((draft) => ["draft", "failed"].includes(draft.status));
-  const deliveries = data.drafts.filter((draft) => ["sending", "sent", "partial", "unknown"].includes(draft.status));
-  const chosen = drafts.find((draft) => draft.id === (preferred || activeDraft?.id)) || drafts[0] || null;
-  showDraft(chosen);
-  const list = $("draft-list");
-  list.replaceChildren();
-  for (const draft of drafts) {
-    const button = node("button", `quiet draft-choice${draft.id === chosen?.id ? " selected" : ""}`,
-      `${draft.subject || "（无主题）"} · ${draft.status === "failed" ? "发送失败，可继续修改" : "草稿"} · 更新于 ${formatTime(draft.updated_at)}`);
-    button.type = "button";
-    button.setAttribute("aria-pressed", draft.id === chosen?.id ? "true" : "false");
-    button.addEventListener("click", () => working(button, () => loadDrafts(draft.id)));
-    list.append(button);
-  }
-  if (!drafts.length) list.append(node("p", "caption", "尚无可编辑草稿。可以新建，或从通知、邮件、网页任务创建。"));
-  renderDeliveries(deliveries);
-  if (!data.enabled) $("draft-status").textContent += " SMTP 尚未配置；可以编辑草稿，但不能发送。";
-}
-
-async function saveActiveDraft() {
-  if (!activeDraft) throw new Error("请先新建草稿。");
-  const response = await api(`/api/drafts/${activeDraft.id}`, "PUT", draftPayload());
-  activeDraft = response.draft;
-  await loadDrafts(activeDraft.id);
-  return activeDraft;
-}
-
-$("draft-new").addEventListener("click", () => working($("draft-new"), () => createDraftFrom({kind: "manual", keys: []})));
-$("draft-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  working($("draft-save"), async () => {
-    const before = activeDraft?.version;
-    await saveActiveDraft();
-    toast(activeDraft.version === before ? "没有检测到邮件内容变化，未创建新版本。" : `修改已保存为 v${activeDraft.version}。`);
-  });
-});
-$("draft-assist-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  working($("draft-assist"), async () => {
-    const instruction = $("draft-instruction").value;
-    await saveActiveDraft();
-    const response = await api(`/api/drafts/${activeDraft.id}/assist`, "POST",
-      {version: activeDraft.version, instruction});
-    $("draft-instruction").value = "";
-    activeDraft = response.draft;
-    await Promise.all([loadDrafts(activeDraft.id), loadStatus()]);
-  });
-});
-$("draft-send").addEventListener("click", () => working($("draft-send"), async () => {
-  await saveActiveDraft();
-  const response = await api(`/api/drafts/${activeDraft.id}/send`, "POST", {version: activeDraft.version});
-  const sent = response.draft;
-  activeDraft = null;
-  await loadDrafts();
-  toast(sent.status === "sent" ? "SMTP 服务器已接受邮件，已移入发送记录。" : "发送未完整成功，请查看发送记录。", sent.status !== "sent");
-}));
-$("draft-delete").addEventListener("click", () => {
-  if (!activeDraft) return;
-  const subject = activeDraft.subject || "（无主题）";
-  pendingDraftDelete = { id: activeDraft.id, version: activeDraft.version, subject };
-  $("draft-delete-message").textContent = `将永久删除草稿“${subject}”。`;
-  $("draft-delete-dialog").showModal();
-});
-function cancelDraftDelete() {
-  pendingDraftDelete = null;
-  $("draft-delete-dialog").close();
-}
-$("draft-delete-cancel").addEventListener("click", cancelDraftDelete);
-$("draft-delete-dialog").addEventListener("cancel", () => { pendingDraftDelete = null; });
-$("draft-delete-confirm").addEventListener("click", () => {
-  if (!pendingDraftDelete) return;
-  const deleting = pendingDraftDelete;
-  pendingDraftDelete = null;
-  $("draft-delete-dialog").close();
-  working($("draft-delete-confirm"), async () => {
-    await api(`/api/drafts/${deleting.id}`, "DELETE", {version: deleting.version});
-    if (activeDraft?.id === deleting.id) activeDraft = null;
-    await loadDrafts();
-    (activeDraft ? $("draft-subject") : $("draft-new")).focus();
-    toast("草稿及其版本历史已永久删除。");
-  });
-});
-
-async function loadMail() {
-  const [data, sessions] = await Promise.all([api("/api/mail"), api("/api/followups")]);
-  followups = sessions;
-  const status = data.status;
-  $("mail-status").textContent = status.enabled ? `${status.started ? "新邮件同步已启用" : "尚未启用；不会读取历史"} · 检查间隔 ${status.poll_seconds} 秒 · ${status.error || "后台不调用模型"}` : "未配置：在私有 .env 填写 QQ_IMAP_USER、QQ_IMAP_AUTH_CODE 和 ASSISTANT_ACCESS_TOKEN，重启后启用。不要把授权码贴到网页/聊天。";
-  $("mail-start").disabled = !status.enabled || status.started;
-  $("mail-sync").disabled = !status.enabled || !status.started;
-  $("mail-latest").disabled = !status.enabled;
-  $("mail-triage").disabled = !status.enabled;
-  $("mail-count").textContent = `已保存 ${data.total} 封；显示最近100封，不含启用前历史。`;
-  $("mail-list").replaceChildren(...data.mails.map(mailCard));
-  if (!data.mails.length) $("mail-list").append(node("p", "caption", "启用同步后发送一封新测试邮件，再点击同步。"));
-  const table = node("table");
-  const head = node("thead"), row = node("tr");
-  for (const label of ["事项", "重要性 / 相关性", "时间类型 / 时间", "需要做什么", "出处 / 待确认"]) row.append(node("th", "", label));
-  head.append(row); table.append(head);
-  const body = node("tbody");
-  for (const mail of data.mails) for (const event of mail.analysis?.events || []) {
-    const line = node("tr");
-    const kind = { deadline: "截止", event: "活动", other: "其他/未知" }[event.time_kind];
-    for (const value of [event.title, `${event.importance}：${event.relevance}`, `${kind}：${event.normalized || event.time_text || "待确认"}`, event.action || "无需动作", `${mail.subject}\n原文：${event.evidence}\n${event.uncertainties.join("；")}`]) line.append(node("td", "", value));
-    body.append(line);
-  }
-  table.append(body); $("mail-events").replaceChildren(table);
-  if (!body.children.length) $("mail-events").append(node("p", "caption", "分析后显示事件；尚未分析不代表没有重要事项。"));
-}
-
-for (const [id, path] of [["mail-start", "start"], ["mail-sync", "sync"], ["mail-triage", "triage"]]) {
-  $(id).addEventListener("click", () => working($(id), async () => {
-    await api(`/api/mail/${path}`, "POST", {}); await Promise.all([loadMail(), loadStatus()]);
+    row.append(node("span", "", `v${revision.version} · ${revision.subject || "无主题"} · ${formatTime(revision.created_at)}`));
+    const restore = button(revision.version === draft.version ? "当前版本" : "恢复", async () => {
+      await flushDraft();
+      const result = await api(`/api/drafts/${draft.id}/restore`, "POST", { version: draft.version, target_version: revision.version }, true);
+      await openRecord({ kind: "draft", id: result.draft.id }); await poll();
+    });
+    restore.disabled = revision.version === draft.version || !["draft", "failed"].includes(draft.status);
+    row.append(restore); return row;
   }));
 }
-$("mail-latest").addEventListener("click", () => working($("mail-latest"), async () => {
-  if (!window.confirm("只读导入收件箱最新一封邮件（可能是历史邮件），不自动调用模型、不改变新邮件同步基线。继续？")) return;
-  await api("/api/mail/latest", "POST", {confirm: true});
-  await loadMail();
+async function flushDraft() {
+  clearTimeout(draftTimer);
+  // Serialize autosaves; content typed during an in-flight save remains in the editor.
+  const pending = saveQueue.catch(() => {}).then(async () => {
+    if (!draft || !draftDirty) return;
+    const id = draft.id, fields = draftFields(), encoded = JSON.stringify(fields);
+    updateDraftStatus("保存中…");
+    try {
+      const result = await api(`/api/drafts/${id}`, "PUT", { version: draftBaseVersion, ...fields }, true);
+      if (draft?.id !== id) return;
+      draft = result.draft;
+      draftBaseVersion = draft.version;
+      opened = { ...opened, ref: { ...opened.ref, version: draft.version }, title: draft.subject || "（无主题草稿）" };
+      $("record-title").textContent = opened.title;
+      draftDirty = JSON.stringify(draftFields()) !== encoded;
+      if (!draftDirty) sessionStorage.removeItem(`draft-input:${id}`);
+      else sessionStorage.setItem(`draft-input:${id}`, JSON.stringify({ ...draftFields(), base_version: draftBaseVersion }));
+      updateDraftStatus(draftDirty ? "仍有修改待保存" : `已保存 · v${draft.version}`); renderRevisions();
+    } catch (error) { updateDraftStatus(`保存失败，本地输入保留：${error.message}`); throw error; }
+  });
+  saveQueue = pending;
+  await pending;
+  if (draftDirty) return flushDraft();
+}
+for (const id of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body"]) $(id).addEventListener("input", () => {
+  draftDirty = true; sessionStorage.setItem(`draft-input:${draft.id}`, JSON.stringify({ ...draftFields(), base_version: draftBaseVersion }));
+  updateDraftStatus("未保存修改"); clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => flushDraft().catch((error) => toast(error.message, true)), 800);
+});
+$("draft-form").addEventListener("submit", (event) => { event.preventDefault(); work($("draft-save"), async () => { await flushDraft(); await poll(); }); });
+$("draft-send").addEventListener("click", () => work($("draft-send"), async () => {
+  if (draft.status === "failed") draftDirty = true;
+  await flushDraft();
+  const id = draft.id, conversationId = conversation.id;
+  for (const field of ["draft-to", "draft-cc", "draft-bcc", "draft-subject", "draft-body", "draft-save"]) $(field).disabled = true;
+  updateDraftStatus("正在发送当前版本…"); $("draft-send").disabled = true;
+  try {
+    const result = await api(`/api/drafts/${id}/send`, "POST", { version: draft.version }, true);
+    if (conversation?.id === conversationId && draft?.id === id) await openRecord({ kind: "draft", id });
+    await poll();
+    toast(result.draft.status === "sent" ? "SMTP 已接受邮件。" : "请核对面板中的发送结果。", result.draft.status !== "sent");
+  } catch (error) { if (draft?.id === id) renderDraft(); throw error; }
 }));
-$("mail-refresh").addEventListener("click", () => working($("mail-refresh"), loadMail));
-$("logout-button")?.addEventListener("click", async () => { await api("/api/logout", "POST", {}); window.location.assign("/login"); });
+$("draft-copy").addEventListener("click", () => work($("draft-copy"), async () => {
+  await flushDraft(); const result = await api(`/api/drafts/${draft.id}/copy`, "POST", {}, true);
+  await openRecord({ kind: "draft", id: result.draft.id }); await poll(); toast("已复制为独立草稿。");
+}));
+$("draft-delete").addEventListener("click", () => work($("draft-delete"), async () => {
+  if (!window.confirm("永久删除此草稿及全部版本？会话历史快照保留，发送记录不受影响。")) return;
+  await flushDraft(); const id = draft.id;
+  await api(`/api/drafts/${id}`, "DELETE", { version: draft.version }, true);
+  sessionStorage.removeItem(`draft-input:${id}`); hideRecord(); await poll();
+}));
+$("draft-reload").addEventListener("click", () => work($("draft-reload"), async () => {
+  if (draftDirty && !window.confirm("放弃未保存的本地修改，重新载入服务端当前版本？")) return;
+  clearTimeout(draftTimer); const ref = opened.ref;
+  sessionStorage.removeItem(`draft-input:${draft.id}`); draftDirty = false; await saveQueue.catch(() => {}); await openRecord(ref);
+}));
+window.addEventListener("beforeunload", (event) => { rememberComposer(); if (draftDirty) { event.preventDefault(); event.returnValue = ""; } });
+
+async function loadMailStatus() {
+  const data = (await api("/api/mail")).status;
+  $("mail-status").textContent = !data.enabled ? "未配置 QQ 邮箱。请在 .env 设置账号、IMAP授权码和访问口令。" : `${data.started ? "已启用新邮件同步" : "未启用同步"} · ${data.poll_seconds}秒检查一次${data.error ? " · " + data.error : ""}`;
+  $("mail-start").disabled = !data.enabled || data.started; $("mail-sync").disabled = !data.enabled || !data.started; $("mail-latest").disabled = !data.enabled;
+}
+$("open-settings").addEventListener("click", () => work($("open-settings"), async () => {
+  const [memory] = await Promise.all([api("/api/memory"), loadStatus(), loadMailStatus()]);
+  for (const kind of ["public_profile", "profile", "rules"]) $(kind + "-text").value = memory[kind];
+  $("settings-dialog").showModal();
+}));
+$("close-settings").addEventListener("click", () => $("settings-dialog").close());
+for (const form of document.querySelectorAll(".memory-form")) form.addEventListener("submit", (event) => {
+  event.preventDefault(); work(event.submitter, async () => {
+    const kind = form.dataset.kind; await api(`/api/memory/${kind}`, "PUT", { content: $(kind + "-text").value }, true);
+    toast("已保存并记录变更，旧分析不自动重算。"); await poll();
+  });
+});
+for (const form of document.querySelectorAll(".memory-form")) {
+  const history = node("div", "memory-history-list"), kind = form.dataset.kind;
+  form.append(button("查看修改历史", async () => {
+    if (history.childElementCount) { history.replaceChildren(); return; }
+    const data = await api(`/api/memory/${kind}/history`);
+    const rows = data.revisions.map((revision) => {
+      const row = node("details");
+      row.append(node("summary", "", formatTime(revision.created_at)), node("p", "caption", "变更前"), node("pre", "", revision.before || "（空）"), node("p", "caption", "变更后"), node("pre", "", revision.after || "（空）"));
+      if (revision.source?.user_quote) row.append(node("p", "caption", "用户原话：" + revision.source.user_quote));
+      row.append(button("恢复到变更前", async () => {
+        if (!window.confirm("将当前内容替换为这里展示的变更前内容，之后的修改也会被覆盖。继续？")) return;
+        await api(`/api/memory/${kind}`, "PUT", { content: revision.before }, true);
+        $(kind + "-text").value = revision.before; history.replaceChildren(); toast("已恢复，原变更历史保留。"); await poll();
+      }));
+      return row;
+    });
+    history.replaceChildren(...(rows.length ? rows : [node("p", "caption", "尚无修改历史。") ]));
+  }), history);
+}
+for (const [id, path] of [["mail-start", "start"], ["mail-sync", "sync"]]) $(id).addEventListener("click", () => work($(id), async () => {
+  await api(`/api/mail/${path}`, "POST", {}); await loadMailStatus(); toast("操作完成，后台不会自动分析。");
+}));
+$("mail-latest").addEventListener("click", () => work($("mail-latest"), async () => {
+  if (!window.confirm("只读导入收件箱最新一封邮件（可能是历史邮件），不改变新邮件同步范围、不自动分析。继续？")) return;
+  await api("/api/mail/latest", "POST", { confirm: true }); toast("最新一封邮件已保存，可从添加资料中选择。");
+}));
+$("logout-button")?.addEventListener("click", () => work($("logout-button"), async () => {
+  await flushDraft(); await api("/api/logout", "POST", {}); window.location.assign("/login");
+}));
+const currentTime = new Date();
+$("sent-at").value = new Date(currentTime.getTime() - currentTime.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+(async () => {
+  await Promise.all([loadStatus(), loadList()]);
+  const previous = localStorage.getItem("current-conversation");
+  const chosen = conversations.find((item) => item.id === previous) || conversations[0];
+  if (chosen) await selectConversation(chosen.id); else await newConversation();
+})().catch((error) => toast(error.message, true));
