@@ -89,8 +89,21 @@ class Drafts:
     def _source(value):
         if value is None:
             return {"kind": "manual", "keys": []}
-        if not isinstance(value, dict) or value.get("kind") not in {"manual", "mail", "task", "notifications"}:
+        if not isinstance(value, dict) or value.get("kind") not in {"manual", "mail", "task", "notifications", "records"}:
             raise AssistantError("草稿来源无效。")
+        if value["kind"] == "records":
+            refs = value.get("refs")
+            if not isinstance(refs, list) or len(refs) > 30:
+                raise AssistantError("草稿来源必须是不超过30项的资料引用。")
+            checked = []
+            for ref in refs:
+                if (not isinstance(ref, dict) or ref.get("kind") not in {"mail", "notification", "task", "draft", "memory"}
+                        or not isinstance(ref.get("id"), str)):
+                    raise AssistantError("草稿来源引用无效。")
+                reference = {"kind": ref["kind"], "id": ref["id"]}
+                if reference not in checked:
+                    checked.append(reference)
+            return {"kind": "records", "keys": [], "refs": checked}
         keys = value.get("keys", [])
         if (not isinstance(keys, list) or len(keys) > 10
                 or any(not isinstance(key, str) or len(key) > 128 for key in keys)):
@@ -99,14 +112,14 @@ class Drafts:
             raise AssistantError("邮件或网页任务草稿必须绑定一个来源。")
         return {"kind": value["kind"], "keys": list(dict.fromkeys(keys))}
 
-    def create(self, payload):
+    def create(self, payload, *, origin=None):
         if not isinstance(payload, dict):
             raise AssistantError("草稿请求必须是 JSON 对象。")
         fields = validate_fields(payload, self.config.qq_imap_user)
         source = self._source(payload.get("source"))
         # Resolve now so a forged or stale source is rejected before it is saved.
         self._context(source)
-        return self.store.create_draft(fields, source)
+        return self.store.create_draft(fields, source, origin=origin)
 
     def update(self, key, payload):
         if not isinstance(payload, dict) or type(payload.get("version")) is not int:
@@ -132,6 +145,10 @@ class Drafts:
 
     def _context(self, source):
         kind, keys = source["kind"], source["keys"]
+        if kind == "records":
+            from .records import Records
+            records = Records(self.service, self.mail)
+            return {"kind": kind, "records": [records.read(ref) for ref in source["refs"]]}
         if kind == "manual":
             return {"kind": kind}
         if kind == "notifications":

@@ -71,7 +71,7 @@ class Store:
         self._closed = False
         for directory in (self.root, self.root / "messages", self.root / "memory",
                           self.root / "memory" / "history", self.root / "tasks",
-                          self.root / "drafts"):
+                          self.root / "drafts", self.root / "conversations"):
             if directory.is_symlink():
                 raise AssistantError("数据目录不能是符号链接。", 500)
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -226,7 +226,7 @@ class Store:
         return self.root / "tasks" / f"{key}.json"
 
     def create_task(self, request, portal, mode, memory, limits, scope=None, public_request=None,
-                    private_conditions=None, profile_supplement=""):
+                    private_conditions=None, profile_supplement="", origin=None):
         with self._mutex:
             key = uuid.uuid4().hex
             record = {"schema_version": 2 if scope else 1, "id": key, "request": request, "portal": portal,
@@ -234,6 +234,8 @@ class Store:
                       "created_at": now_iso(), "updated_at": now_iso(), "cancel_requested": False,
                       "calls": 0, "steps": 0, "pages": [], "actions": [], "errors": [], "result": None,
                       "note": "仅限授权的公开网页读取；不登录、不发送或提交。"}
+            if origin:
+                record["origin"] = origin
             if scope:
                 record.update(scope=scope, public_request=public_request, profile_supplement=profile_supplement,
                               phase="browsing", stop_reason="")
@@ -373,7 +375,7 @@ class Store:
                                                "fetched_at": now_iso(), "image": data_url, "masked": True})
             return name
 
-    def update_memory(self, kind, content, append=False):
+    def update_memory(self, kind, content, append=False, *, source=None):
         if kind not in {"public_profile", "profile", "rules"}:
             raise AssistantError("记忆类型必须是 public_profile、profile 或 rules。")
         content = text_field(content, "记忆内容", allow_empty=True)
@@ -387,6 +389,8 @@ class Store:
             revision = uuid.uuid4().hex
             snapshot = {"schema_version": 1, "kind": kind, "before": before,
                         "after": after, "created_at": now_iso()}
+            if source:
+                snapshot["source"] = source
             self._write_json(self.root / "memory" / "history" / f"{revision}.json", snapshot)
             # Durable intent first. On interruption the next startup finishes this update.
             self._write_json(self.root / ".memory-pending.json",
@@ -435,14 +439,62 @@ class Store:
             raise AssistantError("草稿标识无效。")
         return self.root / "drafts" / f"{key}.json"
 
-    def create_draft(self, fields, source):
+    def _conversation_path(self, key):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
+            raise AssistantError("会话标识无效。")
+        return self.root / "conversations" / f"{key}.json"
+
+    def create_conversation(self, title="新对话"):
+        with self._mutex:
+            stamp, key = now_iso(), uuid.uuid4().hex
+            record = {"schema_version": 1, "id": key, "title": text_field(title, "会话标题", 120),
+                      "created_at": stamp, "updated_at": stamp, "turns": [], "events": []}
+            self._write_json(self._conversation_path(key), record)
+            return record
+
+    def get_conversation(self, key):
+        with self._mutex:
+            path = self._conversation_path(key)
+            if not path.exists():
+                raise AssistantError("会话不存在。", 404)
+            record = self._read_json(path)
+            if (record.get("id") != key or not isinstance(record.get("title"), str)
+                    or not isinstance(record.get("events"), list) or not isinstance(record.get("turns"), list)):
+                raise AssistantError("会话记录损坏，不会自动覆盖。", 500)
+            return record
+
+    def list_conversations(self):
+        with self._mutex:
+            records = [self.get_conversation(p.stem) for p in (self.root / "conversations").glob("*.json")]
+            return sorted(records, key=lambda item: item["updated_at"], reverse=True)
+
+    def change_conversation(self, key, change):
+        with self._mutex:
+            record = self.get_conversation(key)
+            change(record)
+            record["updated_at"] = now_iso()
+            self._write_json(self._conversation_path(key), record)
+            return record
+
+    def delete_conversation(self, key):
+        with self._mutex:
+            record = self.get_conversation(key)
+            if any(turn["status"] == "running" for turn in record["turns"]):
+                raise AssistantError("请先停止正在运行的轮次，再删除会话。", 409)
+            self._conversation_path(key).unlink()
+            self._sync_directory(self.root / "conversations")
+
+    def create_draft(self, fields, source, *, origin=None):
         with self._mutex:
             key = uuid.uuid4().hex
             stamp = now_iso()
             record = {"schema_version": 2, "id": key, "version": 1,
                       "status": "draft", "source": source, **fields,
                       "turns": [], "created_at": stamp, "updated_at": stamp,
-                      "send": None, "error": None}
+                      "send": None, "error": None,
+                      "source_refs": copy.deepcopy(source.get("refs", []))}
+            if origin:
+                record["origin"] = origin
             record["revisions"] = [self._draft_revision(record, "created", stamp)]
             self._write_json(self._draft_path(key), record)
             return record

@@ -13,6 +13,8 @@ from .storage import Store
 from .tasks import Tasks
 from .mail import Mail
 from .drafts import Drafts
+from .conversations import Conversations
+from .storage import text_field
 
 
 def create_app(config=None, model=None, browser_factory=None, mail_connector=None, smtp_connector=None):
@@ -31,11 +33,12 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         mail = Mail(service, mail_connector)
         drafts = Drafts(service, mail, smtp_connector)
         followup_agent = FollowupAgent(service, browser_factory, mail)
+        conversations = Conversations(service, tasks, mail, drafts)
     except Exception:
         store.close()
         raise
     app.extensions.update(store=store, service=service, tasks=tasks, mail=mail, drafts=drafts,
-                          followup_agent=followup_agent)
+                          followup_agent=followup_agent, conversations=conversations)
     csrf_token = secrets.token_urlsafe(32)
 
     @app.before_request
@@ -88,6 +91,80 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
             raise AssistantError("请求必须为 JSON 对象。")
         return payload
 
+    def action_conversation():
+        key = request.headers.get("X-Conversation-ID")
+        if key:
+            store.get_conversation(key)
+        return key
+
+    def draft_action(key, label, draft):
+        if key:
+            conversations.record_action(key, label, [conversations.records.read({"kind": "draft", "id": draft["id"]})])
+        return jsonify(draft=draft)
+
+    @app.get("/api/conversations")
+    def conversation_list():
+        return jsonify(conversations=conversations.list())
+
+    @app.post("/api/conversations")
+    def conversation_create():
+        payload = body()
+        return jsonify(conversation=store.create_conversation(payload.get("title", "新对话"))), 201
+
+    @app.get("/api/conversations/<key>")
+    def conversation_detail(key):
+        return jsonify(conversation=store.get_conversation(key))
+
+    @app.patch("/api/conversations/<key>")
+    def conversation_rename(key):
+        title = text_field(body().get("title"), "会话标题", 120)
+        return jsonify(conversation=store.change_conversation(key, lambda record: record.update(title=title)))
+
+    @app.delete("/api/conversations/<key>")
+    def conversation_delete(key):
+        store.delete_conversation(key)
+        return jsonify(deleted=True)
+
+    @app.post("/api/conversations/<key>/turns")
+    def conversation_start(key):
+        return jsonify(**conversations.start(key, body())), 202
+
+    @app.get("/api/conversations/<key>/events")
+    def conversation_events(key):
+        try:
+            after = int(request.args.get("after", 0))
+            if after < 0:
+                raise ValueError()
+        except ValueError:
+            raise AssistantError("事件序号必须为非负整数。") from None
+        record = store.get_conversation(key)
+        turn = next((turn for turn in record["turns"] if turn["status"] == "running"), None)
+        live_task = conversations.records.read({"kind": "task", "id": turn["task_id"]}) if turn and turn.get("task_id") else None
+        return jsonify(events=record["events"][after:], turns=record["turns"], title=record["title"],
+                       updated_at=record["updated_at"], live_task=live_task)
+
+    @app.post("/api/conversations/<key>/turns/<turn_id>/cancel")
+    def conversation_cancel(key, turn_id):
+        return jsonify(conversation=conversations.cancel(key, turn_id))
+
+    @app.get("/api/records")
+    def records_search():
+        try:
+            offset, limit = int(request.args.get("offset", 0)), int(request.args.get("limit", 30))
+        except ValueError:
+            raise AssistantError("分页参数必须为整数。") from None
+        return jsonify(**conversations.records.search(kind=request.args.get("kind", "all"),
+            query=request.args.get("query", ""), offset=offset, limit=limit))
+
+    @app.get("/api/records/<kind>/<key>")
+    def record_detail(kind, key):
+        ref = {"kind": kind, "id": key}
+        snapshot = conversations.records.read(ref, fetch_body=True)
+        raw = conversations.records.raw(ref)
+        if kind == "task":
+            raw = {name: value for name, value in raw.items() if name != "memory"}
+        return jsonify(record=snapshot, detail=raw)
+
     @app.get("/")
     def index():
         return render_template("index.html", csrf_token=csrf_token, auth_enabled=bool(config.access_token))
@@ -132,6 +209,8 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         return jsonify(mode=config.mode, model=config.model if config.mode == "api" else "演示（无真实推理）",
                        usage=store.usage(service.day()), daily_limit=config.daily_calls,
                        timezone=config.timezone, version="0.4.0",
+                       conversation_budget={"calls": config.turn_calls, "seconds": config.turn_seconds,
+                                            "context_chars": config.context_chars},
                        browser_budget={"calls": config.browser_calls, "steps": config.browser_steps,
                                        "seconds": config.browser_seconds,
                                        "effective_calls": min(config.browser_calls, max(0, config.daily_calls - store.usage(service.day())["calls"]))},
@@ -146,8 +225,9 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.post("/api/drafts")
     def draft_create():
+        key = action_conversation()
         with service.operation():
-            return jsonify(draft=drafts.create(body())), 201
+            return draft_action(key, "用户新建草稿", drafts.create(body())), 201
 
     @app.get("/api/drafts/<key>")
     def draft_detail(key):
@@ -155,8 +235,11 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.put("/api/drafts/<key>")
     def draft_update(key):
+        conversation = action_conversation()
         with service.operation():
-            return jsonify(draft=drafts.update(key, body()))
+            before = store.get_draft(key)
+            draft = drafts.update(key, body())
+            return draft_action(conversation if draft != before else None, "用户手工保存草稿", draft)
 
     @app.post("/api/drafts/<key>/assist")
     def draft_assist(key):
@@ -164,20 +247,34 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.post("/api/drafts/<key>/restore")
     def draft_restore(key):
+        conversation = action_conversation()
         with service.operation():
-            return jsonify(draft=drafts.restore(key, body()))
+            return draft_action(conversation, "用户恢复草稿历史版本", drafts.restore(key, body()))
+
+    @app.post("/api/drafts/<key>/copy")
+    def draft_copy(key):
+        conversation = action_conversation()
+        with service.operation():
+            original = store.get_draft(key)
+            copied = drafts.create({**original, "source": {"kind": "records", "refs": [{"kind": "draft", "id": key}]}})
+            return draft_action(conversation, "用户复制为独立草稿", copied), 201
 
     @app.delete("/api/drafts/<key>")
     def draft_delete(key):
+        conversation = action_conversation()
         with service.operation():
-            return jsonify(**drafts.delete(key, body()))
+            result = drafts.delete(key, body())
+            if conversation:
+                conversations.event(conversation, "user_action", text="用户删除草稿：" + key, records=[])
+            return jsonify(**result)
 
     @app.post("/api/drafts/<key>/send")
     def draft_send(key):
+        conversation = action_conversation()
         payload = body()
         if set(payload) != {"version"}:
             raise AssistantError("发送只接受当前草稿版本号。")
-        return jsonify(draft=drafts.send(key, payload["version"]))
+        return draft_action(conversation, "用户点击发送当前草稿版本", drafts.send(key, payload["version"]))
 
     @app.get("/api/mail")
     def mail_list():
@@ -229,9 +326,13 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.post("/api/mail/<key>/profile/<int:index>/confirm")
     def confirm_mail_profile(key, index):
+        conversation = action_conversation()
         if body():
             raise AssistantError("确认画像建议不接受额外参数。")
-        return jsonify(mail=mail.confirm_profile(key, index))
+        record = mail.confirm_profile(key, index)
+        if conversation:
+            conversations.record_action(conversation, "用户确认邮件中的本人画像建议", [conversations.records.read({"kind": "mail", "id": key})])
+        return jsonify(mail=record)
 
     def public_task(task, detail=False):
         # Memory snapshots never need to be sent back with every task-progress poll.
@@ -324,8 +425,12 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
 
     @app.put("/api/memory/<kind>")
     def update_memory(kind):
+        conversation = action_conversation()
         with service.operation():
-            return jsonify(**store.update_memory(kind, body().get("content")))
+            result = store.update_memory(kind, body().get("content"), source={"actor": "user", "conversation_id": conversation})
+            if conversation:
+                conversations.record_action(conversation, "用户编辑画像或规则", [conversations.records.read({"kind": "memory", "id": kind})])
+            return jsonify(**result)
 
     mail.resume()
     return app

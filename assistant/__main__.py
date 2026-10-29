@@ -29,6 +29,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        app.extensions["conversations"].close()
         app.extensions["mail"].close()
         app.extensions["tasks"].close()
         app.extensions["store"].close()

@@ -245,7 +245,7 @@ class Tasks:
                 self.store.update_task(task["id"], status="interrupted", actions=task["actions"],
                                        note="进程中断；未自动继续，可显式重新发起（重新计费）。")
 
-    def start(self, payload):
+    def start(self, payload, *, origin=None, call_limit=None, seconds_limit=None):
         allowed = {"goal", "profile_supplement", "private_conditions", "request", "public_request", "start_url", "domains", "resource_domains", "read_post_urls", "blocked_urls", "read_exceptions", "public_web"}
         if not isinstance(payload, dict) or not {"goal", "request"} & set(payload) or set(payload) - allowed:
             raise AssistantError("任务接受要求、公开查询说明、起始 URL 和授权域，不接受写入权限。")
@@ -279,19 +279,20 @@ class Tasks:
             raise AssistantError("模型客户端未启用工具调用。", 409)
         remaining = max(0, config.daily_calls - self.store.usage(self.service.day())["calls"])
         calls = min(config.browser_calls, remaining) if config.mode == "api" else config.browser_calls
+        if call_limit is not None:
+            calls = min(calls, call_limit)
         if calls < 1:
             raise AssistantError("今日 API 额度已用完；未启动浏览器。", 429)
         with self._lock:
             if self._closed or self._thread is not None and self._thread.is_alive():
                 raise AssistantError("已有网页任务运行中，请等待或取消。", 409)
-            if len(self.store.list_tasks()) >= 100:
-                raise AssistantError("任务已达100条，请先备份并归档。", 409)
             task = self.store.create_task(request, "public_web", config.mode, self.store.memory(),
-                {"calls": calls, "seconds": config.browser_seconds, "steps": config.browser_steps,
+                {"calls": calls, "seconds": min(config.browser_seconds, seconds_limit) if seconds_limit else config.browser_seconds, "steps": config.browser_steps,
                  "pages": config.browser_steps, "details": config.browser_steps}, scope.as_dict(), public_request,
-                 private_conditions=private_conditions, profile_supplement=profile_supplement)
+                 private_conditions=private_conditions, profile_supplement=profile_supplement, origin=origin)
             # Only the newest web task may retain an interactive follow-up.
-            self.service.close_followup("task")
+            if not origin:
+                self.service.close_followup("task")
             self._thread = threading.Thread(target=self._run, args=(task["id"],), daemon=True)
             self._thread.start()
             return task
@@ -656,7 +657,8 @@ class Tasks:
                         reason = result["stop_reason"] or ("模型结束；仅覆盖已验证页面。" if status == "completed" else "任务未完整完成；见诊断与覆盖。")
                         result["outcome"] = status
                         self.store.update_task(key, status=status, result=result, stop_reason=reason, note=reason)
-                        self.service.open_followup("task", key, followup_context(result))
+                        if not task.get("origin"):
+                            self.service.open_followup("task", key, followup_context(result))
                         return
                     image = None
                     def action():
