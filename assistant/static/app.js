@@ -11,6 +11,16 @@ let opened = null, draft = null, draftBaseVersion = null, draftDirty = false, dr
 let editingNotice = null, noticeBaseline = null;
 const noticeTimes = { start_at: "开始时间", end_at: "结束时间", deadline: "截止时间" };
 const noticeTime = (value) => value ? value.length === 10 ? value : formatTime(value) : "待确认";
+const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+function noticeSchedule(value, next) {
+  const rule = value.recurrence;
+  if (!rule) return Object.entries(noticeTimes).filter(([key]) => value[key]).map(([key, label]) => [label, noticeTime(value[key])]);
+  const entries = [["重复", `每周 ${rule.weekdays.map((day) => weekdays[day - 1]).join("、")} ${rule.time}（${rule.timezone}）`]];
+  if (rule.starts_on) entries.push(["生效日期", rule.starts_on]);
+  if (rule.until) entries.push(["最后日期", rule.until]);
+  if (next !== undefined) entries.push(["下次发生", next ? new Date(next).toLocaleString("zh-CN", { timeZone: rule.timezone, hour12: false }) : "循环已结束"]);
+  return entries;
+}
 let loadSequence = 0, pickerSequence = 0, recordSequence = 0;
 const refKey = (ref) => `${ref.kind === "notification" ? "text" : ref.kind}:${ref.id}`;
 const simpleRef = (ref) => ({ kind: ref.kind, id: ref.id });
@@ -315,11 +325,11 @@ async function loadNotices() {
     const card = node("article", "notice-card"), value = record.content;
     card.append(node("h3", "", value.title));
     if (value.summary) card.append(node("p", "notice-excerpt", value.summary));
-    card.append(metadata(Object.entries(noticeTimes).filter(([key]) => value[key]).map(([key, label]) => [label, noticeTime(value[key])])));
-    if (!Object.keys(noticeTimes).some((key) => value[key])) card.append(node("p", "caption", "时间待确认"));
+    card.append(metadata(noticeSchedule(value, record.next_occurrence)));
+    if (!value.recurrence && !Object.keys(noticeTimes).some((key) => value[key])) card.append(node("p", "caption", "时间待确认"));
     if (value.action) card.append(node("p", "notice-action", value.action));
     if (value.uncertainties.length) card.append(node("p", "caption", `${value.uncertainties.length} 项信息待确认`));
-    card.append(node("p", "caption", `v${record.version} · ${value.source_refs.length ? value.source_refs.length + " 份来源" : "手工创建"}${record.deleted_at ? " · 已删除" : ""}`));
+    card.append(node("p", "caption", `v${record.version} · ${value.source_refs.length ? value.source_refs.length + " 份来源" : record.revisions[0].actor === "assistant" ? "对话创建" : "手工创建"}${record.deleted_at ? " · 已删除" : ""}`));
     const actions = noticeActions(record);
     actions.prepend(button("查看详情", async () => { $("notices-dialog").close(); await openRecord({ kind: "notice", id: record.id }); }));
     card.append(actions); return card;
@@ -359,15 +369,37 @@ function noticeFormFields() {
     uncertainties: $("notice-uncertainties").value.split("\n").map((line) => line.trim()).filter(Boolean) };
   for (const key of Object.keys(noticeTimes)) {
     const mode = $("notice-" + key + "-mode").value, input = $("notice-" + key).value;
-    value[key] = mode === "none" || !input ? "" : mode === "date" ? input : new Date(input).toISOString();
+    value[key] = $("notice-repeat").value === "weekly" || mode === "none" || !input ? "" : mode === "date" ? input : new Date(input).toISOString();
   }
+  value.recurrence = $("notice-repeat").value === "weekly" ? {
+    frequency: "weekly", weekdays: [...$("notice-weekdays").querySelectorAll("input:checked")].map((input) => Number(input.value)),
+    time: $("notice-repeat-time").value, timezone: $("notice-repeat-zone").value,
+    starts_on: $("notice-repeat-start").value, until: $("notice-repeat-until").value } : {};
   return value;
 }
+weekdays.forEach((text, index) => {
+  const label = node("label", "", text), input = node("input"); input.type = "checkbox"; input.value = index + 1;
+  label.prepend(input); $("notice-weekdays").append(label);
+});
+function showNoticeRepeat() {
+  const weekly = $("notice-repeat").value === "weekly";
+  $("notice-weekly-fields").hidden = !weekly; $("notice-weekly-fields").disabled = !weekly;
+  $("notice-once-fields").hidden = weekly;
+}
+$("notice-repeat").addEventListener("change", showNoticeRepeat);
 function editNotice(record = null) {
   editingNotice = record;
   const value = record?.content || { title: "", summary: "", action: "", uncertainties: [], source_refs: [] };
   $("notice-editor-title").textContent = record ? "编辑通知" : "新建通知";
   for (const key of ["title", "summary", "action"]) $("notice-" + key).value = value[key];
+  const rule = value.recurrence;
+  $("notice-repeat").value = rule ? "weekly" : "none";
+  for (const input of $("notice-weekdays").querySelectorAll("input")) input.checked = rule?.weekdays.includes(Number(input.value)) || false;
+  $("notice-repeat-time").value = rule?.time || "";
+  $("notice-repeat-zone").value = rule?.timezone || status.timezone;
+  $("notice-repeat-start").value = rule?.starts_on || "";
+  $("notice-repeat-until").value = rule?.until || "";
+  showNoticeRepeat();
   $("notice-uncertainties").value = value.uncertainties.join("\n");
   for (const key of Object.keys(noticeTimes)) {
     const stamp = value[key] || "", mode = stamp ? stamp.length === 10 ? "date" : "datetime-local" : "none";
@@ -554,7 +586,8 @@ function renderRecordContent(content, record, detail, preview = false) {
       }));
     }
   } else if (ref.kind === "notice") {
-    content.append(section("说明", value.summary || "暂无补充说明"), metadata(Object.entries(noticeTimes).map(([key, label]) => [label, noticeTime(value[key])])));
+    content.append(section("说明", value.summary || "暂无补充说明"), metadata(noticeSchedule(value, value.next_occurrence)));
+    if (value.recurrence) content.append(node("p", "caption", "循环事项：编辑或删除作用于整个系列。"));
     if (value.action) content.append(section("建议行动", value.action));
     if (value.uncertainties.length) content.append(section("待确认", value.uncertainties.join("\n")));
     const sources = disclosure(`来源资料（${value.source_refs.length}）`);
@@ -570,7 +603,7 @@ function renderRecordContent(content, record, detail, preview = false) {
     const actions = { create: "创建", update: "修改", delete: "删除", restore: "恢复" };
     for (const revision of [...detail.revisions].reverse()) {
       history.append(disclosure(`v${revision.version} · ${revision.actor === "assistant" ? "助手" : "手工"}${actions[revision.action]} · ${formatTime(revision.created_at)}`,
-        metadata([["标题", revision.content.title], ["说明", revision.content.summary], ["行动", revision.content.action], ...Object.entries(noticeTimes).map(([key, label]) => [label, noticeTime(revision.content[key])])])));
+        metadata([["标题", revision.content.title], ["说明", revision.content.summary], ["行动", revision.content.action], ...noticeSchedule(revision.content)])));
     }
     content.append(history);
   } else if (ref.kind === "task") {

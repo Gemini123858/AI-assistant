@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo
 
 from .errors import AssistantError
 from .records import record_ref
+from .recurrence import next_occurrence, weekly_rule
 from .storage import text_field
 
 
-FIELDS = {"title", "summary", "action", "start_at", "end_at", "deadline", "uncertainties", "source_refs"}
+FIELDS = {"title", "summary", "action", "start_at", "end_at", "deadline", "uncertainties", "source_refs", "recurrence"}
 TIME_FIELDS = ("start_at", "end_at", "deadline")
 
 
@@ -44,6 +45,14 @@ class Notices:
                 except ValueError:
                     raise AssistantError("通知时间须为YYYY-MM-DD日期或带时区ISO时间；未知时间留空。") from None
             result[name] = stamp
+        if "recurrence" in value:
+            rule = weekly_rule(value["recurrence"], self.config.timezone)
+            if rule:
+                result["recurrence"] = rule
+            else:
+                result.pop("recurrence", None)
+        if result.get("recurrence") and any(result[key] for key in TIME_FIELDS):
+            raise AssistantError("循环通知不能同时设置单次时间；转换时请将start_at、end_at、deadline清空。")
         if "uncertainties" in value:
             items = value["uncertainties"]
             if not isinstance(items, list) or len(items) > 20:
@@ -120,6 +129,10 @@ class Notices:
                 continue
             stamp = content["deadline"] or content["start_at"] or content["end_at"]
             day, instant, expired = None, None, False
+            if content.get("recurrence"):
+                stamp = next_occurrence(content["recurrence"], now)
+                record["next_occurrence"] = stamp
+                expired = not stamp
             if stamp:
                 if len(stamp) == 10:
                     day = date.fromisoformat(stamp)
@@ -128,7 +141,7 @@ class Notices:
                 else:
                     instant = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(now.tzinfo)
                     day, expired = instant.date(), instant < now
-            if (view == "undated" and day is not None) or (view == "expired" and not expired):
+            if (view == "undated" and (day is not None or content.get("recurrence"))) or (view == "expired" and not expired):
                 continue
             if view == "upcoming" and (day is None or expired or not now.date() <= day <= now.date() + timedelta(days=7)):
                 continue

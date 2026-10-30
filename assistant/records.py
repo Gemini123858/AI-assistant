@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from .errors import AssistantError
+from .recurrence import next_occurrence
 from .storage import draft_sources, text_field
 
 
@@ -58,6 +59,8 @@ class Records:
             title, stamp = raw["content"]["title"], raw["updated_at"]
             status = "deleted" if raw["deleted_at"] else "active"
             data = {**copy.deepcopy(raw["content"]), "version": raw["version"], "deleted_at": raw["deleted_at"]}
+            if data.get("recurrence"):
+                data["next_occurrence"] = next_occurrence(data["recurrence"])
             ref["version"] = raw["version"]
             sources = copy.deepcopy(raw["content"]["source_refs"])
             if raw["deleted_at"]:

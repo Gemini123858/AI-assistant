@@ -51,6 +51,13 @@ NOTICE_FIELDS = {"title": {"type": "string", "maxLength": 200},
     "summary": {"type": "string", "maxLength": 3000}, "action": {"type": "string", "maxLength": 2000},
     **{name: {"type": "string", "maxLength": 80, "description": "未知留空；仅日期用YYYY-MM-DD，精确时间用带时区ISO。"}
        for name in ("start_at", "end_at", "deadline")},
+    "recurrence": {"type": "object", "additionalProperties": False, "properties": {
+        "frequency": {"type": "string", "enum": ["weekly"]},
+        "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 7}, "minItems": 1, "maxItems": 7},
+        "time": {"type": "string", "maxLength": 5, "description": "当地时刻HH:MM，未知则先向用户确认。"},
+        "timezone": {"type": "string", "maxLength": 100, "description": "IANA时区，省略用应用时区。"},
+        "starts_on": {"type": "string", "maxLength": 10}, "until": {"type": "string", "maxLength": 10}},
+        "description": "每周循环必填frequency=weekly、weekdays（周一1至周日7）及time。starts_on/until是可选生效/最后日期YYYY-MM-DD，含当天。空对象取消循环。循环和单次时间互斥，转换时显式清空start_at/end_at/deadline。修改或删除作用于整个系列，不支持单次例外或主动推送。"},
     "uncertainties": {"type": "array", "items": {"type": "string", "maxLength": 500}, "maxItems": 20},
     "source_refs": {"type": "array", "maxItems": 30, "items": {"type": "object", "additionalProperties": False,
         "properties": {"kind": {"type": "string", "enum": ["mail", "text", "task"]}, "id": TEXT,

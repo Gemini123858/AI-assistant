@@ -1,13 +1,16 @@
 """Notification cards and sources, using only temporary synthetic records."""
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from assistant.config import Config
 from assistant.browser import BrowserScope
 from assistant.errors import AssistantError
 from assistant.notices import Notices
 from assistant.records import Records
+from assistant.recurrence import next_occurrence
 from assistant.service import Service
 from assistant.storage import Store
 from .test_storage import notification
@@ -98,3 +101,58 @@ class NoticeTests(unittest.TestCase):
         source = card["content"]["source_refs"][0]
         self.assertEqual(source["url"], LIST)
         self.assertEqual(source["quote"], page["text"])
+
+    def test_weekly_next_occurrence_boundaries_and_timezone(self):
+        rule = {"frequency": "weekly", "weekdays": [2, 4], "time": "18:30", "timezone": "Asia/Shanghai"}
+        for now, expected in (
+            ("2026-11-03T18:29:59+08:00", "2026-11-03T18:30:00+08:00"),
+            ("2026-11-03T18:30:00+08:00", "2026-11-03T18:30:00+08:00"),
+            ("2026-11-03T18:30:01+08:00", "2026-11-05T18:30:00+08:00"),
+            ("2026-11-05T10:31:00+00:00", "2026-11-10T18:30:00+08:00")):
+            with self.subTest(now=now):
+                self.assertEqual(next_occurrence(rule, datetime.fromisoformat(now)), expected)
+        now = datetime.fromisoformat("2026-11-03T12:00:00+08:00")
+        self.assertEqual(next_occurrence({**rule, "starts_on": "2026-12-01"}, now), "2026-12-01T18:30:00+08:00")
+        self.assertEqual(next_occurrence({**rule, "until": "2026-11-03"}, now), "2026-11-03T18:30:00+08:00")
+        self.assertEqual(next_occurrence({**rule, "until": "2026-11-02"}, now), "")
+
+    def test_weekly_filters_projection_and_series_edits(self):
+        rule = {"frequency": "weekly", "weekdays": [2], "time": "18:30"}
+        card, _ = self.notices.create({"title": "每周组会", "recurrence": rule})
+        ended, _ = self.notices.create({"title": "已结束循环", "recurrence": {**rule, "until": "2026-11-02"}})
+        ref = {"kind": "notice", "id": card["id"]}
+        with patch("assistant.notices.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime.fromisoformat("2026-11-03T18:31:00+08:00")
+            self.assertEqual([r["id"] for r in self.notices.list("upcoming")], [card["id"]])
+            self.assertEqual([r["id"] for r in self.notices.list("expired")], [ended["id"]])
+            self.assertEqual(self.notices.list("undated"), [])
+        with patch("assistant.recurrence.datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime.fromisoformat("2026-11-03T18:29:00+08:00")
+            snapshot = self.records.read(ref)
+            clock.now.return_value = datetime.fromisoformat("2026-11-03T18:31:00+08:00")
+            later = self.records.read(ref)
+        self.assertNotEqual(snapshot["data"]["next_occurrence"], later["data"]["next_occurrence"])
+        self.assertEqual(self.store.get_notice(card["id"]), card)
+        self.assertNotIn("next_occurrence", card["content"])
+        changed = self.notices.update(card["id"], {"version": 1, "changes": {"recurrence": {**rule, "weekdays": [4]}}})
+        self.assertEqual(changed["content"]["recurrence"]["weekdays"], [4])
+        self.assertEqual(snapshot["data"]["recurrence"]["weekdays"], [2])
+        single = self.notices.update(card["id"], {"version": 2, "changes": {"recurrence": {}, "start_at": "2027-01-01"}})
+        self.assertNotIn("recurrence", single["content"])
+        self.assertEqual(len(self.store.list_notices()), 2)
+
+    def test_weekly_validation_and_conversion_do_not_change_legacy_records(self):
+        rule = {"frequency": "weekly", "weekdays": [2], "time": "18:30"}
+        for change in ({"weekdays": []}, {"weekdays": [True]}, {"weekdays": [8]}, {"time": "下午"},
+                       {"time": "25:00"}, {"timezone": "invalid/zone"}, {"starts_on": "2026-02-30"},
+                       {"starts_on": "2027-01-01", "until": "2026-01-01"}, {"frequency": "monthly"}):
+            with self.subTest(change=change), self.assertRaises(AssistantError):
+                self.notices.create({"title": "无效", "recurrence": {**rule, **change}})
+        old, _ = self.notices.create({"title": "单次", "start_at": "2026-11-03"})
+        with self.assertRaises(AssistantError):
+            self.notices.update(old["id"], {"version": 1, "changes": {"recurrence": rule}})
+        self.assertEqual(self.store.get_notice(old["id"]), old)
+        unchanged = self.notices.update(old["id"], {"version": 1, "changes": {"recurrence": {}}})
+        self.assertEqual(unchanged["version"], 1)
+        recurring = self.notices.update(old["id"], {"version": 1, "changes": {"recurrence": rule, "start_at": ""}})
+        self.assertEqual(recurring["content"]["recurrence"]["timezone"], self.service.config.timezone)

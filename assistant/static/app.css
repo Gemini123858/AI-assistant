@@ -110,6 +110,10 @@ textarea { resize:vertical; line-height:1.65; }
 .notice-actions button { font-size:12px; padding:6px 10px; }
 .notice-time-row { display:grid; grid-template-columns:70px 115px minmax(0,1fr); gap:8px; align-items:center; }
 .notice-time-row select,.notice-time-row input { margin:0; }
+.notice-weekdays { display:flex; flex-wrap:wrap; gap:10px; }
+.notice-weekdays label { display:flex; align-items:center; gap:4px; }
+.notice-weekdays input { width:auto; margin:0; }
+#notice-weekly-fields { min-width:0; border:1px solid var(--line); border-radius:8px; margin:12px 0; }
 #notices-dialog { width:min(1000px,96vw); }
 #notice-editor { width:min(680px,96vw); }
 #notices-dialog>.panel-heading,#notice-editor>.panel-heading { position:sticky; top:-22px; z-index:1; background:var(--surface); margin:-22px -22px 12px; padding:16px 22px; border-bottom:1px solid var(--line); }

@@ -61,7 +61,13 @@
   <dialog id="notice-editor" aria-labelledby="notice-editor-title">
     <header class="panel-heading"><h2 id="notice-editor-title">编辑通知</h2><button id="close-notice-editor" class="quiet">取消</button></header>
     <form id="notice-form"><label>标题<input id="notice-title" maxlength="200" required></label><label>说明<textarea id="notice-summary" rows="3" maxlength="3000"></textarea></label><label>建议行动<textarea id="notice-action" rows="2" maxlength="2000"></textarea></label>
-      <p class="caption">时间未知可留空；只知道日期时选择“仅日期”，不要补写未知时分。</p><div id="notice-time-fields"></div>
+      <label>重复<select id="notice-repeat"><option value="none">不重复</option><option value="weekly">每周</option></select></label>
+      <fieldset id="notice-weekly-fields" hidden disabled><legend>每周循环</legend><div id="notice-weekdays" class="notice-weekdays"></div>
+        <label>当地时刻<input id="notice-repeat-time" type="time" required></label><label>时区<input id="notice-repeat-zone" maxlength="100" required></label>
+        <label>生效日期（可留空）<input id="notice-repeat-start" type="date"></label><label>最后日期（可留空，含当天）<input id="notice-repeat-until" type="date"></label>
+        <p class="caption">保存后采用循环规则，清空原单次时间。编辑、删除作用于整个系列；暂不支持单次例外或主动推送。</p>
+      </fieldset>
+      <div id="notice-once-fields"><p class="caption">时间未知可留空；只知道日期时选择“仅日期”，不要补写未知时分。</p><div id="notice-time-fields"></div></div>
       <label>待确认信息（每行一项）<textarea id="notice-uncertainties" rows="2"></textarea></label><div id="notice-editor-sources"></div><p id="notice-edit-status" class="notice" hidden></p>
       <button class="primary" type="submit">保存通知</button>
     </form>

@@ -238,6 +238,26 @@ class ConversationTests(unittest.TestCase):
         self.assertTrue(any(e["type"] == "record_update" for e in record["events"]))
         self.assertEqual(self.store.get_message(text["id"])["original"], text["original"])
 
+    def test_weekly_notice_tool_create_and_manual_series_edit(self):
+        key = self.new()
+        rule = {"frequency": "weekly", "weekdays": [2], "time": "18:30"}
+        self.model.outputs = [call("create_notice", {"title": "每周组会", "recurrence": rule}), finish()]
+        conversation = self.turn(key, "新建通知，每周二18:30开组会")
+        card = self.store.list_notices()[0]
+        self.assertEqual(card["content"]["source_refs"], [])
+        self.assertEqual(card["origin"]["conversation_id"], key)
+        snapshot = next(e["output"]["records"][0] for e in conversation["events"] if e["type"] == "tool_result")
+        self.assertTrue(snapshot["data"]["next_occurrence"])
+        response = self.client.patch(f'/api/notices/{card["id"]}', json={"version": 1,
+            "changes": {"recurrence": {**rule, "weekdays": [4, 2], "time": "19:00"}}}, headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json["notice"]["content"]["recurrence"]["weekdays"], [2, 4])
+        self.model.outputs = [call("read_record", {"ref": {"kind": "notice", "id": card["id"]}}),
+            call("update_notice", {"id": card["id"], "version": 2, "changes": {"recurrence": {}, "start_at": "2027-01-01"}}), finish()]
+        self.turn(key, "改成2027年1月1日，不再重复")
+        self.assertNotIn("recurrence", self.store.get_notice(card["id"])["content"])
+        self.assertEqual(len(self.store.list_notices()), 1)
+
     def test_mail_analysis_can_create_separate_notice_cards_without_reanalysis(self):
         self.imap.uids = [10]
         mail = self.app.extensions["mail"].read_latest()
