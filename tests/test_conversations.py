@@ -24,6 +24,10 @@ def finish(reply="已完成", refs=None):
     return call("finish_turn", {"reply": reply, "record_refs": refs or []})
 
 
+def main_background(messages):
+    return json.loads(next(line for line in messages[0]["content"].splitlines() if line.startswith("{")))
+
+
 class FlowModel(ScriptModel):
     def complete_tools(self, messages, tools, timeout=None):
         output = self.outputs[0]
@@ -137,8 +141,28 @@ class ConversationTests(unittest.TestCase):
         browser_context = json.dumps(self.model.calls[3], ensure_ascii=False)
         self.assertNotIn("PRIVATE_USER_PROMPT", browser_context)
         self.assertNotIn("本人：我正在找实习", browser_context)
+        self.assertNotIn("mail_account", browser_context)
+        self.assertNotIn(self.config.qq_imap_user, browser_context)
+        for index in (0, 1, 2, 4, 5):
+            background = main_background(self.model.calls[index])
+            self.assertEqual(background["mail_account"], {"address": "owner@qq.com"})
+            self.assertNotIn(self.config.qq_imap_auth_code, json.dumps(background))
         self.assertIsNone(self.app.extensions["service"].followups()["task"])
         self.assertEqual(self.smtp.messages, [])
+
+    def test_draft_to_self_uses_account_background_and_missing_account_is_omitted(self):
+        def draft_to_self(messages):
+            background = main_background(messages)
+            return call("create_draft", {**fields(to=[background["mail_account"]["address"]]), "source_refs": []})
+        self.model.outputs = [draft_to_self, finish()]
+        key = self.new()
+        record = self.turn(key, "给我自己起草一封测试邮件，先不要发送")
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        self.assertEqual(self.store.list_drafts()[0]["to"], ["owner@qq.com"])
+        self.assertEqual(self.smtp.messages, [])
+        self.config.qq_imap_user = ""
+        background = main_background(self.controller.context(key))
+        self.assertNotIn("mail_account", background)
 
     def test_assistant_updates_draft_and_adds_used_sources(self):
         original, _ = self.store.import_message(notification())

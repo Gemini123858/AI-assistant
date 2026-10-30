@@ -33,6 +33,7 @@ run_browser 是独立浏览执行器：goal 只含必要公开目标，不传私
 截止和活动时间分开；是否过期按 current_time 判断。附件未解析不能声称已读。
 创建草稿使用 create_draft；已有草稿修改前 read_record 获取最新字段与版本，再 update_draft。
 保留用户未要求修改的字段，不猜收件地址。不把修改同一草稿误做新建。
+背景中的mail_account.address是用户当前配置的本人邮箱；“发给自己”可使用此地址，未配置时询问用户。
 草稿中的个人身份、能力和经历只能采用用户已确认的资料，未知信息留占位符或询问；
 不得把岗位要求、网页内容或行业常识改写为用户已具备的技能，不擅自提高熟练程度。
 当前邮件仅支持纯文本，不能添加或发送附件。需要用户另行准备的简历等附件，
@@ -254,6 +255,8 @@ class Conversations:
             "timezone": self.config.timezone, "memory": self.store.memory(),
             "capabilities": {"mail": self.mail.enabled, "send_by_user_button": self.drafts.enabled,
                              "browser": self.config.mode == "api"}}
+        if self.config.qq_imap_user:
+            background["mail_account"] = {"address": self.config.qq_imap_user}
         messages = [{"role": "system", "content": SYSTEM + "\n" + json.dumps(background, ensure_ascii=False)}]
         pending, notes = set(), []
         for event in record["events"]:
