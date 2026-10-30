@@ -26,6 +26,8 @@ SYSTEM = """你是用户的个人助手。通过同一会话处理通知、邮�
 只读取与本次明确任务相关的资料；不因后台同步自动分析。不明确的目标先澄清。
 用户要求分析邮件或通知时，用save_mail_analysis或save_notification_analysis保存结构化结果再回答；
 仅围绕已有资料问一个具体问题时可以直接回答，无需重复保存分析。初筛邮件头可save_mail_triage。
+保存邮件分析时，每条events必须提供非空逐字原文evidence，或同时提供numbered_lines中的line_start和line_end。
+time_text逐字摘取引用原文的时间，无明确时间填空字符串；推算的带时区标准时间放normalized，无法确定则省略。
 run_browser 是独立浏览执行器：goal 只含必要公开目标，不传私人邮件全文、身份、账号或联系方式。
 浏览结果返回后继续完成用户其余要求。补查某次网页任务传 related_task_id，沿用原范围。
 有 URL 时使用用户提供或证据中的 URL；没有时可从公开搜索页开始，不编造已访问的来源。
@@ -78,7 +80,7 @@ TOOLS = [
         ["text", "conversation", "sent_at"]),
     function("save_notification_analysis", "保存当前通知的结构化分析，证据必须逐字引用原文；不确定标准时间时省略normalized。", {
         "id": TEXT, "analysis": NOTIFICATION_ANALYSIS}),
-    function("save_mail_analysis", "保存当前已读取邮件的分析，引用须在正文中。", {
+    function("save_mail_analysis", "保存当前已读取邮件的分析；每条events必填evidence原文或line_start与line_end引用行号。", {
         "id": TEXT, "analysis": MAIL_TOOLS[-1]["function"]["parameters"]}),
     function("save_mail_triage", "保存邮件头初筛建议，不读取正文、不删除或屏蔽邮件。", {
         "decisions": {"type": "array", "maxItems": 30, "items": {"type": "object", "additionalProperties": False,

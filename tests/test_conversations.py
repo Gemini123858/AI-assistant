@@ -184,6 +184,36 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(record["turns"][-1]["status"], "completed")
         self.assertTrue(any(event["type"] == "tool_result" and event["output"].get("failed") for event in record["events"]))
 
+    def test_missing_mail_quote_can_be_corrected_using_numbered_lines(self):
+        self.imap.uids = [10]
+        mail = self.app.extensions["mail"].read_latest()
+        ref = {"kind": "mail", "id": mail["id"]}
+        incomplete = analysis()
+        incomplete["events"][0].pop("evidence")
+
+        def correct_quote(messages):
+            error = json.loads(messages[-1]["content"])
+            self.assertTrue(error["failed"])
+            self.assertIn("缺少来源引用", error["error"])
+            self.assertIn("line_start", error["error"])
+            self.assertIsNone(self.app.extensions["mail"].get(mail["id"])["analysis"])
+            read_output = next(json.loads(message["content"]) for message in messages
+                if message["role"] == "tool" and json.loads(message["content"]).get("records"))
+            lines = read_output["records"][0]["data"]["numbered_lines"]
+            self.assertEqual(lines[1], {"line": 2, "text": "2026年9月25日18:00前提交申请。"})
+            corrected = analysis()
+            corrected["events"][0].pop("evidence")
+            corrected["events"][0].update(line_start=lines[1]["line"], line_end=lines[1]["line"])
+            return call("save_mail_analysis", {"id": mail["id"], "analysis": corrected})
+
+        self.model.outputs = [call("read_record", {"ref": ref}),
+            call("save_mail_analysis", {"id": mail["id"], "analysis": incomplete}), correct_quote, finish()]
+        record = self.turn(self.new(), "分析这封邮件", [ref])
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        self.assertEqual(sum(bool(e.get("output", {}).get("failed")) for e in record["events"]), 1)
+        saved = self.app.extensions["mail"].get(mail["id"])["analysis"]
+        self.assertEqual(saved["events"][0]["evidence"], "2026年9月25日18:00前提交申请。")
+
     def test_notification_search_analysis_and_explicit_memory(self):
         key = self.new()
         original = notification()

@@ -53,6 +53,8 @@ class Records:
             stamp = raw.get("analyzed_at") or raw["synced_at"]
             data = {key: raw.get(key) for key in ("subject", "sender", "date_raw", "text", "attachments",
                 "body_truncated", "analysis", "triage", "self_forwarded_candidate", "profile_updates", "error")}
+            if raw["text"] is not None:
+                data["numbered_lines"] = [{"line": n, "text": line} for n, line in enumerate(raw["text"].splitlines(), 1)]
             if raw["text"] is None:
                 notes.append("仅邮件头，尚未读取正文")
             if raw.get("body_truncated"):

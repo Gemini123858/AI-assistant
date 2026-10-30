@@ -41,10 +41,12 @@ EVENT = {"type": "object", "additionalProperties": False, "properties": {
     "time_text": {"type": "string", "maxLength": 500, "description": "逐字摘取引用原文中的时间表达，不翻译或补年份；没有明确时间填空字符串。"},
     "normalized": {"type": "string", "maxLength": 80},
     "action": {"type": "string", "maxLength": 1000},
-    "evidence": {"type": "string", "maxLength": 2000},
+    "evidence": {"type": "string", "minLength": 1, "maxLength": 2000,
+                 "description": "必须提供逐字引用的正文，或同时提供line_start和line_end，由程序提取原文；不能省略两种引用方式。"},
     "line_start": {"type": "integer", "minimum": 1}, "line_end": {"type": "integer", "minimum": 1},
     "uncertainties": {"type": "array", "items": {"type": "string", "maxLength": 500}, "maxItems": 10}},
-    "required": ["title", "relevance", "importance", "time_kind", "time_text", "action", "uncertainties"]}
+    "required": ["title", "relevance", "importance", "time_kind", "time_text", "action", "uncertainties"],
+    "anyOf": [{"required": ["evidence"]}, {"required": ["line_start", "line_end"]}]}
 MAIL_TOOLS = [
     function("update_profile", "按需提出画像补充并选择公开检索或私人层；原文归属可验证时自动保存，否则留待确认。不能改规则或授权。", {
         "text": {"type": "string", "maxLength": 1000}, "evidence": {"type": "string", "maxLength": 2000},
@@ -450,6 +452,8 @@ class Mail:
             evidence = "".join(lines[first-1:last-1]) + lines[last-1].splitlines()[0]
         else:
             evidence = item.get("evidence")
+            if not evidence:
+                raise AssistantError("缺少来源引用：请提供正文中的非空逐字原文 evidence，或同时提供 numbered_lines 中的 line_start 和 line_end；其他分析字段可以保留。", 502)
         evidence = text_field(evidence, "来源证据", 2000)
         if evidence not in record["text"]:
             raise AssistantError("来源证据不在邮件正文中；建议改用编号行。", 502)
