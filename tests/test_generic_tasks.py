@@ -114,10 +114,12 @@ class GenericTaskTests(unittest.TestCase):
                 self.assertEqual(context["private_conditions"], private)
         self.assertIn("上下文已裁剪", model.calls[1][1]["content"])
 
-    def test_browser_prompt_prefers_new_evidence_and_early_finish(self):
-        self.assertIn("最短证据路径", TASK_SYSTEM)
-        self.assertIn("不要紧接着重复observe_page", TASK_SYSTEM)
-        self.assertIn("remaining.calls", TASK_SYSTEM)
+    def test_browser_receives_current_system_template(self):
+        model = self.runner([call("finish_task", result())])
+        task = self.tasks.start({"goal": "查询公开信息", "start_url": LIST})
+        self.tasks.wait(timeout=10)
+        self.assertEqual(self.store.get_task(task["id"])["status"], "completed")
+        self.assertEqual(model.calls[0][0], {"role": "system", "content": TASK_SYSTEM})
 
     def test_private_conditions_cannot_be_skipped_by_public_finish(self):
         model = self.runner([call("finish_task", result()), call("analyze_results", {}),
