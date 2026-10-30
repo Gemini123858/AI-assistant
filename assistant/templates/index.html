@@ -9,7 +9,7 @@
 </head>
 <body class="assistant-app">
   <aside class="sidebar">
-    <a class="brand" href="/">助 <span>个人助手</span></a>
+    <a id="assistant-brand" class="brand" href="/">个人助手</a>
     <button id="new-conversation" class="primary">＋ 新对话</button>
     <p class="caption">历史会话</p>
     <nav id="conversation-list" aria-label="历史会话"></nav>
@@ -74,6 +74,7 @@
   </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <header class="panel-heading"><h2 id="settings-title">设置与画像</h2><button id="close-settings" class="quiet">关闭</button></header>
+    <form id="identity-form"><h3>名称与称呼</h3><label>助手名称<input id="assistant-name" maxlength="80" required></label><label>对你的称呼<input id="user-nickname" maxlength="80" placeholder="可留空"></label><p class="caption">跨会话生效。昵称只用于日常称呼，不自动作为真实姓名或邮件署名。</p><button class="quiet" type="submit">保存称呼</button></form>
     <p id="settings-status" class="notice"></p><p class="caption">模型、额度、浏览器代理与邮箱凭据在私有 .env 配置，修改后重启。不要将 Key 或授权码粘贴到聊天。</p>
     <details open><summary>邮箱同步</summary><p id="mail-status" class="caption"></p><div class="toolbar"><button id="mail-start" class="quiet">启用新邮件同步</button><button id="mail-sync" class="quiet">立即同步</button><button id="mail-latest" class="quiet">导入最新一封已有邮件</button></div><p class="caption">首次启用跳过历史；后台只保存新邮件头，不自动分析。</p></details>
     <form class="memory-form" data-kind="public_profile"><h3>公开检索画像</h3><p class="caption">专业、技能、兴趣与偏好，可用于公开检索。</p><label class="sr-only" for="public_profile-text">公开检索画像</label><textarea id="public_profile-text" rows="5" maxlength="12000"></textarea><button class="quiet" type="submit">保存公开画像</button></form>

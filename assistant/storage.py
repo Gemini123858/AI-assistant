@@ -231,6 +231,33 @@ class Store:
             return {kind: self._read_text(self.root / "memory" / f"{kind}.md")
                     for kind in ("public_profile", "profile", "rules")}
 
+    @staticmethod
+    def _identity_fields(value):
+        if not isinstance(value, dict) or set(value) != {"assistant_name", "user_nickname"}:
+            raise AssistantError("请提供助手名称和用户昵称。")
+        result = {key: text_field(value[key], label, 80, key == "user_nickname")
+                  for key, label in (("assistant_name", "助手名称"), ("user_nickname", "用户昵称"))}
+        if any("\n" in item or "\r" in item for item in result.values()):
+            raise AssistantError("名称和昵称请使用单行文字。")
+        return result
+
+    def identity(self):
+        with self._mutex:
+            self._ensure_open()
+            path = self.root / "identity.json"
+            if not path.exists():
+                return {"assistant_name": "个人助手", "user_nickname": ""}
+            value = self._read_json(path)
+            value.pop("schema_version")
+            return self._identity_fields(value)
+
+    def update_identity(self, value):
+        fields = self._identity_fields(value)
+        with self._mutex:
+            self._ensure_open()
+            self._write_json(self.root / "identity.json", {"schema_version": 1, **fields})
+            return fields
+
     def _notice_path(self, key):
         if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
             raise AssistantError("通知卡片标识无效。")

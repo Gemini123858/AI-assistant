@@ -261,7 +261,7 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     def status():
         return jsonify(mode=config.mode, model=config.model if config.mode == "api" else "演示（无真实推理）",
                        usage=store.usage(service.day()), daily_limit=config.daily_calls,
-                       timezone=config.timezone, version="0.4.0",
+                       timezone=config.timezone, version="0.4.0", identity=store.identity(),
                        conversation_budget={"calls": config.turn_calls, "seconds": config.turn_seconds,
                                             "context_chars": config.context_chars},
                        browser_budget={"calls": config.browser_calls, "steps": config.browser_steps,
@@ -471,6 +471,10 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     @app.post("/api/chat")
     def chat():
         return jsonify(turn=service.chat(body()))
+
+    @app.put("/api/identity")
+    def update_identity():
+        return jsonify(identity=store.update_identity(body()))
 
     @app.get("/api/memory")
     def memory():

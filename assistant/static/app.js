@@ -25,6 +25,7 @@ let loadSequence = 0, pickerSequence = 0, recordSequence = 0;
 const refKey = (ref) => `${ref.kind === "notification" ? "text" : ref.kind}:${ref.id}`;
 const simpleRef = (ref) => ({ kind: ref.kind, id: ref.id });
 const formatTime = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "";
+const welcomeTitle = () => `${status?.identity.user_nickname ? status.identity.user_nickname + "，" : ""}今天想处理什么？`;
 function node(tag, className = "", text = "") {
   const element = document.createElement(tag);
   element.className = className;
@@ -148,7 +149,7 @@ function renderConversation(forceScroll = false) {
   }
   if (!entries.length) {
     const welcome = node("div", "welcome");
-    welcome.append(node("h2", "", "今天想处理什么？"), node("p", "", "直接提出要求，或添加邮件、通知与已有结果。查资料、分析和起草邮件，都可以在这里继续。"));
+    welcome.append(node("h2", "", welcomeTitle()), node("p", "", "直接提出要求，或添加邮件、通知与已有结果。查资料、分析和起草邮件，都可以在这里继续。"));
     entries.push(welcome);
   }
   history.replaceChildren(...entries);
@@ -192,6 +193,10 @@ async function poll() {
 }
 async function loadStatus() {
   status = await api("/api/status");
+  $("assistant-brand").textContent = status.identity.assistant_name;
+  document.title = status.identity.assistant_name;
+  const welcome = document.querySelector(".welcome h2");
+  if (welcome) welcome.textContent = welcomeTitle();
   $("model-status").textContent = `${status.mode === "demo" ? "演示模式 · 未调用真实模型" : status.model} · 今日 ${status.usage.calls}/${status.daily_limit} 次模型调用`;
   $("settings-status").textContent = `本轮最多 ${status.conversation_budget.calls} 次模型调用（含网页内部调用），${Math.round(status.conversation_budget.seconds / 60)} 分钟；完整上下文上限 ${status.conversation_budget.context_chars} 字符，超出时停止，不自动裁剪。`;
 }
@@ -780,9 +785,17 @@ async function loadMailStatus() {
 $("open-settings").addEventListener("click", () => work($("open-settings"), async () => {
   const [memory] = await Promise.all([api("/api/memory"), loadStatus(), loadMailStatus()]);
   for (const kind of ["public_profile", "profile", "rules"]) $(kind + "-text").value = memory[kind];
+  $("assistant-name").value = status.identity.assistant_name;
+  $("user-nickname").value = status.identity.user_nickname;
   $("settings-dialog").showModal();
 }));
 $("close-settings").addEventListener("click", () => $("settings-dialog").close());
+$("identity-form").addEventListener("submit", (event) => {
+  event.preventDefault(); work(event.submitter, async () => {
+    await api("/api/identity", "PUT", { assistant_name: $("assistant-name").value, user_nickname: $("user-nickname").value }, true);
+    await loadStatus(); toast("称呼已保存，后续模型请求立即生效。");
+  });
+});
 for (const form of document.querySelectorAll(".memory-form")) form.addEventListener("submit", (event) => {
   event.preventDefault(); work(event.submitter, async () => {
     const kind = form.dataset.kind; await api(`/api/memory/${kind}`, "PUT", { content: $(kind + "-text").value }, true);

@@ -96,6 +96,8 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(self.controller.list()), 2)
 
     def test_system_prompt_reaches_serialized_api_requests_after_tool_execution(self):
+        identity = {"assistant_name": "合成助手", "user_nickname": "合成昵称"}
+        self.store.update_identity(identity)
         api = APIModel(self.config)
         self.app.extensions["service"].model = api
         self.config.turn_calls = 2
@@ -111,11 +113,35 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(body["messages"][0]["role"], "system")
             self.assertTrue(body["messages"][0]["content"].startswith(SYSTEM + "\n"))
             self.assertEqual(main_background(body["messages"])["mail_account"]["address"], "owner@qq.com")
+            self.assertEqual(main_background(body["messages"])["identity"], identity)
             self.assertEqual(body["tools"], expected_tools)
             self.assertEqual(body["tool_choice"], "required")
         versions = [event["system_template_sha256"] for event in record["events"] if event["type"] == "model"]
         self.assertEqual(versions, [hashlib.sha256(SYSTEM.encode()).hexdigest()] * 2)
         self.assertEqual(self.smtp.messages, [])
+
+    def test_identity_settings_validation_context_and_restart(self):
+        self.assertEqual(self.client.get("/api/status").json["identity"], {"assistant_name": "个人助手", "user_nickname": ""})
+        self.assertFalse((self.store.root / "identity.json").exists())
+        identity = {"assistant_name": "合成助手", "user_nickname": "合成昵称"}
+        self.assertEqual(self.client.put("/api/identity", json=identity).status_code, 403)
+        response = self.client.put("/api/identity", json=identity, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["identity"], identity)
+        for invalid in ({**identity, "assistant_name": " "}, {**identity, "user_nickname": "x" * 81},
+                        {**identity, "assistant_name": "两行\n名称"}, {"user_nickname": "遗漏字段"}):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(self.client.put("/api/identity", json=invalid, headers=self.headers).status_code, 400)
+        self.assertEqual(self.store.identity(), identity)
+        for key in (self.new(), self.new()):
+            self.assertEqual(main_background(self.controller.context(key))["identity"], identity)
+        self.assertTrue(all(not value for value in self.store.memory().values()))
+        self.close_app()
+        self.app = self.open_app()
+        self.store, self.controller = self.app.extensions["store"], self.app.extensions["conversations"]
+        self.assertEqual(self.store.identity(), identity)
+        self.store.update_identity({**identity, "user_nickname": ""})
+        self.assertEqual(self.store.identity()["user_nickname"], "")
 
     def test_shared_draft_manual_edit_snapshot_send_and_conversation_delete(self):
         first, second = self.new(), self.new()
@@ -147,6 +173,8 @@ class ConversationTests(unittest.TestCase):
         mail = self.app.extensions["mail"].read_latest()
         mail_ref = {"kind": "mail", "id": mail["id"]}
         key = self.new()
+        identity = {"assistant_name": "PRIVATE_ASSISTANT_ALIAS", "user_nickname": "PRIVATE_USER_ALIAS"}
+        self.store.update_identity(identity)
         def draft_after_browser(messages):
             snapshots = []
             for message in messages:
@@ -170,8 +198,11 @@ class ConversationTests(unittest.TestCase):
         self.assertNotIn("本人：我正在找实习", browser_context)
         self.assertNotIn("mail_account", browser_context)
         self.assertNotIn(self.config.qq_imap_user, browser_context)
+        self.assertNotIn("PRIVATE_USER_ALIAS", browser_context)
+        self.assertNotIn("PRIVATE_ASSISTANT_ALIAS", browser_context)
         for index in (0, 1, 2, 4, 5):
             background = main_background(self.model.calls[index])
+            self.assertEqual(background["identity"], identity)
             self.assertEqual(background["mail_account"], {"address": "owner@qq.com"})
             self.assertNotIn(self.config.qq_imap_auth_code, json.dumps(background))
         self.assertIsNone(self.app.extensions["service"].followups()["task"])

@@ -24,8 +24,7 @@ textarea { resize:vertical; line-height:1.65; }
 .panel-heading h2 { margin:0; min-width:0; overflow-wrap:anywhere; }
 .assistant-app { height:100dvh; display:flex; overflow:hidden; }
 .sidebar { width:238px; flex-shrink:0; background:#eef1eb; border-right:1px solid var(--line); padding:22px 14px; display:flex; flex-direction:column; gap:14px; }
-.brand { color:var(--accent); font-size:23px; font-weight:700; text-decoration:none; display:flex; gap:12px; align-items:center; padding:0 8px 12px; }
-.brand span { font-size:17px; color:var(--text); }
+.brand { color:var(--accent); font-size:23px; font-weight:700; text-decoration:none; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0 8px 12px; }
 .sidebar .caption { margin:0 8px; }
 #conversation-list { flex:1; min-height:0; min-width:0; overflow:auto; display:flex; flex-direction:column; gap:5px; }
 .conversation-choice { text-align:left; border-color:transparent; background:transparent; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:42px; flex-shrink:0; }
