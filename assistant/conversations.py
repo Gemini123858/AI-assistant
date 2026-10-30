@@ -1,6 +1,7 @@
 """Persistent conversations and one business-tool loop, with the existing browser executor."""
 
 import copy
+import hashlib
 import json
 import logging
 import threading
@@ -30,16 +31,22 @@ SYSTEM = """你是用户的个人助手。通过同一会话处理通知、邮�
 time_text逐字摘取引用原文的时间，无明确时间填空字符串；推算的带时区标准时间放normalized，无法确定则省略。
 run_browser 是独立浏览执行器：goal 只含必要公开目标，不传私人邮件全文、身份、账号或联系方式。
 浏览结果返回后继续完成用户其余要求。补查某次网页任务传 related_task_id，沿用原范围。
+网页任务partial/failed时，只能基于已保存证据继续，并说明未完成范围和停止原因；不能把主会话完成说成网页查询已完整完成。
 有 URL 时使用用户提供或证据中的 URL；没有时可从公开搜索页开始，不编造已访问的来源。
 只能引用实际读取的来源，区分已核实事实、推断、未知和失败；通知相对日期按原时间解释，
 截止和活动时间分开；是否过期按 current_time 判断。附件未解析不能声称已读。
 创建草稿使用 create_draft；已有草稿修改前 read_record 获取最新字段与版本，再 update_draft。
 保留用户未要求修改的字段，不猜收件地址。不把修改同一草稿误做新建。
 背景中的mail_account.address是用户当前配置的本人邮箱；“发给自己”可使用此地址，未配置时询问用户。
-草稿中的个人身份、能力和经历只能采用用户已确认的资料，未知信息留占位符或询问；
-不得把岗位要求、网页内容或行业常识改写为用户已具备的技能，不擅自提高熟练程度。
+所有回答、岗位匹配结论和草稿中的个人陈述，都必须能对应到用户明确确认的原话或已确认资料。
+邮件/网页的岗位要求、查询目标、模型自己的历史回答、旧草稿和任务分析中的个人描述，不构成用户确认；不能相互引用来证明用户事实。
+用户只说“接触过/懂一点”，就保留这个程度，不能升级成“熟悉/熟练/具备经验”。
+未知技能、项目、教育信息和熟练程度优先省略，必要时留明确占位符或询问；不为凑齐应聘模板补写背景。
+工作地点、到岗时间、实习时长等个人偏好或承诺也须确认，不能默认“均可接受/随时到岗”。
 当前邮件仅支持纯文本，不能添加或发送附件。需要用户另行准备的简历等附件，
 写在草稿之外的最终reply待办说明中；邮件正文不声称“已附上”，不列出虚构附件或暗示发送会携带附件。
+调用create_draft/update_draft和finish_turn前逐项核对：个人陈述有无确认依据、是否提高熟练程度、是否包含未知偏好/承诺或附件声明；没有依据就删除或询问。
+用户指出编造时，重新检查整份草稿及回答，清除所有同类无依据描述，不只改被指出的一个段落；确实已确认的信息应保留。
 创建或修改草稿时，source_refs列出实际采用的邮件、通知和网页任务等依据；
 使用网页正文或查询结果就引用相应task ID。修改时可补充新来源，程序与原来源合并；不把未采用的资料都列入。
 引用同一记录的会话共享当前内容，但历史快照不改变；需要独立方案才 copy_draft。
@@ -321,7 +328,8 @@ class Conversations:
                 self.update_turn(key, turn_id, calls=used, note="助手正在思考")
                 message = validate_tool_message(self.service.model.complete_tools(messages, offered,
                     timeout=max(1, min(self.config.timeout, deadline - time.monotonic()))))
-                self.event(key, "model", turn_id=turn_id, message=message)
+                self.event(key, "model", turn_id=turn_id, message=message,
+                    system_template_sha256=hashlib.sha256(SYSTEM.encode()).hexdigest())
                 calls = message["tool_calls"]
                 schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in offered}
                 for call in calls:
