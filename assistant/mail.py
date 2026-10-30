@@ -44,12 +44,13 @@ EVENT = {"type": "object", "additionalProperties": False, "properties": {
     "required": ["title", "relevance", "importance", "time_kind", "time_text", "action", "uncertainties"],
     "anyOf": [{"required": ["evidence"]}, {"required": ["line_start", "line_end"]}]}
 MAIL_TOOLS = [
-    function("update_profile", "按需提出画像补充并选择公开检索或私人层；原文归属可验证时自动保存，否则留待确认。不能改规则或授权。", {
+    function("update_profile", "从当前邮件提出画像补充，提供evidence原文或完整起止行号；归属可验证时自动保存，否则留待确认。不能改规则或授权。", {
         "text": {"type": "string", "maxLength": 1000}, "evidence": {"type": "string", "maxLength": 2000},
         "line_start": {"type": "integer", "minimum": 1}, "line_end": {"type": "integer", "minimum": 1},
         "speaker": {"type": "string", "maxLength": 120},
         "kind": {"type": "string", "enum": ["fact", "inference"]},
-        "visibility": {"type": "string", "enum": ["public_search", "private"]}},
+        "visibility": {"type": "string", "enum": ["public_search", "private"],
+                       "description": "public_search用于匿名公开检索画像；身份标识、私人信息或拿不准的内容使用private。"}},
         ["text", "speaker", "kind", "visibility"]),
     function("save_mail_analysis", "保存中文摘要与重要事件，程序检查并呈现表格；normalized 无法确定则省略，输出 null 也可。", {
         "summary": {"type": "string", "maxLength": 3000},

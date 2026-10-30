@@ -8,7 +8,7 @@ from pathlib import Path
 
 from assistant.config import Config
 from assistant.errors import AssistantError
-from assistant.followup import FollowupAgent
+from assistant.followup import FOLLOWUP_ANALYSIS_SYSTEM, FOLLOWUP_BROWSING_SYSTEM, FollowupAgent
 from assistant.mail import Mail, parse_text
 from assistant.service import Service
 from assistant.storage import Store
@@ -167,6 +167,12 @@ class MailTests(unittest.TestCase):
         self.assertIn("未执行投递", session["turns"][-1]["text"])
         self.assertIn(LIST, FixtureBrowser.reads)
         followup_calls = self.model.calls[before:]
+        self.assertEqual(followup_calls[0][0], {"role": "system", "content": FOLLOWUP_ANALYSIS_SYSTEM})
+        self.assertEqual(followup_calls[1][0], {"role": "system", "content": FOLLOWUP_BROWSING_SYSTEM})
+        self.assertEqual(followup_calls[2][0], {"role": "system", "content": FOLLOWUP_ANALYSIS_SYSTEM})
+        browsing_names = {tool["function"]["name"] for tool in self.model.tools[before + 1]}
+        self.assertIn("return_to_followup", browsing_names)
+        self.assertTrue(browsing_names.isdisjoint({"finish_task", "analyze_results", "resume_browsing"}))
         self.assertIn("update_profile", [tool["function"]["name"] for tool in self.model.tools[before]])
         self.assertNotIn("update_profile", [tool["function"]["name"] for tool in self.model.tools[before + 1]])
         self.assertIn("PRIVATE_PROFILE_SENTINEL", str(followup_calls[0]))

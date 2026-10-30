@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assistant.config import Config
-from assistant.conversations import SYSTEM
+from assistant.conversations import SYSTEM, TOOLS
 from assistant.llm import APIModel
 from assistant.web import create_app
 from .test_drafts import FakeSMTP
@@ -98,6 +98,7 @@ class ConversationTests(unittest.TestCase):
     def test_system_prompt_reaches_serialized_api_requests_after_tool_execution(self):
         api = APIModel(self.config)
         self.app.extensions["service"].model = api
+        self.config.turn_calls = 2
         outputs = [call("create_draft", {**fields(to=["owner@qq.com"]), "source_refs": []}), finish()]
         responses = [io.BytesIO(json.dumps({"choices": [{"finish_reason": "tool_calls", "message": item}]}).encode())
                      for item in outputs]
@@ -105,11 +106,13 @@ class ConversationTests(unittest.TestCase):
             record = self.turn(self.new(), "给自己起草一封合成测试邮件，先不要发送")
         self.assertEqual(record["turns"][-1]["status"], "completed")
         self.assertEqual(opened.call_count, 2)
-        for request in opened.call_args_list:
+        for request, expected_tools in zip(opened.call_args_list, (TOOLS, [TOOLS[-1]])):
             body = json.loads(request.args[0].data)
             self.assertEqual(body["messages"][0]["role"], "system")
             self.assertTrue(body["messages"][0]["content"].startswith(SYSTEM + "\n"))
             self.assertEqual(main_background(body["messages"])["mail_account"]["address"], "owner@qq.com")
+            self.assertEqual(body["tools"], expected_tools)
+            self.assertEqual(body["tool_choice"], "required")
         versions = [event["system_template_sha256"] for event in record["events"] if event["type"] == "model"]
         self.assertEqual(versions, [hashlib.sha256(SYSTEM.encode()).hexdigest()] * 2)
         self.assertEqual(self.smtp.messages, [])
