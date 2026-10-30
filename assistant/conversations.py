@@ -33,6 +33,12 @@ run_browser 是独立浏览执行器：goal 只含必要公开目标，不传私
 截止和活动时间分开；是否过期按 current_time 判断。附件未解析不能声称已读。
 创建草稿使用 create_draft；已有草稿修改前 read_record 获取最新字段与版本，再 update_draft。
 保留用户未要求修改的字段，不猜收件地址。不把修改同一草稿误做新建。
+草稿中的个人身份、能力和经历只能采用用户已确认的资料，未知信息留占位符或询问；
+不得把岗位要求、网页内容或行业常识改写为用户已具备的技能，不擅自提高熟练程度。
+当前邮件仅支持纯文本，不能添加或发送附件。需要用户另行准备的简历等附件，
+写在草稿之外的最终reply待办说明中；邮件正文不声称“已附上”，不列出虚构附件或暗示发送会携带附件。
+创建或修改草稿时，source_refs列出实际采用的邮件、通知和网页任务等依据；
+使用网页正文或查询结果就引用相应task ID。修改时可补充新来源，程序与原来源合并；不把未采用的资料都列入。
 引用同一记录的会话共享当前内容，但历史快照不改变；需要独立方案才 copy_draft。
 没有发送邮件、登录、上传、提交表单工具。邮件发送须用户在草稿面板检查并点击。
 用户明确要求记住/纠正时可 update_memory，source_quote 必须逐字引用本轮用户要求；
@@ -87,7 +93,8 @@ TOOLS = [
     function("read_web_source", "读取已保存网页的正文和出处，不重新访问网站。", {"task_id": TEXT, "page_id": TEXT}),
     function("create_draft", "新建本地草稿，未知收件地址留空，来源可跨类型；不发送。", {**FIELDS, "source_refs": REFS}),
     function("update_draft", "修改已读取草稿的当前版本；保留未要求改变的字段，不发送。", {
-        "id": TEXT, "version": {"type": "integer", "minimum": 1}, **FIELDS}),
+        "id": TEXT, "version": {"type": "integer", "minimum": 1}, **FIELDS,
+        "source_refs": REFS}, ["id", "version", *FIELDS]),
     function("copy_draft", "复制为独立草稿，不影响原草稿。", {"id": TEXT}),
     function("read_memory_history", "按需查看画像或规则的变更前后内容和来源，用于用户明确要求的纠正／撤销。", {
         "kind": {"type": "string", "enum": ["public_profile", "profile", "rules"]}}),
@@ -433,7 +440,7 @@ class Conversations:
         if name == "create_draft":
             record = self.drafts.create({**args, "source": {"kind": "records", "refs": args["source_refs"]}}, origin=origin)
         elif name == "update_draft":
-            record = self.drafts.update(args["id"], args)
+            record = self.drafts.update(args["id"], args, revision_reason="assistant")
         elif name == "copy_draft":
             original = self.store.get_draft(args["id"])
             record = self.drafts.create({**validate_fields(original, self.config.qq_imap_user),

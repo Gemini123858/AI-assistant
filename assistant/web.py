@@ -158,6 +158,9 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     @app.get("/api/records/<kind>/<key>")
     def record_detail(kind, key):
         ref = {"kind": kind, "id": key}
+        if request.args.get("summary") == "1":
+            snapshot = conversations.records.read(ref)
+            return jsonify(record={name: snapshot[name] for name in ("ref", "title", "status", "updated_at")})
         snapshot = conversations.records.read(ref, fetch_body=True)
         raw = conversations.records.raw(ref)
         if kind == "task":

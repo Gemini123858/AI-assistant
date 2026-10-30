@@ -29,6 +29,17 @@ def text_field(value, name, maximum=12000, allow_empty=False):
     return value
 
 
+def draft_sources(record):
+    """Read current and legacy draft source references without rewriting the file."""
+    if record.get("source_refs"):
+        return copy.deepcopy(record["source_refs"])
+    source = record["source"]
+    if source["kind"] == "records":
+        return copy.deepcopy(source["refs"])
+    kind = "notification" if source["kind"] == "notifications" else source["kind"]
+    return [{"kind": kind, "id": key} for key in source.get("keys", [])]
+
+
 def normalize_message(payload):
     if not isinstance(payload, dict):
         raise AssistantError("通知必须是 JSON 对象。")
@@ -510,6 +521,7 @@ class Store:
     @staticmethod
     def _draft_revision(record, reason, created_at=None, restored_from=None):
         revision = {"version": record["version"], "reason": reason,
+                    "source_refs": draft_sources(record),
                     "created_at": created_at or now_iso(),
                     **{name: copy.deepcopy(record[name]) for name in
                        ("from", "to", "cc", "bcc", "subject", "body")}}
@@ -558,15 +570,15 @@ class Store:
 
     def update_draft(self, key, expected_version, changes, *, bump=True,
                      revision_reason=None, restored_from=None):
-        allowed = {"from", "to", "cc", "bcc", "subject", "body", "turns", "status", "send", "error"}
+        allowed = {"from", "to", "cc", "bcc", "subject", "body", "turns", "status", "send", "error", "source", "source_refs"}
         if set(changes) - allowed:
-            raise AssistantError("不能修改草稿身份或来源。", 500)
+            raise AssistantError("不能修改草稿身份。", 500)
         with self._mutex:
             record = self.get_draft(key)
             if record["version"] != expected_version:
                 raise AssistantError("草稿已被更新，请刷新后再操作。", 409)
-            content = ("from", "to", "cc", "bcc", "subject", "body")
-            content_changed = any(name in changes and changes[name] != record[name] for name in content)
+            content = ("from", "to", "cc", "bcc", "subject", "body", "source", "source_refs")
+            content_changed = any(name in changes and changes[name] != record.get(name) for name in content)
             changed = any(record.get(name) != value for name, value in changes.items())
             if not changed:
                 return record
@@ -594,7 +606,10 @@ class Store:
                 raise AssistantError("没有找到要恢复的草稿版本。", 404)
             fields = {name: copy.deepcopy(revision[name]) for name in
                       ("from", "to", "cc", "bcc", "subject", "body")}
-            if all(fields[name] == record[name] for name in fields):
+            if "source_refs" in revision and revision["source_refs"] != draft_sources(record):
+                fields.update(source_refs=copy.deepcopy(revision["source_refs"]),
+                              source={"kind": "records", "keys": [], "refs": copy.deepcopy(revision["source_refs"])})
+            if all(fields[name] == record.get(name) for name in fields):
                 return record
             return self.update_draft(key, expected_version,
                 {**fields, "status": "draft", "send": None, "error": None},

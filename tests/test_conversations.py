@@ -98,6 +98,7 @@ class ConversationTests(unittest.TestCase):
         manual_headers = {**self.headers, "X-Conversation-ID": second}
         response = self.client.put(f"/api/drafts/{draft_id}", json={"version": 1, **fields(body="手工修改 v2")}, headers=manual_headers)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["draft"]["revisions"][-1]["reason"], "manual")
         self.model.outputs = [call("read_record", {"ref": ref}), finish()]
         record = self.turn(first, "再看一下最新内容")
         self.assertEqual(created["data"]["body"], "合成正文")
@@ -139,6 +140,19 @@ class ConversationTests(unittest.TestCase):
         self.assertIsNone(self.app.extensions["service"].followups()["task"])
         self.assertEqual(self.smtp.messages, [])
 
+    def test_assistant_updates_draft_and_adds_used_sources(self):
+        original, _ = self.store.import_message(notification())
+        source = {"kind": "notification", "id": original["id"]}
+        draft = self.app.extensions["drafts"].create(fields())
+        self.model.outputs = [call("update_draft", {"id": draft["id"], "version": 1,
+            **fields(body="根据通知补充正文"), "source_refs": [source]}), finish()]
+        record = self.turn(self.new(), "参考这条通知修改草稿", [source, {"kind": "draft", "id": draft["id"]}])
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        saved = self.store.get_draft(draft["id"])
+        self.assertEqual(saved["source_refs"], [source])
+        self.assertEqual(saved["revisions"][-1]["reason"], "assistant")
+        self.assertEqual(saved["body"], "根据通知补充正文")
+
     def test_tool_error_is_saved_and_assistant_can_continue(self):
         key = self.new()
         self.model.outputs = [call("update_draft", {"id": "0"*32, "version": 1, **fields()}), finish("没有找到草稿，请重新选择。")]
@@ -179,6 +193,10 @@ class ConversationTests(unittest.TestCase):
         saved = self.app.extensions["mail"].get(mail["id"])
         self.assertIsNone(saved["text"])
         self.assertEqual(saved["triage"]["decision"], "review")
+        summary = self.client.get(f'/api/records/mail/{mail["id"]}?summary=1')
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(set(summary.json["record"]), {"ref", "title", "status", "updated_at"})
+        self.assertIsNone(self.app.extensions["mail"].get(mail["id"])["text"])
 
     def test_cancel_closes_pending_tool_call_without_writing(self):
         key = self.new()

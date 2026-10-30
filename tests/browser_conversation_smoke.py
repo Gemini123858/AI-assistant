@@ -65,6 +65,9 @@ def main():
                 expect(page.locator("#chat-history")).to_contain_text("合成查询与草稿已完成", timeout=20000)
                 page.locator(".record-link").filter(has_text="邮件草稿").last.click()
                 expect(page.locator("#draft-body")).to_have_value("合成正文")
+                expect(page.locator("#record-content")).to_contain_text("草稿来源（2）")
+                expect(page.locator("#record-content button").filter(has_text="邮件 · ")).to_have_text("邮件 · " + mail["subject"])
+                expect(page.locator("#record-content button").filter(has_text="网页任务 · ")).to_contain_text("读取公开岗位要求")
                 page.locator("#draft-body").fill("手动输入，在切换会话前自动保存")
                 page.locator("#new-conversation").click()
                 expect(page.locator("#conversation-list button")).to_have_count(2)
@@ -79,6 +82,8 @@ def main():
                 page.locator(".record-link").filter(has_text="邮件草稿").last.click()
                 expect(page.locator("#draft-body")).to_have_value("合成模型修改后的正文")
                 expect(page.locator("#draft-status")).to_contain_text("v3")
+                expect(page.locator("#draft-revisions")).to_contain_text("v3 · 助手修改")
+                expect(page.locator("#draft-revisions")).to_contain_text("v2 · 手工修改")
                 page.locator("#draft-copy").click()
                 expect(page.locator("#draft-status")).to_contain_text("v1")
                 assert len(app.extensions["store"].list_drafts()) == 2

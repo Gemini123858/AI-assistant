@@ -310,8 +310,15 @@ async function openRecord(ref) {
   $("record-content").replaceChildren(); $("draft-form").hidden = !draft;
   if (draft) {
     if (opened.source_refs.length) {
-      $("record-content").append(node("p", "caption", "草稿来源"));
-      for (const source of opened.source_refs) $("record-content").append(button(`查看来源${names[source.kind]}`, () => openRecord(source)));
+      const sources = node("div", "record-links");
+      $("record-content").append(node("h3", "", `草稿来源（${opened.source_refs.length}）`), node("p", "caption", "点击核对参考资料，不随邮件发送。"), sources);
+      for (const source of opened.source_refs) {
+        const link = button(`查看来源${names[source.kind]}`, () => openRecord(source));
+        sources.append(link);
+        api(`/api/records/${source.kind}/${source.id}?summary=1`).then((result) => {
+          link.textContent = `${names[source.kind]} · ${result.record.title}`;
+        }).catch(() => { link.textContent = `${names[source.kind]} · 来源暂不可用`; });
+      }
     }
     renderDraft(); return;
   }
@@ -383,9 +390,10 @@ function renderDraft() {
   if (!status?.capabilities.send_email) $("draft-status").textContent += " · SMTP 尚未配置";
 }
 function renderRevisions() {
+  const reasons = { created: "创建", manual: "手工修改", assistant: "助手修改", restore: "恢复历史", legacy: "旧数据导入" };
   $("draft-revisions").replaceChildren(...[...draft.revisions].reverse().map((revision) => {
     const row = node("div", "revision-row");
-    row.append(node("span", "", `v${revision.version} · ${revision.subject || "无主题"} · ${formatTime(revision.created_at)}`));
+    row.append(node("span", "", `v${revision.version} · ${reasons[revision.reason] || revision.reason} · ${revision.subject || "无主题"} · ${formatTime(revision.created_at)}`));
     const restore = button(revision.version === draft.version ? "当前版本" : "恢复", async () => {
       await flushDraft();
       const result = await api(`/api/drafts/${draft.id}/restore`, "POST", { version: draft.version, target_version: revision.version }, true);

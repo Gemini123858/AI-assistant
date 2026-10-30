@@ -12,6 +12,7 @@ from assistant.drafts import Drafts
 from assistant.errors import AssistantError
 from assistant.service import Service
 from assistant.storage import Store
+from .test_storage import notification
 
 
 class DraftModel:
@@ -107,6 +108,30 @@ class DraftTests(unittest.TestCase):
         self.assertEqual([item["version"] for item in restored["revisions"]], [1, 2, 3, 4])
         self.assertEqual(restored["revisions"][-1]["reason"], "restore")
         self.assertEqual(restored["revisions"][-1]["restored_from"], 2)
+
+    def test_sources_merge_version_restore_and_legacy_compatibility(self):
+        first, _ = self.store.import_message(notification())
+        second, _ = self.store.import_message(notification(message_id="second", text="另一条合成通知"))
+        refs = [{"kind": "notification", "id": item["id"]} for item in (first, second)]
+        draft = self.drafts.create({"source": {"kind": "notifications", "keys": [first["id"]]}})
+        # Older files stored legacy keys but left the new source_refs field empty.
+        self.assertEqual(draft["revisions"][0]["source_refs"], refs[:1])
+        payload = {name: draft[name] for name in ("to", "cc", "bcc", "subject", "body")}
+        saved = self.drafts.update(draft["id"], {**payload, "version": 1, "source_refs": [refs[1], refs[1]]})
+        self.assertEqual(saved["source_refs"], refs)
+        self.assertEqual(saved["version"], 2)
+        unchanged = self.drafts.update(draft["id"], {**payload, "version": 2, "source_refs": refs})
+        self.assertEqual(unchanged["version"], 2)
+        manual = self.drafts.update(draft["id"], {**payload, "version": 2, "body": "手改正文"})
+        self.assertEqual(manual["source_refs"], refs)
+        restored = self.drafts.restore(draft["id"], {"version": 3, "target_version": 1})
+        self.assertEqual(restored["source_refs"], refs[:1])
+        # Existing revisions without source snapshots keep current references on restore.
+        legacy = self.store.get_draft(draft["id"])
+        legacy["revisions"][1].pop("source_refs")
+        self.store._write_json(self.store._draft_path(draft["id"]), legacy)
+        restored = self.drafts.restore(draft["id"], {"version": 4, "target_version": 2})
+        self.assertEqual(restored["source_refs"], refs[:1])
 
     def test_delete_requires_current_editable_draft_and_removes_all_history(self):
         draft = self.create()

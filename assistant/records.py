@@ -5,7 +5,7 @@ import hashlib
 import json
 
 from .errors import AssistantError
-from .storage import text_field
+from .storage import draft_sources, text_field
 
 
 KINDS = ("notification", "mail", "task", "draft", "memory")
@@ -72,11 +72,7 @@ class Records:
             data = {key: copy.deepcopy(raw.get(key)) for key in
                     ("from", "to", "cc", "bcc", "subject", "body", "version", "send", "error")}
             ref["version"] = raw["version"]
-            sources = raw.get("source_refs", [])
-            if not sources:
-                source = raw["source"]
-                legacy_kind = {"notifications": "notification"}.get(source["kind"], source["kind"])
-                sources = [{"kind": legacy_kind, "id": key} for key in source.get("keys", [])]
+            sources = draft_sources(raw)
         else:
             title = {"public_profile": "公开检索画像", "profile": "私人画像", "rules": "纠正规则"}[ref["id"]]
             status, stamp, data = "saved", "", {"content": raw["content"]}
