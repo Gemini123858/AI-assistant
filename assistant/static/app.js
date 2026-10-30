@@ -1,15 +1,18 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
-const names = { notification: "通知", mail: "邮件", task: "网页任务", draft: "邮件草稿", memory: "画像与规则" };
-const toolNames = { search_records: "搜索资料", read_record: "读取资料", save_notification: "保存通知", save_notification_analysis: "保存通知分析", save_mail_analysis: "保存邮件分析", save_mail_triage: "邮件初筛", suggest_mail_profile: "提议画像更新", sync_mail: "同步邮件", run_browser: "查询公开网页", read_web_source: "读取网页证据", create_draft: "创建草稿", update_draft: "修改草稿", copy_draft: "复制草稿", read_memory_history: "读取记忆历史", update_memory: "更新记忆" };
+const names = { notification: "导入文本", text: "导入文本", notice: "通知", mail: "邮件", task: "网页任务", draft: "邮件草稿", memory: "画像与规则" };
+const toolNames = { search_records: "搜索资料", read_record: "读取资料", save_notification: "导入文本", save_notification_analysis: "保存文本分析", save_text: "导入文本", save_text_analysis: "保存文本分析", create_notice: "创建通知", update_notice: "修改通知", delete_notice: "删除通知", restore_notice: "恢复通知", save_mail_analysis: "保存邮件分析", save_mail_triage: "邮件初筛", suggest_mail_profile: "提议画像更新", sync_mail: "同步邮件", run_browser: "查询公开网页", read_web_source: "读取网页证据", create_draft: "创建草稿", update_draft: "修改草稿", copy_draft: "复制草稿", read_memory_history: "读取记忆历史", update_memory: "更新记忆" };
 const browserNames = { open_url: "打开网页", open_link: "打开链接", observe_page: "观察页面", click_element: "点击控件", click_text: "点击文字", list_tabs: "查看标签页", switch_tab: "切换标签页", close_tab: "关闭标签页", hover_element: "展开菜单", dismiss_overlay: "关闭遮挡", fill_field: "填写搜索内容", scroll_page: "滚动页面", go_back: "返回上一页", refresh_page: "刷新页面", wait_page: "等待页面", press_key: "按键操作", select_option: "选择筛选项", check_field: "勾选筛选项", restart_browser: "重启浏览器", take_screenshot: "查看截图", read_source: "读取已保存正文", search_source: "搜索已保存正文", analyze_results: "分析资料", resume_browsing: "继续浏览", finish_task: "整理查询结果" };
-const statusNames = { draft: "尚未发送", sent: "SMTP 已接受", partial: "部分完成", failed: "失败", unknown: "结果待核查", sending: "发送中", running: "运行中", queued: "待运行", completed: "已完成", cancelled: "已取消", interrupted: "中断", saved: "已保存", pending: "待分析", success: "已分析", analyzed: "已分析" };
+const statusNames = { draft: "尚未发送", sent: "SMTP 已接受", partial: "部分完成", failed: "失败", unknown: "结果待核查", sending: "发送中", running: "运行中", queued: "待运行", completed: "已完成", cancelled: "已取消", interrupted: "中断", saved: "已保存", pending: "待分析", success: "已分析", analyzed: "已分析", active: "已保存", deleted: "已删除" };
 let conversation = null, conversations = [], status = null, pollTimer, toastTimer, selection = new Map();
 let pickerSelection = new Map(), pickerOffset = 0, previewRef = null;
 let opened = null, draft = null, draftBaseVersion = null, draftDirty = false, draftTimer, saveQueue = Promise.resolve();
+let editingNotice = null, noticeBaseline = null;
+const noticeTimes = { start_at: "开始时间", end_at: "结束时间", deadline: "截止时间" };
+const noticeTime = (value) => value ? value.length === 10 ? value : formatTime(value) : "待确认";
 let loadSequence = 0, pickerSequence = 0, recordSequence = 0;
-const refKey = (ref) => `${ref.kind}:${ref.id}`;
+const refKey = (ref) => `${ref.kind === "notification" ? "text" : ref.kind}:${ref.id}`;
 const simpleRef = (ref) => ({ kind: ref.kind, id: ref.id });
 const formatTime = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "";
 function node(tag, className = "", text = "") {
@@ -172,6 +175,7 @@ async function poll() {
   if (finished || data.events.length) await loadList();
   if (finished) {
     await loadStatus();
+    if ($("notices-dialog").open) await loadNotices();
     if (opened && !draftDirty) await openRecord(opened.ref);
   }
   schedulePoll();
@@ -270,12 +274,20 @@ $("new-draft").addEventListener("click", () => work($("new-draft"), async () => 
   $("records-dialog").close(); await openRecord({ kind: "draft", id: result.draft.id }); await poll();
 }));
 $("open-notification-import").addEventListener("click", () => $("notification-dialog").showModal());
+$("import-text").addEventListener("click", () => $("notification-dialog").showModal());
+$("text-file").addEventListener("change", (event) => work(event.target, async () => {
+  const file = event.target.files[0]; if (!file) return;
+  if (file.size > 100000) throw new Error("文本文件请小于100KB。");
+  const text = await file.text();
+  if (text.length > 12000) throw new Error("每份文本最多12000字，请分段导入。");
+  $("notification-text").value = text; event.target.value = "";
+}));
 $("close-notification-import").addEventListener("click", () => $("notification-dialog").close());
 $("import-form").addEventListener("submit", (event) => {
   event.preventDefault(); work(event.submitter, async () => {
     const result = await api("/api/messages", "POST", { conversation: $("notification-conversation").value, text: $("notification-text").value, sent_at: new Date($("sent-at").value).toISOString() });
-    const data = await api(`/api/records/notification/${result.message.id}`);
-    addSelected(data.record); $("notification-dialog").close(); $("records-dialog").close(); toast("通知已保存并添加，尚未分析。");
+    const data = await api(`/api/records/text/${result.message.id}`);
+    addSelected(data.record); $("notification-dialog").close(); $("records-dialog").close(); toast("文本已保存并添加，尚未分析。");
   });
 });
 $("json-file").addEventListener("change", async (event) => {
@@ -283,9 +295,9 @@ $("json-file").addEventListener("change", async (event) => {
   try {
     if (file.size > 100000) throw new Error("JSON 文件请小于100KB。");
     const input = JSON.parse(await file.text()), batch = Array.isArray(input) ? input : [input];
-    if (!batch.length || batch.length > 20) throw new Error("每批导入1～20条通知。");
+    if (!batch.length || batch.length > 20) throw new Error("每批导入1～20份资料。");
     for (const item of batch) await api("/api/messages", "POST", item);
-    await searchRecords(); toast("通知已保存，尚未分析。");
+    await searchRecords(); toast("资料已保存，尚未分析。");
   } catch (error) { toast(`导入未全部完成，已成功项保留：${error.message}`, true); }
   finally { event.target.value = ""; }
 });
@@ -296,6 +308,105 @@ function safeLink(url, text) {
   const link = node("a", "", text); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
 }
 function section(title, text) { const element = node("section", "result-section"); element.append(node("h3", "", title), node("p", "", text)); return element; }
+async function loadNotices() {
+  const query = new URLSearchParams({ view: $("notice-view").value, query: $("notice-query").value });
+  const { notices } = await api(`/api/notices?${query}`);
+  $("notice-cards").replaceChildren(...notices.map((record) => {
+    const card = node("article", "notice-card"), value = record.content;
+    card.append(node("h3", "", value.title));
+    if (value.summary) card.append(node("p", "notice-excerpt", value.summary));
+    card.append(metadata(Object.entries(noticeTimes).filter(([key]) => value[key]).map(([key, label]) => [label, noticeTime(value[key])])));
+    if (!Object.keys(noticeTimes).some((key) => value[key])) card.append(node("p", "caption", "时间待确认"));
+    if (value.action) card.append(node("p", "notice-action", value.action));
+    if (value.uncertainties.length) card.append(node("p", "caption", `${value.uncertainties.length} 项信息待确认`));
+    card.append(node("p", "caption", `v${record.version} · ${value.source_refs.length ? value.source_refs.length + " 份来源" : "手工创建"}${record.deleted_at ? " · 已删除" : ""}`));
+    const actions = noticeActions(record);
+    actions.prepend(button("查看详情", async () => { $("notices-dialog").close(); await openRecord({ kind: "notice", id: record.id }); }));
+    card.append(actions); return card;
+  }));
+  if (!notices.length) $("notice-cards").append(node("p", "caption", "暂无符合条件的通知。可新建，或从邮件、文本和网页分析中保存。"));
+}
+async function attachNotice(record) {
+  const data = await api(`/api/records/notice/${record.id}`);
+  addSelected(data.record); $("notices-dialog").close(); $("preview-dialog").close(); $("records-dialog").close();
+  $("chat-input").focus(); toast("通知已加入当前对话，请继续输入要求。");
+}
+function noticeActions(record) {
+  const actions = node("div", "toolbar notice-actions");
+  if (record.deleted_at) actions.append(button("恢复通知", () => changeNoticeDeletion(record, false)));
+  else actions.append(button("加入对话", () => attachNotice(record)), button("编辑", () => editNotice(record)), button("删除", () => changeNoticeDeletion(record, true), "quiet danger"));
+  return actions;
+}
+async function changeNoticeDeletion(record, deleted) {
+  const data = await api(`/api/notices/${record.id}${deleted ? "" : "/restore"}`, deleted ? "DELETE" : "POST", { version: record.version }, true);
+  if ($("notices-dialog").open) await loadNotices();
+  if (opened?.ref.kind === "notice" && opened.ref.id === record.id) await openRecord(opened.ref);
+  $("preview-dialog").close(); await poll(); toast(deleted ? "通知已删除，可在“已删除”中恢复。" : "通知已恢复。");
+  return data.notice;
+}
+for (const [key, label] of Object.entries(noticeTimes)) {
+  const row = node("div", "notice-time-row"), title = node("label", "", label), mode = node("select"), input = node("input");
+  mode.id = `notice-${key}-mode`; mode.setAttribute("aria-label", `${label}精度`);
+  for (const [value, text] of [["none", "未知"], ["date", "仅日期"], ["datetime-local", "日期与时间"]]) {
+    const option = node("option", "", text); option.value = value; mode.append(option);
+  }
+  input.id = `notice-${key}`; input.type = "date"; input.disabled = true; title.htmlFor = input.id;
+  mode.addEventListener("change", () => { input.type = mode.value === "none" ? "date" : mode.value; input.disabled = mode.value === "none"; input.value = ""; });
+  row.append(title, mode, input); $("notice-time-fields").append(row);
+}
+function noticeFormFields() {
+  const value = { title: $("notice-title").value, summary: $("notice-summary").value, action: $("notice-action").value,
+    uncertainties: $("notice-uncertainties").value.split("\n").map((line) => line.trim()).filter(Boolean) };
+  for (const key of Object.keys(noticeTimes)) {
+    const mode = $("notice-" + key + "-mode").value, input = $("notice-" + key).value;
+    value[key] = mode === "none" || !input ? "" : mode === "date" ? input : new Date(input).toISOString();
+  }
+  return value;
+}
+function editNotice(record = null) {
+  editingNotice = record;
+  const value = record?.content || { title: "", summary: "", action: "", uncertainties: [], source_refs: [] };
+  $("notice-editor-title").textContent = record ? "编辑通知" : "新建通知";
+  for (const key of ["title", "summary", "action"]) $("notice-" + key).value = value[key];
+  $("notice-uncertainties").value = value.uncertainties.join("\n");
+  for (const key of Object.keys(noticeTimes)) {
+    const stamp = value[key] || "", mode = stamp ? stamp.length === 10 ? "date" : "datetime-local" : "none";
+    $("notice-" + key + "-mode").value = mode;
+    const input = $("notice-" + key); input.type = mode === "none" ? "date" : mode; input.disabled = mode === "none";
+    if (mode === "datetime-local") {
+      const date = new Date(stamp); input.value = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    } else input.value = stamp;
+  }
+  $("notice-editor-sources").replaceChildren(node("p", "caption", `来源：${value.source_refs.length} 份资料。编辑卡片不会修改原文。`));
+  $("notice-edit-status").hidden = true; noticeBaseline = noticeFormFields(); $("notice-editor").showModal();
+}
+$("open-notices").addEventListener("click", () => work($("open-notices"), async () => { $("notices-dialog").showModal(); await loadNotices(); }));
+$("close-notices").addEventListener("click", () => $("notices-dialog").close());
+$("new-notice").addEventListener("click", () => editNotice());
+$("close-notice-editor").addEventListener("click", () => $("notice-editor").close());
+$("notice-view").addEventListener("change", () => work($("notice-view"), loadNotices));
+$("notice-search").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, loadNotices); });
+$("notice-form").addEventListener("submit", (event) => {
+  event.preventDefault(); work(event.submitter, async () => {
+    const fields = noticeFormFields(), changes = Object.fromEntries(Object.entries(fields).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(noticeBaseline[key])));
+    try {
+      const data = editingNotice ? await api(`/api/notices/${editingNotice.id}`, "PATCH", { version: editingNotice.version, changes }, true) : await api("/api/notices", "POST", fields, true);
+      $("notice-editor").close(); $("notice-view").value = "all";
+      if ($("notices-dialog").open) await loadNotices();
+      if (opened?.ref.kind === "notice" && opened.ref.id === data.notice.id) await openRecord(opened.ref);
+      if ($("preview-dialog").open && previewRef?.kind === "notice" && previewRef.id === data.notice.id) await previewRecord(previewRef);
+      await poll(); toast("通知已保存。");
+    } catch (error) { $("notice-edit-status").textContent = error.message + " 当前输入已保留，可取消后重新打开最新版本。"; $("notice-edit-status").hidden = false; }
+  });
+});
+function saveAnalysisButton(ref, index, section) {
+  return button("保存为通知", async () => {
+    const data = await api("/api/notices/from-analysis", "POST", { ref: simpleRef(ref), index, section }, true);
+    $("preview-dialog").close(); $("records-dialog").close();
+    await openRecord({ kind: "notice", id: data.notice.id }); await poll();
+    toast(data.notice.deleted_at ? "这条分析已整理过通知，卡片在已删除中，可恢复。" : "已保存为通知，可编辑时间和内容。");
+  });
+}
 function disclosure(title, ...children) {
   const element = node("details", "record-disclosure");
   element.append(node("summary", "", title), ...children); return element;
@@ -402,7 +513,7 @@ function taskLog(detail) {
 function renderRecordContent(content, record, detail, preview = false) {
   const value = record.data, ref = record.ref;
   for (const note of record.coverage.notes) content.append(node("p", "notice", note));
-  if (ref.kind === "notification" || ref.kind === "mail") {
+  if (["text", "notification", "mail"].includes(ref.kind)) {
     content.append(metadata([["发件人", value.sender || value.original?.sender], ["原消息时间", value.date_raw || value.original?.sent_at]]));
     if (value.triage) {
       const decisions = { read: "建议细读", review: "待确认", suggest_ignore: "建议忽略" };
@@ -411,15 +522,16 @@ function renderRecordContent(content, record, detail, preview = false) {
     if (value.analysis) {
       const analysis = value.analysis;
       content.append(section("分析摘要", analysis.summary));
-      for (const event of analysis.events || []) {
+      for (const [index, event] of (analysis.events || []).entries()) {
         const block = section(event.title, event.relevance);
         block.append(metadata([["重要程度", { urgent: "需及时查看", digest: "普通事项", review: "待确认" }[event.importance]],
           [event.time_kind === "deadline" ? "截止时间" : "事项时间", event.normalized ? formatTime(event.normalized) : event.time_text || "未注明"]]));
         if (event.action) block.append(section("建议行动", event.action));
         if (event.evidence) block.append(disclosure("查看原文依据", node("blockquote", "evidence-quote", event.evidence)));
         if (event.uncertainties?.length) block.append(bulletList(event.uncertainties));
-        content.append(block);
+        block.append(saveAnalysisButton(ref, index, "events")); content.append(block);
       }
+      if (["text", "notification"].includes(ref.kind)) content.append(saveAnalysisButton(ref, 0, "analysis"));
       if (analysis.actions?.length) content.append(section("建议行动", analysis.actions.join("\n")));
       if (analysis.relevance_reason) content.append(section("相关性", analysis.relevance_reason));
       for (const time of analysis.times || []) content.append(section(time.kind === "deadline" ? "截止时间" : "事项时间", `${time.text}${time.normalized ? " · " + formatTime(time.normalized) : " · 精确时间待确认"}`));
@@ -441,6 +553,26 @@ function renderRecordContent(content, record, detail, preview = false) {
         await api(`/api/mail/${ref.id}/profile/${index}/confirm`, "POST", {}, true); await openRecord(ref); await poll();
       }));
     }
+  } else if (ref.kind === "notice") {
+    content.append(section("说明", value.summary || "暂无补充说明"), metadata(Object.entries(noticeTimes).map(([key, label]) => [label, noticeTime(value[key])])));
+    if (value.action) content.append(section("建议行动", value.action));
+    if (value.uncertainties.length) content.append(section("待确认", value.uncertainties.join("\n")));
+    const sources = disclosure(`来源资料（${value.source_refs.length}）`);
+    for (const source of value.source_refs) {
+      sources.append(button(`查看来源${names[source.kind]}`, async () => {
+        $("preview-dialog").close(); $("records-dialog").close(); await openRecord(source);
+      }));
+      if (source.url) sources.append(safeLink(source.url, "打开来源网页"));
+      if (source.quote) sources.append(node("blockquote", "evidence-quote", source.quote));
+    }
+    content.append(sources, noticeActions(detail));
+    const history = disclosure("修改历史");
+    const actions = { create: "创建", update: "修改", delete: "删除", restore: "恢复" };
+    for (const revision of [...detail.revisions].reverse()) {
+      history.append(disclosure(`v${revision.version} · ${revision.actor === "assistant" ? "助手" : "手工"}${actions[revision.action]} · ${formatTime(revision.created_at)}`,
+        metadata([["标题", revision.content.title], ["说明", revision.content.summary], ["行动", revision.content.action], ...Object.entries(noticeTimes).map(([key, label]) => [label, noticeTime(revision.content[key])])])));
+    }
+    content.append(history);
   } else if (ref.kind === "task") {
     const sources = taskSources(detail.pages || []);
     content.append(metadata([["查询状态", statusNames[record.status] || record.status], ["模型调用", value.calls], ["浏览动作", value.steps], ["已保存网页", detail.pages.length]]));
@@ -448,7 +580,8 @@ function renderRecordContent(content, record, detail, preview = false) {
     if (value.result) {
       content.append(section("查询结果", value.result.summary));
       if (value.result.coverage) content.append(node("p", "caption", value.result.coverage));
-      for (const result of [...(value.result.findings || []), ...(value.result.jobs || [])]) {
+      const findings = value.result.findings || [];
+      for (const [index, result] of [...findings, ...(value.result.jobs || [])].entries()) {
         const block = section(result.title || "发现", result.text || result.reason);
         if (result.fit) block.append(node("p", "status-badge", { potential_match: "可能匹配", needs_confirmation: "需要确认", not_match: "不匹配" }[result.fit] || result.fit));
         block.append(safeLink(result.url, "打开来源网页"));
@@ -456,6 +589,7 @@ function renderRecordContent(content, record, detail, preview = false) {
         if (quote) block.append(node("blockquote", "evidence-quote", quote));
         if (sources.cards.has(result.page_id)) block.append(button(`定位原文 · ${result.page_id}${result.line_start ? ` 第 ${result.line_start}–${result.line_end} 行` : ""}`, () => sources.cards.get(result.page_id).show(result.line_start, result.line_end)));
         if (result.uncertainties?.length) block.append(bulletList(result.uncertainties));
+        block.append(saveAnalysisButton(ref, index < findings.length ? index : index - findings.length, index < findings.length ? "findings" : "jobs"));
         content.append(block);
       }
       if (value.result.questions?.length) content.append(section("待确认", value.result.questions.join("\n")));

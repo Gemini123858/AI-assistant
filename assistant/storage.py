@@ -82,7 +82,7 @@ class Store:
         self._closed = False
         for directory in (self.root, self.root / "messages", self.root / "memory",
                           self.root / "memory" / "history", self.root / "tasks",
-                          self.root / "drafts", self.root / "conversations"):
+                          self.root / "drafts", self.root / "conversations", self.root / "notices"):
             if directory.is_symlink():
                 raise AssistantError("数据目录不能是符号链接。", 500)
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -230,6 +230,65 @@ class Store:
             self._recover_memory()
             return {kind: self._read_text(self.root / "memory" / f"{kind}.md")
                     for kind in ("public_profile", "profile", "rules")}
+
+    def _notice_path(self, key):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
+            raise AssistantError("通知卡片标识无效。")
+        return self.root / "notices" / f"{key}.json"
+
+    def get_notice(self, key):
+        with self._mutex:
+            path = self._notice_path(key)
+            if not path.exists():
+                raise AssistantError("通知卡片不存在。", 404)
+            record = self._read_json(path)
+            if (record.get("id") != key or type(record.get("version")) is not int
+                    or not isinstance(record.get("content"), dict)
+                    or not isinstance(record.get("revisions"), list)):
+                raise AssistantError("通知卡片文件内容无效，不会自动覆盖。", 500)
+            return record
+
+    def list_notices(self):
+        with self._mutex:
+            self._ensure_open()
+            return [self.get_notice(path.stem) for path in (self.root / "notices").glob("*.json")]
+
+    @staticmethod
+    def _notice_revision(record, actor, action):
+        return {"version": record["version"], "actor": actor, "action": action,
+                "created_at": record["updated_at"], "content": copy.deepcopy(record["content"]),
+                "deleted_at": record["deleted_at"]}
+
+    def create_notice(self, content, *, actor, origin=None, dedupe_key=None):
+        with self._mutex:
+            if dedupe_key:
+                existing = next((r for r in self.list_notices() if r.get("dedupe_key") == dedupe_key), None)
+                if existing:
+                    return existing, False
+            stamp = now_iso()
+            record = {"schema_version": 1, "id": uuid.uuid4().hex, "version": 1,
+                      "created_at": stamp, "updated_at": stamp, "deleted_at": None,
+                      "content": copy.deepcopy(content), "dedupe_key": dedupe_key, "origin": origin}
+            record["revisions"] = [self._notice_revision(record, actor, "create")]
+            self._write_json(self._notice_path(record["id"]), record)
+            return record, True
+
+    def change_notice(self, key, expected_version, *, content=None, action="update", actor="manual"):
+        with self._mutex:
+            record = self.get_notice(key)
+            if record["version"] != expected_version:
+                raise AssistantError("通知已被更新，请重新打开后再操作。", 409)
+            if action == "update" and record["deleted_at"]:
+                raise AssistantError("通知已删除，请先恢复。", 409)
+            deleted_at = now_iso() if action == "delete" else None if action == "restore" else record["deleted_at"]
+            if (content is None or content == record["content"]) and bool(deleted_at) == bool(record["deleted_at"]):
+                return record
+            if content is not None:
+                record["content"] = copy.deepcopy(content)
+            record.update(version=record["version"] + 1, updated_at=now_iso(), deleted_at=deleted_at)
+            record["revisions"].append(self._notice_revision(record, actor, action))
+            self._write_json(self._notice_path(key), record)
+            return record
 
     def _task_path(self, key):
         if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):

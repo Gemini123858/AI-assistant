@@ -8,13 +8,16 @@ from .errors import AssistantError
 from .storage import draft_sources, text_field
 
 
-KINDS = ("notification", "mail", "task", "draft", "memory")
+KINDS = ("text", "notice", "mail", "task", "draft", "memory")
 
 
 def record_ref(value):
-    if not isinstance(value, dict) or value.get("kind") not in KINDS:
+    if not isinstance(value, dict):
         raise AssistantError("资料类型无效。")
-    return {"kind": value["kind"], "id": text_field(value.get("id"), "资料标识", 128)}
+    kind = "text" if value.get("kind") == "notification" else value.get("kind")
+    if kind not in KINDS:
+        raise AssistantError("资料类型无效。")
+    return {"kind": kind, "id": text_field(value.get("id"), "资料标识", 128)}
 
 
 class Records:
@@ -24,8 +27,10 @@ class Records:
     def raw(self, ref, *, fetch_body=False):
         ref = record_ref(ref)
         kind, key = ref["kind"], ref["id"]
-        if kind == "notification":
+        if kind == "text":
             return self.store.get_message(key)
+        if kind == "notice":
+            return self.store.get_notice(key)
         if kind == "mail":
             return self.mail.read_body(key) if fetch_body else self.mail.get(key)
         if kind == "task":
@@ -37,17 +42,26 @@ class Records:
         return {"id": key, "content": self.store.memory()[key]}
 
     def read(self, ref, *, fetch_body=False):
+        ref = record_ref(ref)
         raw = self.raw(ref, fetch_body=fetch_body)
         ref = {"kind": ref["kind"], "id": raw["id"]}
         kind = ref["kind"]
         notes, sources = [], []
-        if kind == "notification":
+        if kind == "text":
             original = raw["original"]
             title = (raw.get("analysis") or {}).get("summary") or original["text"][:80]
             data = {key: raw.get(key) for key in ("original", "analysis", "error", "coverage")}
             status, stamp = raw["status"], raw.get("analyzed_at") or raw["imported_at"]
             if original["attachments"]:
                 notes.append("附件未解析")
+        elif kind == "notice":
+            title, stamp = raw["content"]["title"], raw["updated_at"]
+            status = "deleted" if raw["deleted_at"] else "active"
+            data = {**copy.deepcopy(raw["content"]), "version": raw["version"], "deleted_at": raw["deleted_at"]}
+            ref["version"] = raw["version"]
+            sources = copy.deepcopy(raw["content"]["source_refs"])
+            if raw["deleted_at"]:
+                notes.append("通知已删除，可恢复后继续编辑。")
         elif kind == "mail":
             title, status = raw["subject"], "analyzed" if raw["analysis"] else "saved"
             stamp = raw.get("analyzed_at") or raw["synced_at"]
@@ -83,15 +97,21 @@ class Records:
         snapshot["fingerprint"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         return snapshot
 
-    def search(self, *, kind="all", query="", offset=0, limit=30):
+    def search(self, *, kind="all", query="", offset=0, limit=30, include_deleted=False):
+        if type(include_deleted) is not bool:
+            raise AssistantError("已删除通知筛选参数无效。")
+        if kind == "notification":
+            kind = "text"
         if kind not in (*KINDS, "all"):
             raise AssistantError("资料类型无效。")
         query = text_field(query, "搜索词", 300, True).casefold()
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
             raise AssistantError("资料分页参数无效。")
         refs = []
-        if kind in {"all", "notification"}:
-            refs.extend({"kind": "notification", "id": item["id"]} for item in self.store.list_messages())
+        if kind in {"all", "text"}:
+            refs.extend({"kind": "text", "id": item["id"]} for item in self.store.list_messages())
+        if kind in {"all", "notice"}:
+            refs.extend({"kind": "notice", "id": item["id"]} for item in self.store.list_notices() if include_deleted or not item["deleted_at"])
         if kind in {"all", "mail"}:
             refs.extend({"kind": "mail", "id": item["id"]} for item in self.mail.records())
         if kind in {"all", "task"}:

@@ -193,7 +193,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_assistant_updates_draft_and_adds_used_sources(self):
         original, _ = self.store.import_message(notification())
-        source = {"kind": "notification", "id": original["id"]}
+        source = {"kind": "text", "id": original["id"]}
         draft = self.app.extensions["drafts"].create(fields())
         self.model.outputs = [call("update_draft", {"id": draft["id"], "version": 1,
             **fields(body="根据通知补充正文"), "source_refs": [source]}), finish()]
@@ -210,6 +210,54 @@ class ConversationTests(unittest.TestCase):
         record = self.turn(key, "修改不存在的草稿")
         self.assertEqual(record["turns"][-1]["status"], "completed")
         self.assertTrue(any(event["type"] == "tool_result" and event["output"].get("failed") for event in record["events"]))
+
+    def test_notice_tools_shared_edit_delete_restore_and_manual_actions(self):
+        first, second = self.new(), self.new()
+        text, _ = self.store.import_message(notification())
+        source = {"kind": "text", "id": text["id"]}
+        self.model.outputs = [call("create_notice", {"title": "合成通知", "deadline": "2027-01-01", "source_refs": [source]}), finish()]
+        record = self.turn(first, "将资料整理为通知", [source])
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        notice = self.store.list_notices()[0]
+        ref = {"kind": "notice", "id": notice["id"]}
+        initial = next(e["output"]["records"][0] for e in record["events"] if e["type"] == "tool_result" and e["output"].get("records"))
+        self.model.outputs = [call("read_record", {"ref": ref}),
+            call("update_notice", {"id": notice["id"], "version": 1, "changes": {"deadline": "2027-02-02"}}), finish()]
+        self.turn(second, "将这条通知的截止日期改成2027年2月2日", [ref])
+        self.assertEqual(self.store.get_notice(notice["id"])["revisions"][-1]["actor"], "assistant")
+        self.assertEqual(initial["data"]["deadline"], "2027-01-01")
+        response = self.client.patch(f'/api/notices/{notice["id"]}', json={"version": 2, "changes": {"summary": "手工补充"}}, headers={**self.headers, "X-Conversation-ID": second})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["notice"]["revisions"][-1]["actor"], "manual")
+        self.model.outputs = [call("delete_notice", {"id": notice["id"], "version": 3}), finish()]
+        self.turn(first, "删除这条通知", [ref])
+        self.assertEqual(self.controller.records.search(kind="notice")["total"], 0)
+        self.model.outputs = [call("restore_notice", {"id": notice["id"], "version": 4}), finish()]
+        record = self.turn(second, "恢复这条通知")
+        self.assertEqual(self.store.get_notice(notice["id"])["version"], 5)
+        self.assertTrue(any(e["type"] == "record_update" for e in record["events"]))
+        self.assertEqual(self.store.get_message(text["id"])["original"], text["original"])
+
+    def test_mail_analysis_can_create_separate_notice_cards_without_reanalysis(self):
+        self.imap.uids = [10]
+        mail = self.app.extensions["mail"].read_latest()
+        data = analysis()
+        data["events"].append({**data["events"][0], "title": "另一件合成事项"})
+        self.model.outputs = [call("save_mail_analysis", {"id": mail["id"], "analysis": data}), finish()]
+        self.turn(self.new(), "分析邮件", [{"kind": "mail", "id": mail["id"]}])
+        payload = {"ref": {"kind": "mail", "id": mail["id"]}, "section": "events", "index": 0}
+        first = self.client.post("/api/notices/from-analysis", json=payload, headers=self.headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(self.client.post("/api/notices/from-analysis", json=payload, headers=self.headers).status_code, 200)
+        second = self.client.post("/api/notices/from-analysis", json={**payload, "index": 1}, headers=self.headers)
+        self.assertEqual(second.status_code, 201)
+        self.assertNotEqual(first.json["notice"]["id"], second.json["notice"]["id"])
+        self.assertEqual(self.app.extensions["mail"].get(mail["id"])["analysis"], data)
+        saved = self.app.extensions["mail"].get(mail["id"])
+        saved["analysis"]["events"].reverse()
+        self.app.extensions["mail"].save(saved)
+        repeated = self.client.post("/api/notices/from-analysis", json={**payload, "index": 1}, headers=self.headers)
+        self.assertEqual(repeated.json["notice"]["id"], first.json["notice"]["id"])
 
     def test_missing_mail_quote_can_be_corrected_using_numbered_lines(self):
         self.imap.uids = [10]
@@ -246,9 +294,9 @@ class ConversationTests(unittest.TestCase):
         original = notification()
         def analyze_saved(messages):
             output = json.loads(messages[-1]["content"])
-            return call("save_notification_analysis", {"id": output["records"][0]["ref"]["id"], "analysis": analysis_output()})
-        self.model.outputs = [call("search_records", {"kind": "notification", "query": "报名"}),
-            call("save_notification", {name: original[name] for name in ("text", "conversation", "sent_at", "sender")}),
+            return call("save_text_analysis", {"id": output["records"][0]["ref"]["id"], "analysis": analysis_output()})
+        self.model.outputs = [call("search_records", {"kind": "text", "query": "报名"}),
+            call("save_text", {name: original[name] for name in ("text", "conversation", "sent_at", "sender")}),
             analyze_saved, call("update_memory", {"kind": "public_profile", "content": "正在找实习", "append": True,
                 "source_quote": "记住我正在找实习"}), finish()]
         record = self.turn(key, "保存并分析这条通知；记住我正在找实习")

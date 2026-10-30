@@ -96,7 +96,7 @@ class Drafts:
                 raise AssistantError("草稿来源必须是不超过30项的资料引用。")
             checked = []
             for ref in refs:
-                if (not isinstance(ref, dict) or ref.get("kind") not in {"mail", "notification", "task", "draft", "memory"}
+                if (not isinstance(ref, dict) or ref.get("kind") not in {"mail", "text", "notice", "notification", "task", "draft", "memory"}
                         or not isinstance(ref.get("id"), str)):
                     raise AssistantError("草稿来源引用无效。")
                 reference = {"kind": ref["kind"], "id": ref["id"]}

@@ -101,12 +101,26 @@ textarea { resize:vertical; line-height:1.65; }
 #preview-content a { overflow-wrap:anywhere; color:var(--accent); }
 #preview-dialog>.panel-heading { position:sticky; top:-22px; z-index:1; background:var(--surface); margin:-22px -22px 12px; padding:16px 22px; border-bottom:1px solid var(--line); }
 .preview-footer { position:sticky; bottom:-22px; background:var(--surface); margin:12px -22px -22px; padding:12px 22px; border-top:1px solid var(--line); }
+.notice-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr)); gap:14px; margin-top:18px; }
+.notice-card { border:1px solid var(--line); border-radius:12px; padding:18px; background:var(--surface); min-width:0; overflow-wrap:anywhere; }
+.notice-card h3 { font-size:17px; }
+.notice-excerpt { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; white-space:pre-wrap; }
+.notice-action { white-space:pre-wrap; border-left:3px solid #b7cfc1; padding-left:10px; }
+.notice-actions { margin-top:14px; }
+.notice-actions button { font-size:12px; padding:6px 10px; }
+.notice-time-row { display:grid; grid-template-columns:70px 115px minmax(0,1fr); gap:8px; align-items:center; }
+.notice-time-row select,.notice-time-row input { margin:0; }
+#notices-dialog { width:min(1000px,96vw); }
+#notice-editor { width:min(680px,96vw); }
+#notices-dialog>.panel-heading,#notice-editor>.panel-heading { position:sticky; top:-22px; z-index:1; background:var(--surface); margin:-22px -22px 12px; padding:16px 22px; border-bottom:1px solid var(--line); }
+@media(max-width:700px) { .notice-time-row { grid-template-columns:1fr 2fr; } .notice-time-row>label { grid-column:1/-1; margin-bottom:0; } .composer-footer { flex-wrap:wrap; } }
 summary { cursor:pointer; }
 dialog { width:min(760px,94vw); max-height:90dvh; overflow:auto; border:1px solid var(--line); border-radius:14px; padding:22px; color:var(--text); }
 dialog::backdrop { background:#162b2466; }
 .search-row { display:flex; gap:8px; margin:16px 0; }
 .search-row input,.search-row select { margin:0; }
 .search-row select { max-width:160px; }
+.search-row button { flex-shrink:0; white-space:nowrap; }
 .record-results { margin:14px 0; min-height:100px; }
 .picker-row { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--line); }
 .picker-row label { display:flex; gap:12px; align-items:center; flex:1; min-width:0; margin:0; color:var(--text); }

@@ -167,6 +167,57 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
             raw = {name: value for name, value in raw.items() if name != "memory"}
         return jsonify(record=snapshot, detail=raw)
 
+    def notice_action(conversation, message, record):
+        if conversation:
+            conversations.record_action(conversation, message, [conversations.records.read({"kind": "notice", "id": record["id"]})])
+        return jsonify(notice=record)
+
+    @app.get("/api/notices")
+    def notice_list():
+        return jsonify(notices=conversations.notices.list(request.args.get("view", "all"), request.args.get("query", "")))
+
+    @app.post("/api/notices")
+    def notice_create():
+        conversation = action_conversation()
+        with service.operation():
+            record, created = conversations.notices.create(body(), origin={"conversation_id": conversation})
+            return notice_action(conversation if created else None, "用户新建通知", record), 201 if created else 200
+
+    @app.post("/api/notices/from-analysis")
+    def notice_from_analysis():
+        conversation = action_conversation()
+        payload = body()
+        fields = conversations.notices.from_analysis(payload.get("ref"), payload.get("index", 0), payload.get("section", "analysis"))
+        with service.operation():
+            record, created = conversations.notices.create(fields, origin={"conversation_id": conversation})
+            return notice_action(conversation if created else None, "用户将分析保存为通知", record), 201 if created else 200
+
+    @app.get("/api/notices/<key>")
+    def notice_detail(key):
+        return jsonify(notice=store.get_notice(key))
+
+    @app.patch("/api/notices/<key>")
+    def notice_update(key):
+        conversation = action_conversation()
+        with service.operation():
+            before = store.get_notice(key)
+            record = conversations.notices.update(key, body())
+            return notice_action(conversation if record != before else None, "用户编辑通知", record)
+
+    @app.delete("/api/notices/<key>")
+    def notice_delete(key):
+        conversation = action_conversation()
+        with service.operation():
+            record = conversations.notices.set_deleted(key, body(), True)
+            return notice_action(conversation, "用户删除通知（可恢复）", record)
+
+    @app.post("/api/notices/<key>/restore")
+    def notice_restore(key):
+        conversation = action_conversation()
+        with service.operation():
+            record = conversations.notices.set_deleted(key, body(), False)
+            return notice_action(conversation, "用户恢复通知", record)
+
     @app.get("/")
     def index():
         return render_template("index.html", csrf_token=csrf_token, auth_enabled=bool(config.access_token))
