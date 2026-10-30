@@ -2,7 +2,8 @@
 const $ = (id) => document.getElementById(id);
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const names = { notification: "通知", mail: "邮件", task: "网页任务", draft: "邮件草稿", memory: "画像与规则" };
-const toolNames = { search_records: "搜索资料", read_record: "读取资料", save_notification: "保存通知", save_notification_analysis: "保存通知分析", save_mail_analysis: "保存邮件分析", suggest_mail_profile: "提议画像更新", sync_mail: "同步邮件", run_browser: "查询公开网页", read_web_source: "读取网页证据", create_draft: "创建草稿", update_draft: "修改草稿", copy_draft: "复制草稿", update_memory: "更新记忆" };
+const toolNames = { search_records: "搜索资料", read_record: "读取资料", save_notification: "保存通知", save_notification_analysis: "保存通知分析", save_mail_analysis: "保存邮件分析", save_mail_triage: "邮件初筛", suggest_mail_profile: "提议画像更新", sync_mail: "同步邮件", run_browser: "查询公开网页", read_web_source: "读取网页证据", create_draft: "创建草稿", update_draft: "修改草稿", copy_draft: "复制草稿", read_memory_history: "读取记忆历史", update_memory: "更新记忆" };
+const browserNames = { open_url: "打开网页", open_link: "打开链接", observe_page: "观察页面", click_element: "点击控件", click_text: "点击文字", list_tabs: "查看标签页", switch_tab: "切换标签页", close_tab: "关闭标签页", hover_element: "展开菜单", dismiss_overlay: "关闭遮挡", fill_field: "填写搜索内容", scroll_page: "滚动页面", go_back: "返回上一页", refresh_page: "刷新页面", wait_page: "等待页面", press_key: "按键操作", select_option: "选择筛选项", check_field: "勾选筛选项", restart_browser: "重启浏览器", take_screenshot: "查看截图", read_source: "读取已保存正文", search_source: "搜索已保存正文", analyze_results: "分析资料", resume_browsing: "继续浏览", finish_task: "整理查询结果" };
 const statusNames = { draft: "尚未发送", sent: "SMTP 已接受", partial: "部分完成", failed: "失败", unknown: "结果待核查", sending: "发送中", running: "运行中", queued: "待运行", completed: "已完成", cancelled: "已取消", interrupted: "中断", saved: "已保存", pending: "待分析", success: "已分析", analyzed: "已分析" };
 let conversation = null, conversations = [], status = null, pollTimer, toastTimer, selection = new Map();
 let pickerSelection = new Map(), pickerOffset = 0, previewRef = null;
@@ -115,10 +116,9 @@ function renderConversation(forceScroll = false) {
         const call = model?.message.tool_calls.find((item) => item.id === event.call_id);
         group.count += 1;
         const detail = node("details");
-        detail.append(node("summary", "", `${event.output.failed ? "未完成" : "已执行"} · ${toolNames[call?.function.name] || "操作"}`), node("pre", "", JSON.stringify(event.output, null, 2)));
+        detail.append(node("summary", "", `${event.output.failed ? "未完成" : "已执行"} · ${toolNames[call?.function.name] || "操作"}`));
+        renderToolOutput(detail, event.output);
         group.details.append(detail);
-        if (event.output.failed) group.details.append(node("p", "notice", event.output.error));
-        if (event.output.matches) group.details.append(recordLinks(event.output.matches, false));
       } else group.details.append(node("p", "", event.text));
       group.summary.textContent = `执行过程 · ${group.count} 项操作`;
       for (const snapshot of event.records || event.output?.records || []) group.snapshots.set(refKey(snapshot.ref), snapshot);
@@ -235,7 +235,8 @@ async function searchRecords() {
     check.type = "checkbox"; check.checked = pickerSelection.has(refKey(record.ref));
     check.setAttribute("aria-label", `选择${record.title}`);
     check.addEventListener("change", () => { check.checked ? pickerSelection.set(refKey(record.ref), record) : pickerSelection.delete(refKey(record.ref)); });
-    description.append(node("strong", "", record.title), node("small", "", `${names[record.ref.kind]} · ${record.sender || statusNames[record.status] || record.status} · ${formatTime(record.updated_at)}`));
+    const state = record.ref.kind === "mail" && record.status === "saved" ? "未保存分析" : statusNames[record.status] || record.status;
+    description.append(node("strong", "", record.title), node("small", "", `${names[record.ref.kind]} · ${state}${record.sender ? " · " + record.sender : ""} · ${formatTime(record.updated_at)}`));
     label.append(check, description); row.append(label, button("预览", () => previewRecord(record.ref))); return row;
   });
   if (!rows.length) rows.push(node("p", "caption", "没有匹配的已保存资料。可以保存通知、新建草稿，或先同步邮件。"));
@@ -246,8 +247,9 @@ async function searchRecords() {
 async function previewRecord(ref) {
   const data = await api(`/api/records/${ref.kind}/${ref.id}`);
   previewRef = ref; $("preview-title").textContent = data.record.title;
-  const value = data.record.data;
-  $("preview-content").textContent = value.original?.text || value.text || value.body || value.content || JSON.stringify(value.result || value, null, 2);
+  $("preview-content").replaceChildren();
+  $("preview-content").append(node("p", "caption", `${names[ref.kind]} · ${statusNames[data.record.status] || data.record.status} · ${formatTime(data.record.updated_at)}`));
+  renderRecordContent($("preview-content"), data.record, data.detail, true);
   $("preview-dialog").showModal();
 }
 $("add-records").addEventListener("click", () => work($("add-records"), () => showPicker()));
@@ -294,6 +296,180 @@ function safeLink(url, text) {
   const link = node("a", "", text); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
 }
 function section(title, text) { const element = node("section", "result-section"); element.append(node("h3", "", title), node("p", "", text)); return element; }
+function disclosure(title, ...children) {
+  const element = node("details", "record-disclosure");
+  element.append(node("summary", "", title), ...children); return element;
+}
+function bulletList(items) {
+  const list = node("ul", "detail-list");
+  list.append(...items.map((text) => node("li", "", text))); return list;
+}
+function metadata(entries) {
+  const list = node("dl", "record-facts");
+  for (const [label, value] of entries) if (value !== undefined && value !== null && value !== "") {
+    list.append(node("dt", "", label), node("dd", "", String(value)));
+  }
+  return list;
+}
+function debugData(value) {
+  return disclosure("原始调试数据（JSON）", node("pre", "debug-data", JSON.stringify(value, null, 2)));
+}
+function renderToolOutput(content, output) {
+  if (output.failed) content.append(node("p", "notice", output.error));
+  const records = output.records || output.matches || [];
+  if (records.length) {
+    for (const record of records) {
+      const summary = record.data?.analysis?.summary || record.data?.result?.summary;
+      if (summary) content.append(node("p", "", summary));
+    }
+    content.append(recordLinks(records, false));
+  }
+  if (output.total !== undefined) content.append(node("p", "caption", `找到 ${output.total} 项已保存资料，本次返回 ${records.length} 项。`));
+  if (output.source) {
+    content.append(node("p", "", `已读取：${output.source.title || output.source.id}`), safeLink(output.source.url, "打开来源网页"));
+    content.append(disclosure("查看读取的原文", node("pre", "original-text", output.source.text)));
+  }
+  if (output.applied !== undefined) content.append(node("p", "", output.applied ? "已保存画像变更" : "画像建议待用户确认"));
+  if (output.reason) content.append(node("p", "", output.reason));
+  if (output.revisions) content.append(node("p", "", `读取了 ${output.revisions.length} 条修改历史。`));
+  if (!output.failed && !records.length && !output.source && !output.revisions && output.applied === undefined && output.total === undefined) {
+    content.append(node("p", "", output.duplicate ? "该内容已保存，无需重复修改。" : "操作已完成。"));
+  }
+  content.append(debugData(output));
+}
+function taskSources(pages) {
+  const element = disclosure(`已保存网页证据（${pages.length}）`), cards = new Map();
+  if (!pages.length) element.append(node("p", "caption", "尚未保存网页正文。"));
+  for (const page of pages) {
+    const card = node("details", "source-card"), summary = node("summary"), body = node("div", "source-body");
+    const lines = page.text.split(/\r\n|\n|\r/);
+    if (lines[lines.length - 1] === "") lines.pop();
+    summary.append(node("span", "source-id", page.id), node("strong", "", page.title || "未命名网页"));
+    card.append(summary, node("div", "source-info"), body);
+    card.children[1].append(safeLink(page.url, page.url), node("p", "caption",
+      `${formatTime(page.fetched_at)} · ${lines.length} 行 · ${page.ready ? "正文已读取" : "页面未就绪"}${page.text_truncated ? " · 正文已截断" : ""}`));
+    function renderLines() {
+      if (body.childElementCount) return;
+      body.append(node("p", "caption", "保存的网页原文，包含页面导航；行号用于定位引用。"));
+      const text = node("div", "source-text");
+      for (const [index, line] of lines.entries()) {
+        const row = node("div", "source-line"); row.dataset.line = index + 1;
+        row.append(node("span", "line-number", index + 1), node("span", "line-text", line || " ")); text.append(row);
+      }
+      body.append(text);
+    }
+    card.addEventListener("toggle", () => { if (card.open) renderLines(); });
+    cards.set(page.id, { show(first, last) {
+      element.open = true; card.open = true; renderLines();
+      for (const line of body.querySelectorAll(".source-line")) line.classList.toggle("is-cited", Number(line.dataset.line) >= first && Number(line.dataset.line) <= last);
+      (body.querySelector(".is-cited") || card).scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } });
+    element.append(card);
+  }
+  return { element, cards };
+}
+function taskLog(detail) {
+  const actions = detail.actions || [], errors = detail.errors || [];
+  const logs = disclosure(`浏览动作与诊断（${actions.length} 步 · ${errors.length} 条诊断）`), timeline = node("ol", "action-timeline");
+  const argumentNames = { url: "网址", link_id: "链接", element_id: "控件", page_id: "来源", tab_id: "标签页", text: "文字", query: "关键词", start_line: "起始行", lines: "行数", direction: "方向", seconds: "等待秒数", key: "按键", value: "选项", checked: "勾选", submit: "提交检索" };
+  const actionStatuses = { success: "成功", failed: "失败", running: "进行中", interrupted: "已中断", cancelled: "已取消" };
+  for (const action of actions) {
+    const row = node("li", `action-row ${action.status}`), heading = node("div", "action-heading");
+    heading.append(node("strong", "", `第 ${action.step} 步 · ${browserNames[action.tool] || action.tool}`), node("span", "status-badge", actionStatuses[action.status] || action.status));
+    row.append(heading, metadata(Object.entries(action.arguments || {}).filter(([, value]) => value !== null && typeof value !== "object").map(([key, value]) => [argumentNames[key] || key, value])));
+    if (action.page_id) row.append(node("p", "caption", `已保存来源 ${action.page_id}`));
+    if (action.error) row.append(node("p", "notice", action.error));
+    if (action.loop_warning) row.append(node("p", "caption", action.loop_warning));
+    if (action.remaining) row.append(node("p", "caption", `剩余 ${action.remaining.calls} 次模型调用 · ${action.remaining.seconds} 秒`));
+    timeline.append(row);
+  }
+  logs.append(actions.length ? timeline : node("p", "caption", "尚无浏览动作。"));
+  if (errors.length) {
+    const diagnostics = disclosure(`诊断详情（${errors.length}）`);
+    const kinds = { network: "网络", interaction: "页面交互", policy: "访问范围", internal: "执行器" };
+    for (const error of errors) {
+      const block = section(`第 ${error.step || "—"} 步 · ${kinds[error.kind] || "执行诊断"}`, error.error || error.message || "未提供说明");
+      if (error.url) block.append(safeLink(error.url, error.url));
+      if (error.root_cause_verified === false) block.append(node("p", "caption", "底层原因尚未确认。"));
+      if (error.network_errors?.length) block.append(bulletList(error.network_errors.map((item) => `${item.code || item.reason || "请求失败"} · ${item.target}`)));
+      if (error.policy_blocks?.length) block.append(bulletList(error.policy_blocks.map((item) => `${item.reason} · ${item.target}`)));
+      diagnostics.append(block);
+    }
+    logs.append(diagnostics);
+  }
+  logs.append(debugData({ actions, errors })); return logs;
+}
+function renderRecordContent(content, record, detail, preview = false) {
+  const value = record.data, ref = record.ref;
+  for (const note of record.coverage.notes) content.append(node("p", "notice", note));
+  if (ref.kind === "notification" || ref.kind === "mail") {
+    content.append(metadata([["发件人", value.sender || value.original?.sender], ["原消息时间", value.date_raw || value.original?.sent_at]]));
+    if (value.triage) {
+      const decisions = { read: "建议细读", review: "待确认", suggest_ignore: "建议忽略" };
+      content.append(section("邮件头初筛", `${decisions[value.triage.decision] || value.triage.decision}：${value.triage.reason}`));
+    }
+    if (value.analysis) {
+      const analysis = value.analysis;
+      content.append(section("分析摘要", analysis.summary));
+      for (const event of analysis.events || []) {
+        const block = section(event.title, event.relevance);
+        block.append(metadata([["重要程度", { urgent: "需及时查看", digest: "普通事项", review: "待确认" }[event.importance]],
+          [event.time_kind === "deadline" ? "截止时间" : "事项时间", event.normalized ? formatTime(event.normalized) : event.time_text || "未注明"]]));
+        if (event.action) block.append(section("建议行动", event.action));
+        if (event.evidence) block.append(disclosure("查看原文依据", node("blockquote", "evidence-quote", event.evidence)));
+        if (event.uncertainties?.length) block.append(bulletList(event.uncertainties));
+        content.append(block);
+      }
+      if (analysis.actions?.length) content.append(section("建议行动", analysis.actions.join("\n")));
+      if (analysis.relevance_reason) content.append(section("相关性", analysis.relevance_reason));
+      for (const time of analysis.times || []) content.append(section(time.kind === "deadline" ? "截止时间" : "事项时间", `${time.text}${time.normalized ? " · " + formatTime(time.normalized) : " · 精确时间待确认"}`));
+      if (analysis.evidence) content.append(disclosure("查看分析依据", node("blockquote", "evidence-quote", analysis.evidence)));
+      if (analysis.uncertainties?.length) content.append(section("待确认", analysis.uncertainties.join("\n")));
+      if (analysis.link_requests?.length) {
+        const links = section("建议进一步查看", "以下链接来自邮件，不代表已经访问。");
+        for (const item of analysis.link_requests) links.append(safeLink(item.url, item.url), node("p", "caption", item.reason));
+        content.append(links);
+      }
+    } else content.append(node("p", "notice analysis-empty", "尚未保存分析结果。引用或读取资料不会自动生成分析，可在对话中明确要求分析。"));
+    if (value.error) content.append(node("p", "notice", value.error));
+    const original = disclosure("原文", node("pre", "original-text", value.original?.text || value.text || "尚无正文")); original.open = !value.analysis; content.append(original);
+    const attachments = value.original?.attachments || value.attachments || [];
+    if (attachments.length) content.append(section("附件（未解析）", attachments.join("\n")));
+    for (const [index, update] of (value.profile_updates || []).entries()) {
+      content.append(section(update.applied ? "已补充画像" : "画像建议待确认", `${update.text}\n来源：${update.evidence}\n${update.reason}`));
+      if (!preview && !update.applied) content.append(button("确认属于我并保存", async () => {
+        await api(`/api/mail/${ref.id}/profile/${index}/confirm`, "POST", {}, true); await openRecord(ref); await poll();
+      }));
+    }
+  } else if (ref.kind === "task") {
+    const sources = taskSources(detail.pages || []);
+    content.append(metadata([["查询状态", statusNames[record.status] || record.status], ["模型调用", value.calls], ["浏览动作", value.steps], ["已保存网页", detail.pages.length]]));
+    content.append(section("查询要求", value.public_request || value.request));
+    if (value.result) {
+      content.append(section("查询结果", value.result.summary));
+      if (value.result.coverage) content.append(node("p", "caption", value.result.coverage));
+      for (const result of [...(value.result.findings || []), ...(value.result.jobs || [])]) {
+        const block = section(result.title || "发现", result.text || result.reason);
+        if (result.fit) block.append(node("p", "status-badge", { potential_match: "可能匹配", needs_confirmation: "需要确认", not_match: "不匹配" }[result.fit] || result.fit));
+        block.append(safeLink(result.url, "打开来源网页"));
+        const quote = result.quote || result.job_evidence;
+        if (quote) block.append(node("blockquote", "evidence-quote", quote));
+        if (sources.cards.has(result.page_id)) block.append(button(`定位原文 · ${result.page_id}${result.line_start ? ` 第 ${result.line_start}–${result.line_end} 行` : ""}`, () => sources.cards.get(result.page_id).show(result.line_start, result.line_end)));
+        if (result.uncertainties?.length) block.append(bulletList(result.uncertainties));
+        content.append(block);
+      }
+      if (value.result.questions?.length) content.append(section("待确认", value.result.questions.join("\n")));
+      if (value.result.stop_reason) content.append(section("结束说明", value.result.stop_reason));
+    } else content.append(node("p", "notice", "尚未生成结构化查询结果；已保存的网页仍可查看。"));
+    if (value.note && value.note !== value.result?.stop_reason) content.append(node("p", record.status === "completed" ? "caption" : "notice", value.note));
+    content.append(sources.element, taskLog(detail));
+    if (!preview && ["running", "queued"].includes(record.status)) content.append(button("取消网页任务", async () => { await api(`/api/tasks/${ref.id}/cancel`, "POST", {}); await openRecord(ref); }));
+  } else if (ref.kind === "draft") {
+    content.append(metadata([["发件人", value.from], ["收件人", value.to.join("、") || "尚未填写"], ["抄送", value.cc.join("、")], ["密送", value.bcc.join("、")], ["版本", value.version]]));
+    content.append(section("正文", value.body || "尚无正文"));
+    if (value.error) content.append(node("p", "notice", value.error));
+  } else content.append(node("pre", "original-text", value.content));
+}
 function hideRecord() {
   opened = null; draft = null; draftDirty = false; clearTimeout(draftTimer);
   $("record-panel").hidden = true; $("focus-record-label").hidden = true;
@@ -322,43 +498,9 @@ async function openRecord(ref) {
     }
     renderDraft(); return;
   }
-  const content = $("record-content"), value = opened.data;
-  for (const note of opened.coverage.notes) content.append(node("p", "notice", note));
-  if (ref.kind === "notification" || ref.kind === "mail") {
-    if (value.triage) content.append(section("邮件头初筛建议", `${value.triage.decision}：${value.triage.reason}`));
-    if (value.analysis) {
-      content.append(section("分析", value.analysis.summary));
-      for (const event of value.analysis.events || []) content.append(section(event.title,
-        `${event.time_kind === "deadline" ? "截止" : "时间"}：${event.normalized || event.time_text || "待确认"}\n${event.relevance}\n${event.action}\n原文：${event.evidence}\n${event.uncertainties.join("；")}`));
-      if (value.analysis.actions?.length) content.append(section("行动", value.analysis.actions.join("\n")));
-      if (value.analysis.relevance_reason) content.append(section("相关性", value.analysis.relevance_reason));
-      for (const time of value.analysis.times || []) content.append(section(time.kind === "deadline" ? "截止时间" : "事项时间", `${time.text}${time.normalized ? " · " + formatTime(time.normalized) : " · 精确时间待确认"}`));
-      if (value.analysis.uncertainties?.length) content.append(section("待确认", value.analysis.uncertainties.join("\n")));
-    }
-    content.append(node("h3", "", "原文"), node("pre", "", value.original?.text || value.text || "尚无正文"));
-    for (const [index, update] of (value.profile_updates || []).entries()) {
-      content.append(section(update.applied ? "已补充画像" : "画像建议待确认", `${update.text}\n来源：${update.evidence}\n${update.reason}`));
-      if (!update.applied) content.append(button("确认属于我并保存", async () => {
-        await api(`/api/mail/${ref.id}/profile/${index}/confirm`, "POST", {}, true); await openRecord(ref); await poll();
-      }));
-    }
-  } else if (ref.kind === "task") {
-    if (value.result) {
-      content.append(section("查询结果", value.result.summary));
-      content.append(node("p", "caption", value.result.coverage || value.note));
-      for (const result of [...(value.result.findings || []), ...(value.result.jobs || [])]) {
-        const block = section(result.title || "发现", result.text || result.reason);
-        block.append(safeLink(result.url, "打开原来源"), node("pre", "", result.quote || result.job_evidence || "")); content.append(block);
-      }
-      if (value.result.questions?.length) content.append(section("待确认", value.result.questions.join("\n")));
-    } else content.append(node("p", "notice", value.note));
-    const evidence = node("details"); evidence.append(node("summary", "", "已保存网页证据"));
-    for (const page of data.detail.pages) evidence.append(node("h3", "", `${page.id} · ${page.title}`), safeLink(page.url, page.url), node("pre", "", page.text));
-    content.append(evidence);
-    const logs = node("details"); logs.append(node("summary", "", "浏览动作与诊断"), node("pre", "", JSON.stringify({ actions: data.detail.actions, errors: data.detail.errors }, null, 2))); content.append(logs);
-    if (["running", "queued"].includes(opened.status)) content.append(button("取消网页任务", async () => { await api(`/api/tasks/${ref.id}/cancel`, "POST", {}); await openRecord(ref); }));
-  } else content.append(node("pre", "", value.content));
+  renderRecordContent($("record-content"), opened, data.detail);
 }
+
 $("close-record").addEventListener("click", () => work($("close-record"), async () => { await flushDraft(); hideRecord(); }));
 $("attach-open-record").addEventListener("click", () => { if (opened) { addSelected(opened); toast("已添加到下一条消息。"); } });
 function draftFields() {

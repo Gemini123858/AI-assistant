@@ -50,7 +50,7 @@
     <div id="record-results" class="record-results"></div>
     <div class="picker-footer"><button id="records-previous" class="quiet">上一页</button><span id="records-page" class="caption"></span><button id="records-next" class="quiet">下一页</button><button id="picker-add" class="primary">添加到消息</button></div>
   </dialog>
-  <dialog id="preview-dialog" aria-labelledby="preview-title"><header class="panel-heading"><h2 id="preview-title">资料预览</h2><button id="close-preview" class="quiet">关闭</button></header><pre id="preview-content"></pre><button id="preview-open" class="primary">在会话旁打开</button></dialog>
+  <dialog id="preview-dialog" aria-labelledby="preview-title"><header class="panel-heading"><h2 id="preview-title">资料预览</h2><button id="close-preview" class="quiet">关闭</button></header><div id="preview-content"></div><footer class="preview-footer"><button id="preview-open" class="primary">在会话旁打开</button></footer></dialog>
   <dialog id="notification-dialog" aria-labelledby="notification-title"><header class="panel-heading"><h2 id="notification-title">保存通知</h2><button id="close-notification-import" class="quiet">关闭</button></header><form id="import-form"><label>来源／会话<input id="notification-conversation" maxlength="120" value="手动资料" required></label><label>原消息时间<input id="sent-at" type="datetime-local" required></label><label>正文<textarea id="notification-text" rows="6" maxlength="12000" required></textarea></label><button class="primary" type="submit">保存并添加到消息</button></form></dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <header class="panel-heading"><h2 id="settings-title">设置与画像</h2><button id="close-settings" class="quiet">关闭</button></header>

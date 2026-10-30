@@ -1,5 +1,6 @@
 """Offline unified UI flow. Fake LLM, IMAP, browser and SMTP; no external requests."""
 import json
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -41,7 +42,8 @@ def main():
             snapshot = next(item for item in attached if item["ref"]["kind"] == "draft")
             return call("update_draft", {"id": snapshot["ref"]["id"], "version": snapshot["ref"]["version"], **fields(body="合成模型修改后的正文")})
         model.outputs = [call("read_record", {"ref": mail_ref}), call("save_mail_analysis", {"id": mail["id"], "analysis": analysis()}),
-            call("run_browser", {"goal": "读取公开岗位要求", "start_url": LIST}), call("finish_task", result()),
+            call("run_browser", {"goal": "读取公开岗位要求", "start_url": LIST}),
+            call("click_element", {"element_id": "stale-synthetic-element"}), call("finish_task", result()),
             create_after_browser, finish("合成查询与草稿已完成，尚未发送。"), update_current, finish("已修改同一份草稿。")]
         server = make_server("127.0.0.1", 0, app, threaded=True, request_handler=Quiet)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
@@ -57,12 +59,51 @@ def main():
                 expect(page.locator("#conversation-list button")).to_have_count(1)
                 page.locator("#add-records").click()
                 page.locator("#record-kind").select_option("mail")
+                page.locator("#record-results").get_by_role("button", name="预览").first.click()
+                expect(page.locator("#preview-content .analysis-empty")).to_be_visible()
+                expect(page.locator("#preview-content")).to_contain_text("本人：我正在找实习")
+                assert app.extensions["mail"].get(mail["id"])["analysis"] is None
+                page.locator("#close-preview").click()
                 page.locator("#record-results input[type=checkbox]").first.check()
                 page.locator("#picker-add").click()
                 expect(page.locator("#attached-records")).to_contain_text("聊天记录")
                 page.locator("#chat-input").fill("分析这封邮件，查官网并起草咨询邮件")
                 page.locator("#chat-button").click()
                 expect(page.locator("#chat-history")).to_contain_text("合成查询与草稿已完成", timeout=20000)
+                page.locator("#add-records").click()
+                page.locator("#record-kind").select_option("mail")
+                page.locator("#record-results").get_by_role("button", name="预览").first.click()
+                expect(page.locator("#preview-content")).to_contain_text("分析摘要")
+                expect(page.locator("#preview-content")).to_contain_text(analysis()["summary"])
+                expect(page.locator("#preview-content .analysis-empty")).to_have_count(0)
+                page.locator("#close-preview").click()
+                page.locator("#record-kind").select_option("task")
+                page.locator("#record-results").get_by_role("button", name="预览").first.click()
+                expect(page.locator("#preview-content")).to_contain_text(result()["summary"])
+                expect(page.locator("#preview-content .source-card")).to_have_count(1)
+                expect(page.locator("#preview-content .source-line")).to_have_count(0)
+                page.locator("#preview-content").get_by_role("button", name=re.compile("定位原文")).click()
+                expect(page.locator("#preview-content .is-cited")).to_contain_text("岗位列表")
+                page.locator("#preview-content").get_by_text(re.compile("^浏览动作与诊断")).click()
+                expect(page.locator("#preview-content .action-row")).to_have_count(2)
+                expect(page.locator("#preview-content .action-row.failed")).to_contain_text("合成元素编号过期")
+                expect(page.locator("#preview-content .debug-data")).to_be_hidden()
+                output = Path("data/browser-check"); output.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(output/"record-preview-desktop.png"))
+                page.set_viewport_size({"width":390,"height":844})
+                assert page.locator("#preview-dialog").evaluate("element => element.scrollWidth <= element.clientWidth")
+                page.screenshot(path=str(output/"record-preview-mobile.png"))
+                page.set_viewport_size({"width":1440,"height":1000})
+                page.locator("#preview-open").click()
+                expect(page.locator("#record-content")).to_contain_text(result()["summary"])
+                expect(page.locator("#record-content .source-card")).to_have_count(1)
+                page.locator("#close-record").click()
+                execution = page.locator("details.execution").first
+                execution.locator(":scope > summary").click()
+                operation = execution.locator(":scope > details").first
+                operation.locator(":scope > summary").click()
+                expect(operation.locator(".record-link")).to_be_visible()
+                expect(operation.locator(".debug-data")).to_be_hidden()
                 page.locator(".record-link").filter(has_text="邮件草稿").last.click()
                 expect(page.locator("#draft-body")).to_have_value("合成正文")
                 expect(page.locator("#record-content")).to_contain_text("草稿来源（2）")
