@@ -1,6 +1,7 @@
 """Chat Completions client for structured text and explicit tool calls."""
 
 import json
+from urllib.parse import urlsplit
 from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -52,7 +53,40 @@ class APIModel:
             body["response_format"] = {"type": "json_object"}
         else:
             body.update(tools=tools, tool_choice="required")
-        request = Request(self.config.base_url.rstrip("/") + "/chat/completions",
+        envelope = self._post("/chat/completions", body, timeout)
+        try:
+            choice = envelope["choices"][0]
+            usage = envelope.get("usage")
+            if not isinstance(usage, dict) or any(type(usage.get(key)) is not int or usage[key] < 0
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
+                usage = None
+            else:
+                usage = {key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+            if choice.get("finish_reason") not in ({"stop"} if tools is None else {"stop", "tool_calls"}):
+                error = AssistantError("模型输出未正常结束，可能被额度截断；请调整输出额度后显式重试。", 502)
+                error.token_usage = usage
+                raise error
+            message = choice["message"]
+            if usage is not None:
+                message["_usage"] = usage
+            return message
+        except (ValueError, TypeError, KeyError, IndexError):
+            raise AssistantError("模型返回格式无效，需要 JSON 对象；未自动重试。", 502) from None
+
+    def count_tokens(self, messages, tools, timeout=None):
+        mode = self.config.token_count_mode
+        if mode == "off" or (mode == "auto" and urlsplit(self.config.base_url).hostname not in {"api.moonshot.cn", "api.moonshot.ai"}):
+            return None
+        envelope = self._post("/tokenizers/estimate-token-count",
+            {"model": self.config.model, "messages": messages, "tools": tools}, timeout)
+        data = envelope.get("data")
+        tokens = data.get("total_tokens") if isinstance(data, dict) else None
+        if type(tokens) is not int or tokens < 0:
+            raise AssistantError("服务商未返回有效的token计数，未发起生成请求。", 502)
+        return tokens
+
+    def _post(self, path, body, timeout=None):
+        request = Request(self.config.base_url.rstrip("/") + path,
                           data=json.dumps(body, ensure_ascii=False).encode(),
                           headers={"Content-Type": "application/json",
                                    "Authorization": "Bearer " + self.config.api_key}, method="POST")
@@ -62,10 +96,9 @@ class APIModel:
             if len(raw) > 2_000_000:
                 raise AssistantError("模型响应过大，未保存分析结果。", 502)
             envelope = json.loads(raw)
-            choice = envelope["choices"][0]
-            if choice.get("finish_reason") not in ({"stop"} if tools is None else {"stop", "tool_calls"}):
-                raise AssistantError("模型输出未正常结束，可能被额度截断；请调整输出额度后显式重试。", 502)
-            return choice["message"]
+            if not isinstance(envelope, dict):
+                raise ValueError()
+            return envelope
         except HTTPError as exc:
             # Do not log the upstream body or request: they can contain secrets.
             raise AssistantError(f"模型服务返回 HTTP {exc.code}。请检查模型、凭据、额度及 API 配置。", 502) from None
@@ -84,7 +117,12 @@ class APIModel:
             raise AssistantError("模型返回格式无效，需要 JSON 对象；未自动重试。", 502) from None
 
     def complete_tools(self, messages, tools, timeout=None):
-        return validate_tool_message(self._request(messages, tools, timeout))
+        message = self._request(messages, tools, timeout)
+        try:
+            return validate_tool_message(message)
+        except AssistantError as error:
+            error.token_usage = message.get("_usage")
+            raise
 
 
 def validate_tool_message(message):
@@ -107,7 +145,10 @@ def validate_tool_message(message):
             seen.add(key)
             checked.append({"id": key, "type": "function",
                             "function": {"name": name, "arguments": arguments}})
-        return {"role": "assistant", "content": None, "tool_calls": checked}
+        result = {"role": "assistant", "content": None, "tool_calls": checked}
+        if message.get("_usage") is not None:
+            result["_usage"] = message["_usage"]
+        return result
     except (ValueError, TypeError, KeyError):
         raise AssistantError("模型工具调用格式无效，未执行动作、未自动重试。", 502) from None
 

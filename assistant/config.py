@@ -19,14 +19,17 @@ class Config:
     base_url: str = "https://api.moonshot.cn/v1"
     model: str = "kimi-k2.6"
     timeout: int = 60
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     daily_calls: int = 30
     turn_calls: int = 50
     turn_seconds: int = 1200
     context_chars: int = 300000
+    context_tokens: int = 128000
+    token_count_mode: str = "auto"
     timezone: str = "Asia/Shanghai"
     extra_body: dict = field(default_factory=dict)
     browser_calls: int = 40
+    browser_default_calls: int = 20
     browser_seconds: int = 900
     browser_steps: int = 120
     browser_vision: bool = False
@@ -52,14 +55,17 @@ class Config:
                 base_url=os.getenv("ASSISTANT_API_BASE", "https://api.moonshot.cn/v1"),
                 model=os.getenv("ASSISTANT_MODEL", "kimi-k2.6"),
                 timeout=int(os.getenv("ASSISTANT_TIMEOUT", "60")),
-                max_tokens=int(os.getenv("ASSISTANT_MAX_TOKENS", "4096")),
+                max_tokens=int(os.getenv("ASSISTANT_MAX_TOKENS", "8192")),
                 daily_calls=int(os.getenv("ASSISTANT_DAILY_CALLS", "30")),
                 turn_calls=int(os.getenv("ASSISTANT_TURN_CALLS", "50")),
                 turn_seconds=int(os.getenv("ASSISTANT_TURN_SECONDS", "1200")),
                 context_chars=int(os.getenv("ASSISTANT_CONTEXT_CHARS", "300000")),
+                context_tokens=int(os.getenv("ASSISTANT_CONTEXT_TOKENS", "128000")),
+                token_count_mode=os.getenv("ASSISTANT_TOKEN_COUNT_MODE", "auto"),
                 timezone=os.getenv("ASSISTANT_TIMEZONE", "Asia/Shanghai"),
                 extra_body=json.loads(os.getenv("ASSISTANT_LLM_EXTRA_BODY", "{}")),
                 browser_calls=int(os.getenv("ASSISTANT_BROWSER_CALLS", "40")),
+                browser_default_calls=int(os.getenv("ASSISTANT_BROWSER_DEFAULT_CALLS", "20")),
                 browser_seconds=int(os.getenv("ASSISTANT_BROWSER_SECONDS", "900")),
                 browser_steps=int(os.getenv("ASSISTANT_BROWSER_STEPS", "120")),
                 browser_vision=os.getenv("ASSISTANT_BROWSER_VISION", "false").lower() == "true",
@@ -118,8 +124,10 @@ class Config:
             raise AssistantError("输出额度必须为 128～16384，日调用额度必须为 1～10000。")
         if not 1 <= self.turn_calls <= 500 or not 30 <= self.turn_seconds <= 7200 or not 4000 <= self.context_chars <= 2000000:
             raise AssistantError("会话预算：调用数1～500，耗时30～7200秒，上下文字符4000～2000000。")
+        if not self.max_tokens < self.context_tokens <= 2000000 or self.token_count_mode not in {"auto", "off", "moonshot"}:
+            raise AssistantError("上下文tokens必须大于预留输出额度且不超过2000000；计数模式为auto/off/moonshot。")
         if (not 1 <= self.browser_calls <= 200 or not 30 <= self.browser_seconds <= 3600
-                or not 1 <= self.browser_steps <= 500):
+                or not 1 <= self.browser_steps <= 500 or not 1 <= self.browser_default_calls <= 200):
             raise AssistantError("网页任务调用上限必须为 1～200，耗时为 30～3600 秒，动作为 1～500 步。")
         if self.browser_proxy:
             try:

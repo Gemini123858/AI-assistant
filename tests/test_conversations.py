@@ -96,6 +96,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(self.controller.list()), 2)
 
     def test_system_prompt_reaches_serialized_api_requests_after_tool_execution(self):
+        self.config.token_count_mode = "off"
         identity = {"assistant_name": "合成助手", "user_nickname": "合成昵称"}
         self.store.update_identity(identity)
         api = APIModel(self.config)
@@ -423,3 +424,97 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.model.calls, [])
         self.assertEqual(record["events"][0]["text"], "需要完整保存的问题")
         self.assertIn("未裁剪历史", record["turns"][-1]["note"])
+
+    def test_token_preflight_reserves_output_and_uses_actual_request(self):
+        self.config.context_tokens, self.config.max_tokens = 1000, 128
+        key = self.new()
+        with patch.object(self.model, "count_tokens", return_value=900, create=True) as counter:
+            record = self.turn(key, "完整保留，不要发送超限请求")
+        self.assertEqual(self.model.calls, [])
+        self.assertIn("预留输出128", record["turns"][-1]["note"])
+        self.assertIn("完整保留", record["events"][0]["text"])
+        self.assertEqual(counter.call_args.args[1], TOOLS)
+        self.assertIn("本轮剩余调用预算", counter.call_args.args[0][0]["content"])
+        # Character fallback must not replace an available provider token count.
+        self.config.context_chars = 10
+        self.model.outputs = [finish()]
+        with patch.object(self.model, "count_tokens", return_value=800, create=True):
+            record = self.turn(self.new(), "输入在token窗口内")
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+
+    def test_usage_is_not_replayed_and_is_not_cumulative_context_size(self):
+        self.config.context_tokens, self.config.max_tokens = 1000, 128
+        key = self.new()
+        self.model.outputs = [{**finish(), "_usage": {"prompt_tokens": 500, "completion_tokens": 100, "total_tokens": 600}},
+                              {**finish(), "_usage": {"prompt_tokens": 700, "completion_tokens": 100, "total_tokens": 800}}]
+        self.turn(key, "第一轮")
+        record = self.turn(key, "第二轮")
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        self.assertEqual(sum(e["token_usage"]["total_tokens"] for e in record["events"] if e.get("token_usage")), 1400)
+        self.assertNotIn("_usage", json.dumps(self.controller.context(key)))
+        self.model.outputs = [{**finish(), "_usage": {"prompt_tokens": 900, "completion_tokens": 50, "total_tokens": 950}}]
+        self.turn(key, "接近上限")
+        before = len(self.model.calls)
+        record = self.turn(key, "应当停止新请求")
+        self.assertEqual(len(self.model.calls), before)
+        self.assertIn("上次实际输入tokens", record["turns"][-1]["note"])
+
+    def test_configurable_browser_default_and_request_usage_recorded(self):
+        self.config.browser_default_calls = 25
+        key = self.new()
+        self.model.outputs = [call("run_browser", {"goal": "合成查询", "start_url": LIST}),
+            {**call("finish_task", result()), "_usage": {"prompt_tokens": 456, "completion_tokens": 60, "total_tokens": 516}}, finish()]
+        record = self.turn(key, "合成查询")
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        task = self.store.list_tasks()[0]
+        self.assertEqual(task["limits"]["calls"], 25)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["token_usage"][0]["prompt_tokens"], 456)
+        self.assertEqual(main_background(self.model.calls[0])["browser_budget"]["default_calls"], 25)
+
+    def test_deepseek_native_usage_and_no_kimi_count_endpoint(self):
+        self.config.base_url = "https://api.deepseek.com"
+        self.config.model = "synthetic-compatible-model"
+        self.config.context_tokens, self.config.max_tokens = 1000, 128
+        api = APIModel(self.config)
+        self.app.extensions["service"].model = api
+        reply = {"choices": [{"finish_reason": "tool_calls", "message": finish()}],
+                 "usage": {"prompt_tokens": 900, "completion_tokens": 40, "total_tokens": 940,
+                           "prompt_cache_hit_tokens": 800, "prompt_cache_miss_tokens": 100}}
+        key = self.new()
+        with patch.object(api.opener, "open", return_value=io.BytesIO(json.dumps(reply).encode())) as opened:
+            record = self.turn(key, "合成兼容接口测试")
+        self.assertEqual(record["turns"][-1]["status"], "completed")
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(opened.call_args.args[0].full_url, "https://api.deepseek.com/chat/completions")
+        usage = next(e["token_usage"] for e in record["events"] if e.get("token_usage"))
+        self.assertEqual(usage, {"prompt_tokens": 900, "completion_tokens": 40, "total_tokens": 940})
+        with patch.object(api.opener, "open") as opened:
+            record = self.turn(key, "已达token预算，不能再请求")
+        opened.assert_not_called()
+        self.assertIn("上次实际输入tokens", record["turns"][-1]["note"])
+
+    def test_kimi_preflight_stops_before_generation_or_reserving_a_call(self):
+        self.config.context_tokens, self.config.max_tokens = 1000, 128
+        api = APIModel(self.config)
+        self.app.extensions["service"].model = api
+        reply = io.BytesIO(json.dumps({"data": {"total_tokens": 900}}).encode())
+        with patch.object(api.opener, "open", return_value=reply) as opened:
+            record = self.turn(self.new(), "测试计数后拒绝超限")
+        self.assertEqual(opened.call_count, 1)
+        self.assertTrue(opened.call_args.args[0].full_url.endswith("/tokenizers/estimate-token-count"))
+        self.assertEqual(self.store.usage(self.app.extensions["service"].day())["calls"], 0)
+        self.assertIn("上下文上限", record["turns"][-1]["note"])
+
+    def test_truncated_output_usage_is_saved_without_replaying_metadata(self):
+        self.config.token_count_mode = "off"
+        api = APIModel(self.config)
+        self.app.extensions["service"].model = api
+        reply = {"choices": [{"finish_reason": "length", "message": {"content": "合成截断"}}],
+                 "usage": {"prompt_tokens": 100, "completion_tokens": 8192, "total_tokens": 8292}}
+        key = self.new()
+        with patch.object(api.opener, "open", return_value=io.BytesIO(json.dumps(reply).encode())):
+            record = self.turn(key, "测试截断计数")
+        self.assertEqual(record["turns"][-1]["status"], "failed")
+        self.assertEqual(next(e["token_usage"] for e in record["events"] if e["type"] == "usage")["completion_tokens"], 8192)
+        self.assertNotIn("token_usage", json.dumps(self.controller.context(key)))

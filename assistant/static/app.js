@@ -116,7 +116,7 @@ function renderConversation(forceScroll = false) {
   const expanded = new Set([...history.querySelectorAll("details[open]")].map((element) => element.dataset.seq));
   const entries = [], groups = new Map();
   for (const event of conversation.events) {
-    if (event.type === "model" || event.type === "record_update") continue;
+    if (["model", "usage", "record_update"].includes(event.type)) continue;
     if (event.type === "tool_result" && event.output.finished) continue;
     if (event.type === "tool_result" || event.type === "progress") {
       let group = groups.get(event.turn_id);
@@ -157,6 +157,8 @@ function renderConversation(forceScroll = false) {
   updateControls();
 }
 function updateControls() {
+  const usage = [...(conversation?.events || [])].reverse().find((event) => event.token_usage)?.token_usage;
+  $("context-status").textContent = usage ? `上次主助手请求：输入 ${usage.prompt_tokens.toLocaleString()} tokens · 输出 ${usage.completion_tokens.toLocaleString()} tokens` : "";
   const active = conversation?.turns.find((turn) => turn.status === "running");
   $("chat-button").disabled = !conversation || !!active;
   $("stop-turn").hidden = !active;
@@ -198,7 +200,7 @@ async function loadStatus() {
   const welcome = document.querySelector(".welcome h2");
   if (welcome) welcome.textContent = welcomeTitle();
   $("model-status").textContent = `${status.mode === "demo" ? "演示模式 · 未调用真实模型" : status.model} · 今日 ${status.usage.calls}/${status.daily_limit} 次模型调用`;
-  $("settings-status").textContent = `本轮最多 ${status.conversation_budget.calls} 次模型调用（含网页内部调用），${Math.round(status.conversation_budget.seconds / 60)} 分钟；完整上下文上限 ${status.conversation_budget.context_chars} 字符，超出时停止，不自动裁剪。`;
+  $("settings-status").textContent = `本轮最多 ${status.conversation_budget.calls} 次模型调用（含网页内部调用），${Math.round(status.conversation_budget.seconds / 60)} 分钟；网页默认 ${status.browser_budget.default_calls} 次，最高 ${status.browser_budget.calls} 次。上下文预算 ${status.conversation_budget.context_tokens.toLocaleString()} tokens，含预留输出 ${status.conversation_budget.max_output_tokens.toLocaleString()} tokens；无请求前计数时保留 ${status.conversation_budget.context_chars} 字符保护。历史不自动裁剪。`;
 }
 $("new-conversation").addEventListener("click", () => work($("new-conversation"), newConversation));
 $("rename-conversation").addEventListener("click", () => work($("rename-conversation"), async () => {

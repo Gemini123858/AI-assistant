@@ -199,7 +199,7 @@ class TaskWebTests(unittest.TestCase):
         store, service = self.app.extensions["store"], self.app.extensions["service"]
         store.reserve_call(service.day(), service.config.daily_calls)
         status = self.client.get("/api/status").json
-        self.assertEqual(status["browser_budget"], {"calls": 40, "steps": 120, "seconds": 900, "effective_calls": 29})
+        self.assertEqual(status["browser_budget"], {"calls": 40, "default_calls": 20, "steps": 120, "seconds": 900, "effective_calls": 29})
         self.assertFalse(status["capabilities"]["browser_vision"])
         self.assertEqual(self.model.calls, [])
 

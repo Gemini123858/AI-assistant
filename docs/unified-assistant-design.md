@@ -362,7 +362,7 @@ U1 先完成无业务工具的会话闭环，U2 加入第一组真实业务工�
 - `assistant/records.py` 实现搜索、统一表示和快照。引用采用 `{kind, id}`，草稿快照额外记录版本；`fingerprint` 用于发现跨会话内容更新。业务内容仍保存在原目录。
 - 主助手通过 `finish_turn` 结束本轮；业务工具包括资料搜索／读取、通知保存／分析、邮件头初筛／分析／画像建议、既定范围邮件同步、网页查询／证据读取、草稿创建／更新／复制和明确用户记忆更新。直接发送工具不提供给模型。
 - 浏览器沿用 `Tasks` 的独立模型循环，通过 `origin` 关联主会话和轮次，限制子任务可用调用数，预留主助手返回回答的预算。完成或失败后都把实际结果交回主会话，不再为这些任务创建独立临时追问。
-- 统一工具的单次浏览默认最多12次内部模型调用，主助手可用 `max_calls` 调整，仍受浏览器、本轮和日额度上限约束；避免一次浏览默认耗尽所有额度而无法继续起草。旧独立网页接口的配置上限保持原样。
+- 统一工具的单次浏览默认最多20次内部模型调用（ASSISTANT_BROWSER_DEFAULT_CALLS可配置），主助手可用 `max_calls` 调整，仍受浏览器、本轮和日额度上限约束；避免一次浏览默认耗尽所有额度而无法继续起草。旧独立网页接口的配置上限保持原样。
 - 草稿多来源使用兼容的 `source={kind: records, refs: [...]}`，同时存储 `source_refs`；旧来源和版本不迁移重写。通过聊天创建／复制的草稿另存 `origin`，记忆历史记录用户原话及对应会话／轮次。
 - 详情编辑使用800毫秒自动保存；切换会话／记录、关闭面板、发送前等待保存。尚未保存的输入及其基准版本保存在本标签页 `sessionStorage`；冲突时保留输入并允许用户明确重新载入，不拿旧输入静默覆盖新版本。
 - 未发送聊天输入及所选资料按会话保存在 `sessionStorage`，当前会话 ID 保存在 `localStorage`。完整已发送历史在服务端 JSON 中，不依赖浏览器缓存恢复。
@@ -376,7 +376,7 @@ U1 先完成无业务工具的会话闭环，U2 加入第一组真实业务工�
 
 启动方式仍为 `.venv/bin/python -m assistant`，使用项目私有 `.env`。功能开发在 `feat/unified-assistant` 完成；2026-10-30 用户本轮验收通过并授权合入本地 `main`，不推送、不部署。
 
-新增可选配置：`ASSISTANT_TURN_CALLS=50`、`ASSISTANT_TURN_SECONDS=1200`、`ASSISTANT_CONTEXT_CHARS=300000`。日额度仍共享现有配置；上下文字符限制是程序侧上限，不代替模型服务自己的 token 限制。
+新增可选配置：`ASSISTANT_TURN_CALLS=50`、`ASSISTANT_TURN_SECONDS=1200`、`ASSISTANT_CONTEXT_CHARS=300000`。日额度仍共享现有配置。后续增补ASSISTANT_CONTEXT_TOKENS=128000、ASSISTANT_TOKEN_COUNT_MODE=auto和ASSISTANT_MAX_TOKENS=8192，区分当前窗口与累计消耗；支持Kimi请求前估算和Kimi／DeepSeek响应真实usage，无计数接口时保留字符保护，具体限制见README。
 
 离线检查入口：
 

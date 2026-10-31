@@ -95,7 +95,7 @@ TOOLS = [
     function("suggest_mail_profile", "从已读邮件提出有证据的画像变更；本人归属未确认时保留建议供用户确认。", {
         "id": TEXT, "update": MAIL_TOOLS[0]["function"]["parameters"]}),
     function("sync_mail", "只同步已启用的新邮件范围，不自动分析、不导入全部历史。"),
-    function("run_browser", "交给独立浏览执行器查询公开网页，返回实际结果；默认最多12次内部调用，可调整，但须留预算给后续业务。", {
+    function("run_browser", "交给独立浏览执行器查询公开网页，返回实际结果；默认调用预算见背景browser_budget，可用max_calls调整，须留预算给后续业务。", {
         "goal": {"type": "string", "maxLength": 2000,
                  "description": "独立执行器不接收主会话历史；提供完整公开目标及必要条件，不包含私人资料。"},
         "start_url": {"type": "string", "maxLength": 2000, "description": "公开查询的起始HTTPS URL。"},
@@ -274,6 +274,8 @@ class Conversations:
         record = self.store.get_conversation(key)
         background = {"current_time": datetime.now(ZoneInfo(self.config.timezone)).isoformat(),
             "timezone": self.config.timezone, "memory": self.store.memory(), "identity": self.store.identity(),
+            "browser_budget": {"default_calls": min(self.config.browser_default_calls, self.config.browser_calls),
+                               "max_calls": self.config.browser_calls},
             "capabilities": {"mail": self.mail.enabled, "send_by_user_button": self.drafts.enabled,
                              "browser": self.config.mode == "api"}}
         if self.config.qq_imap_user:
@@ -282,6 +284,8 @@ class Conversations:
         pending, notes = set(), []
         for event in record["events"]:
             kind = event["type"]
+            if kind == "usage":
+                continue
             if kind == "user":
                 message = {"role": "user", "content": json.dumps({"question": event["text"],
                     "attached_records": event.get("records", [])}, ensure_ascii=False)}
@@ -327,20 +331,34 @@ class Conversations:
             while used < self.config.turn_calls:
                 check()
                 messages = self.context(key)
-                if len(json.dumps(messages, ensure_ascii=False)) > self.config.context_chars:
-                    raise AssistantError("完整会话超过上下文字符上限，未裁剪历史。请新建会话并添加所需资料。", 413)
                 remaining = min(self.config.turn_calls - used,
                     self.config.daily_calls - self.store.usage(self.service.day())["calls"])
                 if remaining < 1:
                     raise AssistantError("今日模型额度已用完；已完成结果保留。", 429)
                 offered = [TOOLS[-1]] if remaining == 1 else TOOLS
                 messages[0]["content"] += f"\n本轮剩余调用预算（包括浏览子任务）：{remaining}；仅一次时立即finish_turn。"
+                counter = getattr(self.service.model, "count_tokens", None)
+                input_tokens = counter(messages, offered, timeout=max(1, min(self.config.timeout, deadline - time.monotonic()))) if counter else None
+                if input_tokens is not None:
+                    if input_tokens + self.config.max_tokens > self.config.context_tokens:
+                        raise AssistantError(f"当前输入约{input_tokens} tokens，加预留输出{self.config.max_tokens}超过上下文上限{self.config.context_tokens}；未裁剪历史，请新建会话。", 413)
+                else:
+                    previous = next((e["token_usage"] for e in reversed(self.store.get_conversation(key)["events"])
+                        if e.get("token_usage") and e.get("model") == self.config.model and e.get("provider") == self.config.base_url), None)
+                    if previous and previous["prompt_tokens"] + self.config.max_tokens >= self.config.context_tokens:
+                        raise AssistantError("上次实际输入tokens已达到上下文预算；未裁剪历史，请新建会话。", 413)
+                    if len(json.dumps(messages, ensure_ascii=False)) > self.config.context_chars:
+                        raise AssistantError("当前服务未启用请求前token计数，完整会话超过字符保护上限；未裁剪历史，请新建会话。", 413)
+                check()
                 self.store.reserve_call(self.service.day(), self.config.daily_calls)
                 used += 1
                 self.update_turn(key, turn_id, calls=used, note="助手正在思考")
                 message = validate_tool_message(self.service.model.complete_tools(messages, offered,
                     timeout=max(1, min(self.config.timeout, deadline - time.monotonic()))))
+                usage = message.pop("_usage", None)
                 self.event(key, "model", turn_id=turn_id, message=message,
+                    token_usage=usage, model=self.config.model, provider=self.config.base_url,
+                    input_token_estimate=input_tokens,
                     system_template_sha256=hashlib.sha256(SYSTEM.encode()).hexdigest())
                 calls = message["tool_calls"]
                 schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in offered}
@@ -380,6 +398,9 @@ class Conversations:
                     self.event(key, "tool_result", turn_id=turn_id, call_id=call["id"], output=output)
             raise AssistantError("达到本轮模型调用上限；已完成结果保留。", 429)
         except AssistantError as error:
+            if getattr(error, "token_usage", None):
+                self.event(key, "usage", turn_id=turn_id, token_usage=error.token_usage,
+                    model=self.config.model, provider=self.config.base_url)
             status = "cancelled" if error.status == 499 else "partial" if self.known_records(self.store.get_conversation(key)) else "failed"
             self._end(key, turn_id, status, str(error))
         except Exception as error:
@@ -403,7 +424,7 @@ class Conversations:
             payload.update(original["scope"])
             payload["start_url"] = arguments["start_url"]
         origin = {"conversation_id": key, "turn_id": turn_id, "related_task_id": related}
-        task = self.tasks.start(payload, origin=origin, call_limit=min(calls, arguments.get("max_calls", 12)),
+        task = self.tasks.start(payload, origin=origin, call_limit=min(calls, arguments.get("max_calls", self.config.browser_default_calls)),
                                 seconds_limit=max(1, int(deadline - time.monotonic())))
         self.update_turn(key, turn_id, task_id=task["id"])
         self.event(key, "progress", turn_id=turn_id, text="网页查询已启动", records=[self.records.read({"kind": "task", "id": task["id"]})])

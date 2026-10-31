@@ -44,7 +44,9 @@ def main():
         model.outputs = [call("read_record", {"ref": mail_ref}), call("save_mail_analysis", {"id": mail["id"], "analysis": analysis()}),
             call("run_browser", {"goal": "读取公开岗位要求", "start_url": LIST}),
             call("click_element", {"element_id": "stale-synthetic-element"}), call("finish_task", result()),
-            create_after_browser, finish("合成查询与草稿已完成，尚未发送。"), update_current, finish("已修改同一份草稿。")]
+            create_after_browser, {**finish("合成查询与草稿已完成，尚未发送。"),
+                "_usage": {"prompt_tokens": 1234, "completion_tokens": 200, "total_tokens": 1434}},
+            update_current, finish("已修改同一份草稿。")]
         server = make_server("127.0.0.1", 0, app, threaded=True, request_handler=Quiet)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         errors = []
@@ -70,6 +72,7 @@ def main():
                 page.locator("#chat-input").fill("分析这封邮件，查官网并起草咨询邮件")
                 page.locator("#chat-button").click()
                 expect(page.locator("#chat-history")).to_contain_text("合成查询与草稿已完成", timeout=20000)
+                expect(page.locator("#context-status")).to_contain_text("1,234 tokens")
                 page.locator("#add-records").click()
                 page.locator("#record-kind").select_option("mail")
                 page.locator("#record-results").get_by_role("button", name="预览").first.click()

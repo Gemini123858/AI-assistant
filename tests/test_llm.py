@@ -33,6 +33,42 @@ class ModelTests(unittest.TestCase):
         self.assertNotIn("tools", body)
         self.assertEqual(body["thinking"]["type"], "disabled")
 
+    def test_provider_token_count_includes_tools_and_respects_mode(self):
+        messages = [{"role": "user", "content": "合成内容"}]
+        tools = [{"type": "function", "function": {"name": "synthetic"}}]
+        reply = io.BytesIO(json.dumps({"data": {"total_tokens": 321}}).encode())
+        with patch.object(self.model.opener, "open", return_value=reply) as opened:
+            self.assertEqual(self.model.count_tokens(messages, tools), 321)
+        request = opened.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/tokenizers/estimate-token-count"))
+        self.assertEqual(json.loads(request.data), {"model": self.config.model, "messages": messages, "tools": tools})
+        self.config.base_url = "https://api.deepseek.com"
+        with patch.object(self.model.opener, "open") as opened:
+            self.assertIsNone(self.model.count_tokens(messages, tools))
+            opened.assert_not_called()
+
+    def test_actual_usage_survives_validation_and_truncated_response(self):
+        usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                 "prompt_tokens_details": {"cached_tokens": 50}}
+        message = {"tool_calls": [{"id": "one", "type": "function", "function": {"name": "synthetic", "arguments": "{}"}}]}
+        for reason in ("tool_calls", "length"):
+            envelope = {"usage": usage, "choices": [{"finish_reason": reason, "message": message}]}
+            with patch.object(self.model.opener, "open", return_value=io.BytesIO(json.dumps(envelope).encode())):
+                if reason == "length":
+                    with self.assertRaises(AssistantError) as caught:
+                        self.model.complete_tools([], [])
+                    actual = caught.exception.token_usage
+                else:
+                    actual = validate_tool_message(self.model.complete_tools([], []))["_usage"]
+            self.assertEqual({k: actual[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")},
+                             {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})
+
+    def test_invalid_token_count_fails_without_fabricating_count(self):
+        for data in ({"data": None}, {"data": {"total_tokens": "100"}}):
+            with self.subTest(data=data), patch.object(self.model.opener, "open", return_value=io.BytesIO(json.dumps(data).encode())):
+                with self.assertRaises(AssistantError):
+                    self.model.count_tokens([], [])
+
     def test_http_errors_do_not_leak_upstream_body(self):
         error = HTTPError("https://example.invalid", 401, "synthetic-secret", {}, io.BytesIO(b"synthetic-secret"))
         with patch.object(self.model.opener, "open", side_effect=error):

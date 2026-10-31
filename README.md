@@ -144,10 +144,11 @@ ASSISTANT_TIMEZONE=Asia/Shanghai
 
 更新代码或系统提示词后同样需要停止并重新启动应用，当前服务不自动重载代码。新主会话模型事件中的 `system_template_sha256` 可用于追溯使用的主助手提示词模板版本；该字段不保存账号背景或完整请求内容。
 
-网页任务默认每次最多 40 轮模型调用、120 个动作和 900 秒，可通过以下变量调整：
+主助手发起网页子任务时，默认分配20次模型调用，模型可用max_calls调整；同时受网页配置硬上限40次、主轮次剩余次数和当天剩余次数约束，并给主助手保留收尾调用。网页操作上限仍为120个动作、900秒；旧独立网页入口使用配置的40次上限。可通过以下变量调整：
 
 ```dotenv
 ASSISTANT_BROWSER_CALLS=40
+ASSISTANT_BROWSER_DEFAULT_CALLS=20
 ASSISTANT_BROWSER_STEPS=120
 ASSISTANT_BROWSER_SECONDS=900
 ASSISTANT_BROWSER_VISION=false
@@ -156,6 +157,25 @@ ASSISTANT_BROWSER_VISION=false
 浏览器默认通过系统 DNS 直连。需要经过 FlClash 等 HTTP 代理时，在 `.env` 设置 `ASSISTANT_BROWSER_PROXY=http://代理主机:端口`，例如 `http://127.0.0.1:7890`，然后重启应用。WSL 中代理主机应使用 WSL 可访问的地址。该配置用于当前浏览器的全部连接；留空恢复直连。
 
 网页任务和追问共用 `ASSISTANT_DAILY_CALLS`。视觉截图默认关闭；开启前需确认模型支持图片与工具调用。
+
+主会话默认最多50次模型调用（含网页内部调用）、20分钟；时间限制保持后台约束，不新增剩余秒数提示。单次输出上限放宽至8192 tokens，主会话上下文窗口预算为128000 tokens，包含预留输出空间：
+
+```dotenv
+ASSISTANT_MAX_TOKENS=8192
+ASSISTANT_CONTEXT_TOKENS=128000
+ASSISTANT_TOKEN_COUNT_MODE=auto
+ASSISTANT_CONTEXT_CHARS=300000
+```
+
+上下文限制针对**本次完整请求的输入tokens＋预留输出tokens**，不是把所有轮次的账单tokens累加。历史会在多次请求中重复发送，累计消耗通常远大于当前上下文长度；缓存命中也不应从输入上下文长度中扣除。页面显示最近一次主助手请求的实际输入／输出tokens，主会话模型事件和网页任务记录保存API返回的 `prompt_tokens`、`completion_tokens`、`total_tokens`；缺少usage时不编造计数，旧记录不回填。
+
+计数兼容方式：
+
+- `auto`：官方Kimi地址在每次主助手生成前调用同源 `/tokenizers/estimate-token-count`，传入当前messages与tools，以返回的**估算值**加预留输出检查窗口；生成后保存真实usage。计数请求不生成回答，不计入本地LLM生成次数，但会增加一次HTTP请求和等待时间；失败时停止本轮，不自动重试或悄悄改用字符估计。
+- DeepSeek和其他OpenAI兼容服务不调用Kimi专用接口，直接读取标准响应usage。若上次真实输入已耗尽窗口的输出预留空间，则不再发送下一次生成请求；同时保留字符保护，处理首次请求或新加入大量资料的情况。**usage事后才返回，因此这一路径不能精确预知下一次请求的token数量，可能在首次越界请求后才能拦住后续请求。**不把字符换算标成真实token计数。
+- `off`：关闭请求前计数，继续保存真实usage并使用上述事后检查与字符保护。Kimi兼容代理如确认支持计数接口，可显式设 `moonshot`，请求仍发往配置的API_BASE，不转发给其他域名。
+
+计数接口参考[Kimi官方文档](https://platform.moonshot.cn/docs/api/estimate)；响应usage和离线tokenizer参考[DeepSeek官方文档](https://api-docs.deepseek.com/quick_start/token_usage/)。128000是应用配置预算，不是自动识别的模型窗口，切换模型时应按该模型能力调整。具备请求前计数时，旧字符限制不再作为主会话窗口判据；不具备时保留该保护。超过限制停止并保存历史，不自动裁剪主会话；网页子任务自身已有的上下文整理策略保持原样。
 
 统一会话新增以下可选配置（不填写则使用默认值）：
 

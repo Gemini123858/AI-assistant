@@ -441,7 +441,7 @@ class Store:
 
     def update_task(self, key, **changes):
         # Read-modify-write under one lock: cancellation cannot be lost by a worker.
-        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "actions", "errors", "result", "note", "phase", "stop_reason"}
+        allowed = {"status", "cancel_requested", "calls", "steps", "pages", "actions", "errors", "result", "note", "phase", "stop_reason", "token_usage"}
         if set(changes) - allowed:
             raise AssistantError("不能修改任务身份或已授权上下文。", 500)
         with self._mutex:

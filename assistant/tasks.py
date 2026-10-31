@@ -599,7 +599,14 @@ class Tasks:
                     message = validate_tool_message(self.service.model.complete_tools(messages, offered,
                         timeout=max(1, min(config.timeout, deadline - time.monotonic()))))
                 except AssistantError as error:
+                    if getattr(error, "token_usage", None):
+                        task.setdefault("token_usage", []).append({"call": task["calls"], **error.token_usage})
+                        self.store.update_task(key, token_usage=task["token_usage"])
                     raise TaskStopped("partial" if task["pages"] else "failed", "模型 API 故障；未自动重试。" + str(error)) from None
+                usage = message.pop("_usage", None)
+                if usage:
+                    task.setdefault("token_usage", []).append({"call": task["calls"], **usage})
+                    self.store.update_task(key, token_usage=task["token_usage"])
                 check()
                 messages.append(message)
                 calls = message["tool_calls"]
