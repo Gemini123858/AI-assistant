@@ -16,7 +16,7 @@
     <div class="sidebar-footer"><button id="open-notices" class="quiet">通知</button><button id="manage-records" class="quiet">资料管理</button><button id="open-settings" class="quiet">设置与画像</button>{% if auth_enabled %}<button id="logout-button" class="quiet">退出登录</button>{% endif %}</div>
   </aside>
   <main class="conversation-workspace">
-    <header class="conversation-header"><div><h1 id="conversation-title">新对话</h1><p id="model-status" class="caption">正在连接…</p><p id="context-status" class="caption"></p></div><div class="toolbar"><button id="rename-conversation" class="quiet">重命名</button><button id="delete-conversation" class="quiet">删除会话</button></div></header>
+    <header class="conversation-header"><div><h1 id="conversation-title">新对话</h1><p id="model-status" class="caption">正在连接…</p><p id="context-status" class="caption"></p><p id="context-warning" class="notice" role="status" hidden></p></div><div class="toolbar"><button id="rename-conversation" class="quiet">重命名</button><button id="delete-conversation" class="quiet">删除会话</button></div></header>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
     <div id="run-status" class="run-status" role="status" hidden></div>
     <form id="chat-form" class="composer">

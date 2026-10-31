@@ -32,6 +32,7 @@ textarea { resize:vertical; line-height:1.65; }
 .sidebar-footer { display:flex; flex-direction:column; gap:6px; }
 .conversation-workspace { flex:1; min-width:300px; display:flex; flex-direction:column; max-width:1100px; margin:0 auto; width:100%; }
 .conversation-header { padding:20px 28px 12px; display:flex; justify-content:space-between; align-items:center; gap:14px; border-bottom:1px solid var(--line); }
+.conversation-header>div:first-child { min-width:0; flex:1; }
 .conversation-header h1 { margin:0; overflow-wrap:anywhere; }
 .conversation-header p { margin:3px 0 0; }
 .conversation-header .toolbar button { font-size:12px; padding:6px 9px; }

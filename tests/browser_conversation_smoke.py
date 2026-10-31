@@ -73,6 +73,9 @@ def main():
                 page.locator("#chat-button").click()
                 expect(page.locator("#chat-history")).to_contain_text("合成查询与草稿已完成", timeout=20000)
                 expect(page.locator("#context-status")).to_contain_text("1,234 tokens")
+                expect(page.locator("#context-status")).to_contain_text("1.1%")
+                expect(page.locator("#context-status")).to_contain_text("1,434 / 128,000")
+                expect(page.locator("#context-warning")).to_be_hidden()
                 page.locator("#add-records").click()
                 page.locator("#record-kind").select_option("mail")
                 page.locator("#record-results").get_by_role("button", name="预览").first.click()
@@ -177,6 +180,20 @@ def main():
                 expect(page.locator("#assistant-name")).to_have_value("合成助手")
                 expect(page.locator("#user-nickname")).to_have_value("合成昵称")
                 page.locator("#close-settings").click()
+                current = page.evaluate("localStorage.getItem('current-conversation')")
+                for used, percent, warning in ((102272, "79.9%", False), (102400, "80.0%", True), (140800, "110.0%", True)):
+                    app.extensions["conversations"].event(current, "usage", token_usage={
+                        "prompt_tokens": used - 200, "completion_tokens": 200, "total_tokens": used})
+                    page.reload()
+                    expect(page.locator("#context-status")).to_contain_text(percent)
+                    if warning:
+                        expect(page.locator("#context-warning")).to_contain_text("建议新建会话")
+                    else:
+                        expect(page.locator("#context-warning")).to_be_hidden()
+                    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+                page.locator("#new-conversation").click()
+                expect(page.locator("#context-status")).to_be_empty()
+                expect(page.locator("#context-warning")).to_be_hidden()
                 assert not errors, errors
                 browser.close()
             print("Offline unified UI passed: picker → mail → browser → draft; shared edits, autosave, copy/send, refresh, composer recovery, settings and mobile layout.")

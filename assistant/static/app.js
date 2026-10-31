@@ -158,7 +158,15 @@ function renderConversation(forceScroll = false) {
 }
 function updateControls() {
   const usage = [...(conversation?.events || [])].reverse().find((event) => event.token_usage)?.token_usage;
-  $("context-status").textContent = usage ? `上次主助手请求：输入 ${usage.prompt_tokens.toLocaleString()} tokens · 输出 ${usage.completion_tokens.toLocaleString()} tokens` : "";
+  const limit = status?.conversation_budget.context_tokens;
+  const used = usage ? usage.prompt_tokens + usage.completion_tokens : 0;
+  const ratio = usage && limit ? used / limit : null;
+  $("context-status").textContent = ratio !== null ?
+    `上下文参考占用 ${(ratio * 100).toFixed(1)}% · ${used.toLocaleString()} / ${limit.toLocaleString()} tokens（输入 ${usage.prompt_tokens.toLocaleString()} tokens＋输出 ${usage.completion_tokens.toLocaleString()} tokens）` : "";
+  $("context-status").title = "基于最近一次有API用量的主助手请求，不是各次请求累计消耗；不含下一次新增消息与工具结果，不代表下一次请求的精确长度。";
+  $("context-warning").hidden = ratio === null || ratio < 0.8;
+  $("context-warning").textContent = ratio !== null && ratio >= 0.8 ?
+    "上下文接近或已达到配置上限，后续请求可能超限被拒绝（还需预留输出空间）。建议新建会话并添加所需资料；历史不会自动截断。" : "";
   const active = conversation?.turns.find((turn) => turn.status === "running");
   $("chat-button").disabled = !conversation || !!active;
   $("stop-turn").hidden = !active;
@@ -201,6 +209,7 @@ async function loadStatus() {
   if (welcome) welcome.textContent = welcomeTitle();
   $("model-status").textContent = `${status.mode === "demo" ? "演示模式 · 未调用真实模型" : status.model} · 今日 ${status.usage.calls}/${status.daily_limit} 次模型调用`;
   $("settings-status").textContent = `本轮最多 ${status.conversation_budget.calls} 次模型调用（含网页内部调用），${Math.round(status.conversation_budget.seconds / 60)} 分钟；网页默认 ${status.browser_budget.default_calls} 次，最高 ${status.browser_budget.calls} 次。上下文预算 ${status.conversation_budget.context_tokens.toLocaleString()} tokens，含预留输出 ${status.conversation_budget.max_output_tokens.toLocaleString()} tokens；无请求前计数时保留 ${status.conversation_budget.context_chars} 字符保护。历史不自动裁剪。`;
+  updateControls();
 }
 $("new-conversation").addEventListener("click", () => work($("new-conversation"), newConversation));
 $("rename-conversation").addEventListener("click", () => work($("rename-conversation"), async () => {
