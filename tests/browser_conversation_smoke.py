@@ -180,10 +180,19 @@ def main():
                 expect(page.locator("#assistant-name")).to_have_value("合成助手")
                 expect(page.locator("#user-nickname")).to_have_value("合成昵称")
                 page.locator("#close-settings").click()
-                current = page.evaluate("localStorage.getItem('current-conversation')")
                 for used, percent, warning in ((102272, "79.9%", False), (102400, "80.0%", True), (140800, "110.0%", True)):
-                    app.extensions["conversations"].event(current, "usage", token_usage={
-                        "prompt_tokens": used - 200, "completion_tokens": 200, "total_tokens": used})
+                    model.outputs = [{**finish("合成占用测试完成"), "_usage": {
+                        "prompt_tokens": used - 200, "completion_tokens": 200, "total_tokens": used}}]
+                    page.locator("#chat-input").fill("合成占用测试")
+                    page.locator("#chat-button").click()
+                    expect(page.locator("#context-status")).to_contain_text(percent)
+                    current = page.evaluate("localStorage.getItem('current-conversation')")
+                    if percent == "80.0%":
+                        store = app.extensions["store"]
+                        store.change_conversation(current, lambda record: record["turns"][-1].update(status="running"))
+                        page.reload()
+                        expect(page.locator("#context-status")).to_contain_text("79.9%")
+                        store.change_conversation(current, lambda record: record["turns"][-1].update(status="completed"))
                     page.reload()
                     expect(page.locator("#context-status")).to_contain_text(percent)
                     if warning:
@@ -192,6 +201,14 @@ def main():
                         expect(page.locator("#context-warning")).to_be_hidden()
                     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
                 page.locator("#new-conversation").click()
+                expect(page.locator("#context-status")).to_be_empty()
+                expect(page.locator("#context-warning")).to_be_hidden()
+                model.outputs = [{**call("search_records", {"kind": "text"}), "_usage": {
+                    "prompt_tokens": 105000, "completion_tokens": 100, "total_tokens": 105100}}, finish("最终调用没有usage")]
+                # This fixture has a large intermediate count but no usage on its final call.
+                page.locator("#chat-input").fill("只看最终调用用量")
+                page.locator("#chat-button").click()
+                expect(page.locator("#chat-history")).to_contain_text("最终调用没有usage")
                 expect(page.locator("#context-status")).to_be_empty()
                 expect(page.locator("#context-warning")).to_be_hidden()
                 assert not errors, errors
