@@ -16,4 +16,4 @@ personal-assistant = "assistant.__main__:main"
 include = ["assistant*"]
 
 [tool.setuptools.package-data]
-assistant = ["templates/*.html", "static/*.css", "static/*.js", "static/*.json"]
+assistant = ["templates/*.html", "static/*.css", "static/*.js", "static/*.json", "static/vendor/*"]

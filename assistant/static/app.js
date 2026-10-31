@@ -32,6 +32,37 @@ function node(tag, className = "", text = "") {
   element.textContent = text;
   return element;
 }
+const markdown = window.markdownit({ html: false, linkify: true, breaks: true });
+markdown.validateLink = (url) => {
+  try {
+    const parsed = new URL(url);
+    return ["https:", "http:", "mailto:"].includes(parsed.protocol) && !parsed.username && !parsed.password;
+  } catch (_) { return false; }
+};
+markdown.renderer.rules.image = (tokens, index) => {
+  const token = tokens[index], escape = markdown.utils.escapeHtml;
+  return `<a href="${escape(token.attrGet("src"))}">图片：${escape(token.content || "查看图片")}</a>`;
+};
+for (const kind of ["th_open", "td_open"]) markdown.renderer.rules[kind] = (tokens, index, options, env, renderer) => {
+  const token = tokens[index], style = token.attrGet("style");
+  if (style) {
+    token.attrs = token.attrs.filter(([name]) => name !== "style");
+    token.attrJoin("class", "markdown-align-" + style.replace("text-align:", ""));
+  }
+  return renderer.renderToken(tokens, index, options);
+};
+function renderMarkdown(text) {
+  const element = node("div", "answer-text markdown-body");
+  element.innerHTML = markdown.render(text);
+  for (const link of element.querySelectorAll("a")) {
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+  }
+  for (const table of element.querySelectorAll("table")) {
+    const scroll = node("div", "markdown-table-scroll");
+    table.replaceWith(scroll); scroll.append(table);
+  }
+  return element;
+}
 function button(text, action, className = "quiet") {
   const element = node("button", className, text);
   element.type = "button";
@@ -140,7 +171,8 @@ function renderConversation(forceScroll = false) {
       continue;
     }
     const entry = node("section", `chat-entry ${event.type === "user" ? "user" : event.type === "answer" ? "answer" : event.type === "state" ? "state" : "execution"}`);
-    if (["user", "answer", "state", "user_action", "progress"].includes(event.type)) entry.append(node("div", event.type === "answer" ? "answer-text" : "", event.text));
+    if (event.type === "answer") entry.append(renderMarkdown(event.text));
+    else if (["user", "state", "user_action", "progress"].includes(event.type)) entry.append(node("div", "", event.text));
     const group = event.type === "answer" ? groups.get(event.turn_id) : null;
     if (group) group.results.replaceChildren();
     const records = [...(group ? group.snapshots.values() : []), ...(event.records || [])];
