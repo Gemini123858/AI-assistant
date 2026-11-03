@@ -146,9 +146,9 @@ class Conversations:
                 if turn["status"] == "running":
                     self._end(record["id"], turn["id"], "interrupted", "服务中断；已完成操作保留，未自动重放。")
 
-    def _import_legacy(self):
+    def _import_legacy(self): # 导入旧版对话历史到新会话存储
         marker = self.store.root / "conversation-migration.json"
-        if marker.exists() or not (self.store.root / "chat.json").exists():
+        if marker.exists() or not (self.store.root / "chat.json").exists(): # 如果标记文件存在，说明已经导入过了；如果旧版聊天记录不存在，也不需要导入
             return
         history = self.store.chat_history()
         key = "00000000000000000000000000000001"
@@ -369,7 +369,7 @@ class Conversations:
                     try:
                         if name not in schemas or (len(calls) > 1 and any(c["function"]["name"] == "finish_turn" for c in calls)):
                             raise AssistantError("本次工具不可用；结束本轮必须单独调用。")
-                        arguments = json.loads(call["function"]["arguments"])
+                        arguments = json.loads(call["function"]["arguments"]) # 提取参数
                         if name in {"save_mail_analysis", "save_text_analysis"}:
                             analysis = arguments.get("analysis", {})
                             items = analysis.get("events", analysis.get("times", [])) if isinstance(analysis, dict) else []

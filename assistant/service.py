@@ -16,9 +16,9 @@ class Service:
         self.store = store
         self.config = config
         self.model = model if model is not None else (APIModel(config) if config.mode == "api" else DemoModel())
-        self._operation_lock = threading.Lock()
-        self._followup_lock = threading.RLock()
-        self._followups = {"task": None, "mail": None}
+        self._operation_lock = threading.Lock() # 这个是互斥锁，只能被一个线程持有，用于保护整个操作流程，防止同时进行多个操作。
+        self._followup_lock = threading.RLock() # 这个是可重入锁，允许同一个线程多次获取，用于保护追问会话的状态，确保在同一线程中可以安全地进行嵌套操作。
+        self._followups = {"task": None, "mail": None} # 这个字典用于存储当前的追问会话状态，"task" 和 "mail" 分别对应任务和邮件的追问会话，初始值为 None 表示没有活跃的追问会话。
 
     @contextmanager
     def operation(self):

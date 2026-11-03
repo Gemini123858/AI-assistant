@@ -92,9 +92,9 @@ class Store:
             directory.chmod(0o700)
         descriptor = os.open(self.root / ".writer.lock",
                              os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        self._lock_file = os.fdopen(descriptor, "a+")
+        self._lock_file = os.fdopen(descriptor, "a+") # 这是一个持久化锁文件，确保同一时间只有一个写入进程。
         try:
-            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB) # 尝试获取独占锁，如果失败则说明已有实例在运行。
         except BlockingIOError as exc:
             self._lock_file.close()
             self._lock_file = None
@@ -577,8 +577,8 @@ class Store:
 
     def list_conversations(self):
         with self._mutex:
-            records = [self.get_conversation(p.stem) for p in (self.root / "conversations").glob("*.json")]
-            return sorted(records, key=lambda item: item["updated_at"], reverse=True)
+            records = [self.get_conversation(p.stem) for p in (self.root / "conversations").glob("*.json")] # 获取所有会话记录
+            return sorted(records, key=lambda item: item["updated_at"], reverse=True) # 按更新时间降序排序
 
     def change_conversation(self, key, change):
         with self._mutex:

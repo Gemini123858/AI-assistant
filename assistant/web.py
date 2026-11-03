@@ -46,8 +46,8 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         # Authentication redirects must not mask Flask's untrusted-Host error.
         if isinstance(request.routing_exception, SecurityError):
             raise request.routing_exception
-        public = request.endpoint in {"login", "static"}
-        if config.access_token and not public and not session.get("authenticated"):
+        public = request.endpoint in {"login", "static"} # 允许未认证访问的端点
+        if config.access_token and not public and not session.get("authenticated"): # 如果配置了访问口令，且请求的端点不是公开的，且会话没有认证，则要求登录
             if request.path.startswith("/api/"):
                 raise AssistantError("请先登录，再读取私人数据。", 401)
             return redirect("/login")
