@@ -562,17 +562,34 @@ function taskSources(pages) {
   return { element, cards };
 }
 function taskLog(detail) {
+  Object.assign(browserNames, { browser_run: '执行浏览器代码', read_browser_output: '读取代码输出' });
   const actions = detail.actions || [], errors = detail.errors || [];
   const logs = disclosure(`浏览动作与诊断（${actions.length} 步 · ${errors.length} 条诊断）`), timeline = node("ol", "action-timeline");
   const argumentNames = { url: "网址", link_id: "链接", element_id: "控件", page_id: "来源", tab_id: "标签页", text: "文字", query: "关键词", start_line: "起始行", lines: "行数", direction: "方向", seconds: "等待秒数", key: "按键", value: "选项", checked: "勾选", submit: "提交检索" };
-  const actionStatuses = { success: "成功", failed: "失败", running: "进行中", interrupted: "已中断", cancelled: "已取消" };
+  const actionStatuses = { success: "成功", failed: "失败", incomplete: "观察不完整", running: "进行中", interrupted: "已中断", cancelled: "已取消" };
   for (const action of actions) {
     const row = node("li", `action-row ${action.status}`), heading = node("div", "action-heading");
     heading.append(node("strong", "", `第 ${action.step} 步 · ${browserNames[action.tool] || action.tool}`), node("span", "status-badge", actionStatuses[action.status] || action.status));
-    row.append(heading, metadata(Object.entries(action.arguments || {}).filter(([, value]) => value !== null && typeof value !== "object").map(([key, value]) => [argumentNames[key] || key, value])));
+    row.append(heading, metadata(Object.entries(action.arguments || {}).filter(([key, value]) => key !== 'code' && value !== null && typeof value !== "object").map(([key, value]) => [argumentNames[key] || key, value])));
+    if (action.arguments?.code !== undefined) row.append(disclosure('执行的 Python / Playwright 代码', node('pre', 'original-text', action.arguments.code)));
+    if (action.execution) {
+      const execution = action.execution;
+      row.append(metadata([['代码执行', execution.execution_status], ['页面观察', action.observation_status]]));
+      for (const stream of ['stdout', 'stderr']) if (execution[stream]) row.append(disclosure(stream === 'stdout' ? '标准输出' : '错误输出', node('pre', 'original-text', execution[stream])));
+      if (execution.stdout_truncated || execution.stderr_truncated) row.append(node('p', 'notice', '输出超过保存上限，已明确截断；执行时可在会话内补读日志文件。'));
+    }
+    if (action.screenshot) {
+      const image = node('img', 'browser-screenshot'); image.loading = 'lazy'; image.alt = `第 ${action.step} 步页面截图`;
+      image.src = `/api/tasks/${encodeURIComponent(detail.id)}/screenshots/${action.step}`;
+      row.append(disclosure('查看当时的页面截图', image));
+    }
     if (action.page_id) row.append(node("p", "caption", `已保存来源 ${action.page_id}`));
     if (action.page_note) row.append(node("p", "notice", action.page_note));
-    if (action.error) row.append(node("p", "notice", action.error));
+    if (action.error && action.execution) {
+      row.append(node('p', 'notice', action.error.trim().split('\n').pop()));
+      row.append(disclosure('执行异常详情', node('pre', 'original-text', action.error)));
+    } else if (action.error) row.append(node("p", "notice", action.error));
+    if (action.observation_errors?.length) row.append(disclosure('页面观察问题', bulletList(action.observation_errors)));
     if (action.loop_warning) row.append(node("p", "caption", action.loop_warning));
     if (action.remaining) row.append(node("p", "caption", `剩余 ${action.remaining.calls} 次模型调用 · ${action.remaining.seconds} 秒`));
     timeline.append(row);
@@ -674,7 +691,8 @@ function renderRecordContent(content, record, detail, preview = false) {
         block.append(safeLink(result.url, "打开来源网页"));
         const quote = result.quote || result.job_evidence;
         if (quote) block.append(node("blockquote", "evidence-quote", quote));
-        if (sources.cards.has(result.page_id)) block.append(button(`定位原文 · ${result.page_id}${result.line_start ? ` 第 ${result.line_start}–${result.line_end} 行` : ""}`, () => sources.cards.get(result.page_id).show(result.line_start, result.line_end)));
+        if (result.evidence_type === 'screenshot') block.append(node('p', 'caption', `视觉证据 · ${result.page_id}，截图见浏览动作记录；未提供正文行号核验。`));
+        else if (sources.cards.has(result.page_id)) block.append(button(`定位原文 · ${result.page_id}${result.line_start ? ` 第 ${result.line_start}–${result.line_end} 行` : ""}`, () => sources.cards.get(result.page_id).show(result.line_start, result.line_end)));
         if (result.uncertainties?.length) block.append(bulletList(result.uncertainties));
         block.append(saveAnalysisButton(ref, index < findings.length ? index : index - findings.length, index < findings.length ? "findings" : "jobs"));
         content.append(block);

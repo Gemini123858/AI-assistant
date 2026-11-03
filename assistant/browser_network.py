@@ -12,8 +12,9 @@ from .errors import AssistantError
 class PublicHTTPSProxy:
     """Public-IP transport with an optional HTTP upstream proxy."""
 
-    def __init__(self, resolve, normalize, upstream=""):
+    def __init__(self, resolve, normalize, upstream="", *, allow_unregistered=False, domains=None):
         self.resolve, self.normalize = resolve, normalize
+        self.allow_unregistered, self.domains = allow_unregistered, domains
         proxy = urlsplit(upstream) if upstream else None
         self._upstream = (proxy.hostname, proxy.port) if proxy else None
         self._stop = threading.Event()
@@ -128,8 +129,10 @@ class PublicHTTPSProxy:
             if method != "CONNECT" or port != "443" or version not in {"HTTP/1.0", "HTTP/1.1"}:
                 raise AssistantError("连接层仅允许 HTTPS 443 隧道。", 403)
             host = self.normalize(raw_host)
+            if self.domains is not None and host not in self.domains:
+                raise AssistantError("目标不在本任务授权域内。", 403)
             with self._lock:
-                allowed = host in self._allowed_hosts
+                allowed = self.allow_unregistered or host in self._allowed_hosts
             if not allowed:
                 # Chromium can initiate background/preconnect traffic unrelated
                 # to a routed page request. Do not resolve it or call it a task

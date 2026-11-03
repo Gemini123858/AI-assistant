@@ -24,7 +24,32 @@ class BrowserNetworkTests(unittest.TestCase):
         proxy._addresses, proxy._failures = {}, []
         proxy._allowed_hosts = set()
         proxy._upstream = None
+        proxy.domains, proxy.allow_unregistered = None, False
         return proxy
+
+    def test_code_gateway_checks_dns_even_without_browser_registration(self):
+        proxy = self.proxy(public_addresses)
+        proxy.allow_unregistered = True
+        client = Mock()
+        client.recv.return_value = b'CONNECT internal.example:443 HTTP/1.1\r\n\r\n'
+        answers = [(2, 1, 6, '', ('169.254.169.254', 443))]
+        with patch('assistant.browser.socket.getaddrinfo', return_value=answers), \
+                patch('assistant.browser_network.socket.create_connection') as connect:
+            proxy._handle(client)
+        connect.assert_not_called()
+        self.assertEqual(proxy.failures()[0]['kind'], 'permission')
+
+    def test_code_gateway_rejects_hosts_outside_explicit_scope(self):
+        resolve = Mock()
+        proxy = self.proxy(resolve)
+        proxy.allow_unregistered, proxy.domains = True, {'allowed.example'}
+        client = Mock()
+        client.recv.return_value = b'CONNECT outside.example:443 HTTP/1.1\r\n\r\n'
+        with patch.object(proxy, '_connect') as connect:
+            proxy._handle(client)
+        connect.assert_not_called()
+        resolve.assert_not_called()
+        self.assertEqual(proxy.failures()[0]['kind'], 'permission')
 
     def test_tunnel_connects_to_checked_literal_ip_and_reuses_pinned_addresses(self):
         resolve = Mock(return_value=["8.8.8.8", "8.8.4.4"])

@@ -423,7 +423,7 @@ class Store:
                             or action["tool"] not in {"open_link", "open_url", "observe_page", "click_element", "fill_field", "scroll_page",
                                                       "go_back", "refresh_page", "wait_page", "press_key", "select_option", "check_field",
                                                       "restart_browser", "take_screenshot", "read_source", "search_source", "hover_element", "dismiss_overlay",
-                                                      "click_text", "list_tabs", "switch_tab", "close_tab"}
+                                                      "click_text", "list_tabs", "switch_tab", "close_tab", "browser_run", "read_browser_output"}
                             or action["status"] not in {"running", "success", "incomplete", "failed", "interrupted"}
                             or not isinstance(action["arguments"], dict)):
                         raise ValueError("invalid action")
@@ -454,7 +454,7 @@ class Store:
             self._write_json(self._task_path(key), record)
             return record
 
-    def save_task_screenshot(self, key, step, data_url):
+    def save_task_screenshot(self, key, step, data_url, *, masked=True):
         self._task_path(key)
         if (type(step) is not int or not 1 <= step <= 500 or not isinstance(data_url, str)
                 or not data_url.startswith("data:image/png;base64,") or len(data_url) > 3_000_000):
@@ -469,8 +469,15 @@ class Store:
             directory.chmod(0o700)
             name = f"{key}-{step}.json"
             self._write_json(directory / name, {"schema_version": 1, "task_id": key, "step": step,
-                                               "fetched_at": now_iso(), "image": data_url, "masked": True})
+                                               "fetched_at": now_iso(), "image": data_url, "masked": masked})
             return name
+
+    def task_screenshot(self, key, step):
+        self.get_task(key)
+        if type(step) is not int or not 1 <= step <= 500:
+            raise AssistantError('截图步骤无效。', 400)
+        with self._mutex:
+            return self._read_json(self.root / 'screenshots' / f'{key}-{step}.json')['image']
 
     def memory_history(self, kind):
         if kind not in {"public_profile", "profile", "rules"}:

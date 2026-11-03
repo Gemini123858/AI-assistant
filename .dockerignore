@@ -1,0 +1,6 @@
+*
+!assistant/
+!assistant/browser_worker.py
+!deploy/
+!deploy/browser/
+!deploy/browser/Dockerfile

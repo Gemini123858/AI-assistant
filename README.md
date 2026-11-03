@@ -155,9 +155,11 @@ ASSISTANT_BROWSER_SECONDS=900
 ASSISTANT_BROWSER_VISION=false
 ```
 
-浏览器默认通过系统 DNS 直连。需要经过 FlClash 等 HTTP 代理时，在 `.env` 设置 `ASSISTANT_BROWSER_PROXY=http://代理主机:端口`，例如 `http://127.0.0.1:7890`，然后重启应用。WSL 中代理主机应使用 WSL 可访问的地址。该配置用于当前浏览器的全部连接；留空恢复直连。
+统一入口网页子代理现使用持久Python会话，模型直接执行原生异步Playwright，自动接收代码输出、异常及页面截图。默认后端为Docker，每任务独立容器；本地开发可显式配置 `ASSISTANT_BROWSER_BACKEND=local`，local不具备文件或网络隔离，不会自动启用。运行方式、容器构建、网络边界和验证状态见 [持久Python网页子代理](docs/browser-runtime.md)。本轮未运行Docker，容器效果待后续验收。
 
-网页任务和追问共用 `ASSISTANT_DAILY_CALLS`。视觉截图默认关闭；开启前需确认模型支持图片与工具调用。
+Docker出网网关默认通过系统DNS连接公网HTTPS。需要经过FlClash等HTTP代理时，设置 `ASSISTANT_BROWSER_PROXY=http://代理主机:端口` 后重启；代理运行在宿主机侧。local开发后端不自动使用该代理。
+
+网页任务和追问共用 `ASSISTANT_DAILY_CALLS`。新代码浏览器始终发送截图，需要模型同时支持图片与工具调用；`ASSISTANT_BROWSER_VISION`仅用于旧DOM兼容流程，不控制新任务的视觉输入。
 
 主会话默认最多50次模型调用（含网页内部调用）、20分钟；时间限制保持后台约束，不新增剩余秒数提示。单次输出上限放宽至8192 tokens，主会话上下文窗口预算为128000 tokens，包含预留输出空间：
 

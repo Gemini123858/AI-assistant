@@ -34,6 +34,9 @@ class Config:
     browser_steps: int = 120
     browser_vision: bool = False
     browser_proxy: str = ""
+    browser_backend: str = "docker"
+    browser_image: str = "personal-assistant-browser:1.63.0"
+    browser_seccomp: str = "deploy/browser/seccomp_profile.json"
     access_token: str = field(default="", repr=False)
     qq_imap_user: str = ""
     qq_imap_auth_code: str = field(default="", repr=False)
@@ -70,6 +73,9 @@ class Config:
                 browser_steps=int(os.getenv("ASSISTANT_BROWSER_STEPS", "120")),
                 browser_vision=os.getenv("ASSISTANT_BROWSER_VISION", "false").lower() == "true",
                 browser_proxy=os.getenv("ASSISTANT_BROWSER_PROXY", "").strip(),
+                browser_backend=os.getenv("ASSISTANT_BROWSER_BACKEND", "docker").strip(),
+                browser_image=os.getenv("ASSISTANT_BROWSER_IMAGE", "personal-assistant-browser:1.63.0").strip(),
+                browser_seccomp=os.getenv("ASSISTANT_BROWSER_SECCOMP", "deploy/browser/seccomp_profile.json").strip(),
                 access_token=os.getenv("ASSISTANT_ACCESS_TOKEN", ""),
                 qq_imap_user=os.getenv("QQ_IMAP_USER", ""),
                 qq_imap_auth_code=os.getenv("QQ_IMAP_AUTH_CODE", ""),
@@ -138,6 +144,8 @@ class Config:
                     raise ValueError()
             except ValueError:
                 raise AssistantError("ASSISTANT_BROWSER_PROXY 请填写 HTTP 代理地址，例如 http://127.0.0.1:7890。") from None
+        if self.browser_backend not in {"docker", "local"} or not self.browser_image or self.browser_image.startswith('-'):
+            raise AssistantError("网页代码后端必须为 docker 或 local，镜像名不能为空。")
         if (not isinstance(self.extra_body, dict)
                 or set(self.extra_body) - {"thinking", "reasoning_effort", "temperature"}):
             raise AssistantError("EXTRA_BODY 仅允许 thinking、reasoning_effort、temperature 参数。")

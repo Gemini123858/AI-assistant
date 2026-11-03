@@ -1,3 +1,4 @@
+import base64
 import secrets
 from datetime import timedelta
 from urllib.parse import urlsplit
@@ -410,6 +411,11 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
     @app.get("/api/tasks/<key>")
     def task_detail(key):
         return jsonify(task=public_task(store.get_task(key), detail=True))
+
+    @app.get('/api/tasks/<key>/screenshots/<int:step>')
+    def task_screenshot(key, step):
+        image = store.task_screenshot(key, step)
+        return app.response_class(base64.b64decode(image.split(',', 1)[1]), mimetype='image/png')
 
     @app.post("/api/tasks/<key>/cancel")
     def cancel_task(key):
