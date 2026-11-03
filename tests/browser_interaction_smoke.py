@@ -22,6 +22,14 @@ label{position:absolute;inset:0;display:block;background:#ddd;cursor:pointer;pad
 <div class="choice"><input type="radio" name="size" value="large" id="large"><label for="large">大尺寸</label></div>
 <div id="overlay" style="position:fixed;inset:0;z-index:100;background:white;display:none">普通覆盖层</div>
 </body></html>"""
+DELAYED = """<html><head><title>延迟结果页</title></head><body><h1></h1>
+<nav>搜索导航</nav><a href="/detail">站点入口</a>
+<section id="results" style="visibility:hidden"><h2><a href="/detail">稍后显示的结果标题</a></h2></section>
+<div style="display:none"><a href="/menu">折叠菜单</a></div>
+<a href="/aria" aria-label="属性命名的链接"></a><a href="/title" title="标题属性链接"></a>
+<footer>页脚</footer><script>
+setTimeout(()=>document.querySelector('#results').style.visibility='visible',5000);
+</script></body></html>"""
 
 
 class SyntheticBrowser(JobBrowser):
@@ -32,12 +40,28 @@ class SyntheticBrowser(JobBrowser):
         if path == "/background-data":
             route.fulfill(status=503, content_type="application/json", body='{"unavailable":true}')
         else:
-            html = CONFIG if path == "/config" else BACKGROUND if path == "/background" else ARTICLE
+            html = DELAYED if path == "/delayed" else CONFIG if path == "/config" else BACKGROUND if path == "/background" else ARTICLE
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body=html)
 
 
 def main():
     with SyntheticBrowser(lambda: None, scope=BrowserScope(START, public_web=True)) as browser:
+        page = browser.read("https://catalog.example/delayed")
+        assert page["title"] == "延迟结果页", "Empty h1 must not erase the document title."
+        result = next(link for link in page["links"] if link["url"].endswith('/detail'))
+        assert result["text"] == "稍后显示的结果标题" and result["text_source"] == "dom_text" and not result["visible"]
+        assert result["in_heading"], "Prefer the result heading over another link to the same URL."
+        assert "稍后显示的结果标题" not in page["text"]
+        assert page["ready"] and page["rendering"]["hidden_text_links"] == 2
+        assert next(link for link in page["links"] if link["url"].endswith('/aria'))["text_source"] == "aria_label"
+        assert next(link for link in page["links"] if link["url"].endswith('/title'))["text_source"] == "title_attribute"
+        for _ in range(5):
+            page = browser.wait(1)
+            result = next(link for link in page["links"] if link["url"].endswith('/detail'))
+            if result["visible"]:
+                break
+        assert result["visible"] and result["text_source"] == "visible_text"
+        assert "稍后显示的结果标题" in page["text"] and page["rendering"]["hidden_text_links"] == 1
         page = browser.read(START)
         card = next(e for e in page["elements"] if "事件委托卡片" in e["label"])
         assert len([e for e in page["elements"] if "装饰文字" in e["label"]]) == 1
@@ -74,7 +98,7 @@ def main():
         except Exception as error:
             assert interaction_error(error, "check_field").details["code"] == "pointer_intercepted", str(error)
         assert not browser.page.locator('#large').is_checked()
-    print("Chromium passed: tab/diagnostic isolation, delegated card, broad candidates, radio label selection, overlay feedback.")
+    print("Chromium passed: delayed visible text/link provenance, folded menu, tab isolation, broad candidates, radio label selection, overlay feedback.")
 
 
 if __name__ == "__main__":

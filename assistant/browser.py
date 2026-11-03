@@ -80,6 +80,26 @@ ELEMENT_INFO = """e => {
       cookie:!!e.closest('[class*="cookie" i],[id*="cookie" i]')};
 }"""
 
+LINK_INFO = """els => els.map(e => {
+    const style = getComputedStyle(e);
+    let visible = !!e.getClientRects().length && style.visibility === 'visible';
+    for (let node=e; visible && node; node=node.parentElement) {
+        const s=getComputedStyle(node);
+        if (s.display === 'none' || s.opacity === '0' || s.contentVisibility === 'hidden') visible=false;
+    }
+    const clean = text => (text || '').replace(/\\s+/g, ' ').trim();
+    const choices = [
+        [visible ? clean(e.innerText) : '', 'visible_text'],
+        [clean(e.getAttribute('aria-label')), 'aria_label'],
+        [clean(e.textContent), 'dom_text'],
+        [clean(e.getAttribute('title')), 'title_attribute']
+    ];
+    const [text, text_source] = choices.find(([text]) => text) || ['', 'none'];
+    const headings='h1,h2,h3,h4,h5,h6,[role="heading"]';
+    return {url:e.href, text:text.slice(0,160), text_source, visible,
+        in_heading:!!(e.closest(headings) || e.querySelector(headings))};
+})"""
+
 
 WRITE_PATH = re.compile(r"(?:^|[/_.\s-])(?:login|logout|signin|signup|register|apply|deliver|submit|upload|delete|remove|save|send|create|update|insert|edit|collect|favorite|follow|unfollow|subscribe|unsubscribe|checkout|purchase|payment|captcha|verify)(?:$|[/_.\s-])", re.I)
 CREDENTIAL_FIELD = re.compile(r"(?:^|[/_.\s-])(?:password|passwd|authorization|access_token|refresh_token|auth_code|credit_card)(?:$|[/_.\s-])", re.I)
@@ -129,6 +149,11 @@ def observed_page_state(title, text):
     verification = (re.search(r"安全验证|人机验证|security verification|verify.*human|just a moment", title, re.I)
                     and re.search(r"请完成|拖动|验证|human|robot|checking your browser", text, re.I))
     return "verification_required" if verification else "readable" if text.strip() else "loading"
+
+
+def _link_rank(link):
+    # Search pages often link the site badge and result heading to the same URL.
+    return bool(link["text"]), link["in_heading"], link["visible"]
 
 
 def normalize_domain(value):
@@ -885,16 +910,18 @@ class JobBrowser:
             observed_links = {}
             for frame in page.frames:
                 try:
-                    links = frame.locator("a[href]").evaluate_all(
-                        "els => els.map(e => ({text:e.innerText.slice(0,160),url:e.href}))")
+                    links = frame.locator("a[href]").evaluate_all(LINK_INFO)
                     for link in links:
                         # Observation is not authorization. Do not hide links
                         # because of their label/path/scheme or task host list.
-                        observed_links.setdefault(link["url"], link)
+                        previous = observed_links.get(link["url"])
+                        if previous is None or _link_rank(link) > _link_rank(previous):
+                            observed_links[link["url"]] = link
                 except PlaywrightError:
                     continue  # A frame may detach during this snapshot.
             heading = page.locator("h1").first
-            title = heading.inner_text(timeout=2000) if heading.count() else page.title()
+            title = heading.inner_text(timeout=2000).strip() if heading.count() else ""
+            title = title or page.title()
             self._tab_titles[page] = title[:300]
             self._clear_elements()
             self._observation += 1
@@ -943,6 +970,13 @@ class JobBrowser:
                                             "filter" if info["filter"] else "pagination" if info["pagination"] else "page",
                                  "restriction": "控件已禁用，不能点击" if info["disabled"] else None})
                 self._elements[identity] = (handle, info)
+            hidden_text_links = sum(bool(link["text"]) and not link["visible"] for link in observed_links.values())
+            rendering = {"document_state": page.evaluate("document.readyState"),
+                         "hidden_text_links": hidden_text_links,
+                         "visible_text_links": sum(bool(link["text"]) and link["visible"] for link in observed_links.values()),
+                         "note": ("DOM中存在有文字但尚不可见的链接；可能是折叠菜单或延迟显示内容，不能仅凭此判断目标内容是否已加载。"
+                                  "可分段wait_page/observe_page检查变化，也可直接open_link读取目标；不要将隐藏DOM标签当作已读到目标网页正文。"
+                                  if hidden_text_links else None)}
             if page.url != url:
                 self._clear_elements()
                 raise BrowserError("观察期间页面发生导航，请重新观察后继续。", "page_loading")
@@ -973,6 +1007,7 @@ class JobBrowser:
                     "fetched_at": now_iso(), "kind": "detail" if is_detail(final) else "page",
                     "blocked_requests": self.blocked, "elements": elements, "ready": ready,
                     "include_all_elements": include_all_elements, "page_state": page_state,
+                    "rendering": rendering,
                     "page_note": "页面要求安全/人机验证，尚未取得目标内容；可换来源或向用户说明，重启不保证解除验证。" if page_state == "verification_required" else None,
                     "body_stable": stable >= 2, "resource_warning": script_warning, **self.diagnostics(),
                     "content_note": "ready仅表示当前正文快照可读，数据传输另行报告；HTTP成功不证明业务内容完整，须核对任务所需正文。",

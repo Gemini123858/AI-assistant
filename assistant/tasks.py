@@ -62,7 +62,7 @@ TOOLS = [
         "element_limit": {"type": "integer", "minimum": 1, "maximum": 200},
         "link_start": {"type": "integer", "minimum": 0},
         "include_all_elements": {"type": "boolean"}}, []),
-    function("open_link", "打开已观察到的链接；可重访失败页面。", {"link_id": TEXT}),
+    function("open_link", "通过URL打开已观察到的链接，包括visible=false的DOM链接；成功读取前不能声称已读到目标正文，可重访失败页面。", {"link_id": TEXT}),
     function("open_url", "打开任务相关的公开HTTPS URL；限定网站模式遵守域范围，成功读取前不能作为出处。", {"url": {"type": "string", "maxLength": 2000}}),
     function("click_element", "真实点击当前观察的可见元素，触发页面原有监听器；不按文字/路径过滤、不穿透遮挡。", ELEMENT),
     function("click_text", "点击当前已观察正文中的完整文字，可用于无href或事件委托卡片；点击后检查新标签页。", {
@@ -78,7 +78,7 @@ TOOLS = [
     function("scroll_page", "滚动后重新观察。", {"direction": {"type": "string", "enum": ["up", "down"]}}),
     function("go_back", "返回授权范围内的上一页。"),
     function("refresh_page", "刷新已成功打开的页面；空白或错误页应重新open_url。"),
-    function("wait_page", "等待后重新观察。", {"seconds": {"type": "integer", "minimum": 1, "maximum": 30}}),
+    function("wait_page", "分段等待1～30秒后重新观察；可根据rendering及正文变化继续等待，不把DOMContentLoaded或body_stable视为目标内容加载完成。链接text_source区分可见文字与DOM/属性标签。", {"seconds": {"type": "integer", "minimum": 1, "maximum": 30}}),
     function("press_key", "在允许的检索控件按键。",
              {**ELEMENT, "key": {"type": "string", "enum": ["Enter", "Escape", "ArrowDown", "ArrowUp", "Tab"]}}),
     function("select_option", "选择观察到的公开筛选项。", {**ELEMENT, "value": {"type": "string", "maxLength": 1000}}),
@@ -374,7 +374,7 @@ class Tasks:
                 page["seen_ranges"] = merged
             else:
                 page.setdefault("seen_ranges", [])
-            fields = {"id", "url", "title", "ready", "kind", "fetched_at", "page_state", "page_note"} if source_only else set(page) - {"text", "seen_ranges"}
+            fields = {"id", "url", "title", "ready", "kind", "fetched_at", "page_state", "page_note", "rendering"} if source_only else set(page) - {"text", "seen_ranges"}
             brief = {k: copy.deepcopy(v) for k, v in page.items() if k in fields}
             selected = "\n".join(lines[start - 1:start - 1 + count])
             brief.update(text=selected[:8000], numbered_lines=numbered, total_lines=len(lines),

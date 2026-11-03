@@ -42,6 +42,29 @@ class RecoveringBrowser(FixtureBrowser):
 
 
 class GenericTaskTests(unittest.TestCase):
+    def test_hidden_link_labels_and_rendering_observations_reach_model(self):
+        original = FixtureBrowser.read
+
+        def delayed_page(browser, url):
+            page = original(browser, url)
+            page["links"] = [{"url": "https://catalog.example/article", "text": "尚未显示的标题",
+                              "visible": False, "text_source": "dom_text"}]
+            page["rendering"] = {"document_state": "complete", "hidden_text_links": 1,
+                                 "note": "DOM文字尚不可见，可继续观察。"}
+            return page
+
+        model = self.runner([call("read_source", {"page_id": "p1", "start_line": 1, "lines": 1}),
+                             call("finish_task", result())])
+        with patch.object(FixtureBrowser, "read", delayed_page):
+            task = self.start_generic()
+        current = json.loads(model.calls[0][1]["content"])["current"]
+        self.assertEqual(current["links"][0]["text_source"], "dom_text")
+        self.assertFalse(current["links"][0]["visible"])
+        self.assertEqual(current["links"][0]["id"], "p1-l1")
+        source = json.loads(model.calls[1][-1]["content"])["source"]
+        self.assertEqual(source["rendering"]["hidden_text_links"], 1)
+        self.assertEqual(task["pages"][0]["links"][0]["text"], "尚未显示的标题")
+
     def test_original_interaction_reason_reaches_model_and_saved_diagnostics(self):
         from playwright.sync_api import Error as PlaywrightError
 
