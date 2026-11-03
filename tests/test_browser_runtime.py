@@ -12,7 +12,7 @@ from assistant.browser_runtime import BrowserRuntime
 from assistant.config import Config
 from assistant.service import Service
 from assistant.storage import Store
-from assistant.tasks import Tasks, validate_result
+from assistant.tasks import PYTHON_SYSTEM, Tasks, validate_result
 from assistant.web import create_app
 from .test_tasks import FixtureBrowser, ScriptModel, call
 
@@ -124,6 +124,10 @@ class BrowserRuntimeTests(unittest.TestCase):
                 tools = {t['function']['name'] for t in model.tools[0]}
                 self.assertIn('browser_run', tools)
                 self.assertNotIn('click_element', tools)
+                # The same browsing instructions must reach the initial request,
+                # recovery after a tool error, and subsequent model calls.
+                for messages in model.calls:
+                    self.assertEqual(messages[0], {'role': 'system', 'content': PYTHON_SYSTEM})
                 for messages in model.calls[:2]:
                     self.assertTrue(any(isinstance(m.get('content'), list) and any(
                         b.get('type') == 'image_url' for b in m['content']) for m in messages))
