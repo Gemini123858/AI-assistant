@@ -7,7 +7,7 @@ import time
 
 from playwright.sync_api import Error as PlaywrightError
 
-from .browser import BrowserError, BrowserScope, ENTRY, JobBrowser, navigation_url
+from .browser import BrowserError, BrowserScope, ENTRY, JobBrowser, navigation_url, interaction_error
 from .errors import AssistantError
 from .llm import validate_tool_message
 from .storage import text_field
@@ -19,7 +19,7 @@ TASK_SYSTEM = """你是公开网页执行助手，通过Chromium完成task_goal�
 public_profile和task_profile_supplement可用于公开检索；需要私人条件时用analyze_results切换分析阶段，继续浏览用resume_browsing。
 不得编造个人信息；缺少必要信息时在questions中提出，由主助手向用户确认。
 
-依据已观察的链接、文字和元素操作，注意标签页变化。动作已返回观察结果时无需重复观察；失败后按具体错误调整策略。
+依据已观察的链接、文字和元素操作，注意标签页变化。动作已返回观察结果时无需重复观察；失败后按具体错误调整策略。验证页也是可读页面，但不代表取得检索结果；可自行选择其他来源、恢复操作或说明受阻，重启不保证解除验证。
 用read_source/search_source补读已保存证据，通过编号行引用。页面未就绪或读取失败不等于没有结果。
 每轮最多4个工具，有先后依赖的操作分轮执行；阶段切换和finish_task单独调用。
 结合remaining预算及时收尾，以用户的语言回答；finish_task如实报告结果、未知项及停止原因。"""
@@ -55,12 +55,13 @@ FINDING = {"type": "object", "additionalProperties": False, "properties": {
     "required": ["page_id", "text", "line_start", "line_end", "uncertainties"]}
 
 TOOLS = [
-    function("observe_page", "观察当前标签页；正文、控件和链接可分页，不隐藏未列出的可点击区域。", {
+    function("observe_page", "观察当前标签页；正文、控件和链接可分页。默认合并重复操作节点；需要更广的DOM候选时设置include_all_elements=true，文字点击和截图也可辅助定位。", {
         "text_start": {"type": "integer", "minimum": 0, "maximum": 4_000_000},
         "text_length": {"type": "integer", "minimum": 1, "maximum": 65536},
         "element_start": {"type": "integer", "minimum": 0},
         "element_limit": {"type": "integer", "minimum": 1, "maximum": 200},
-        "link_start": {"type": "integer", "minimum": 0}}, []),
+        "link_start": {"type": "integer", "minimum": 0},
+        "include_all_elements": {"type": "boolean"}}, []),
     function("open_link", "打开已观察到的链接；可重访失败页面。", {"link_id": TEXT}),
     function("open_url", "打开任务相关的公开HTTPS URL；限定网站模式遵守域范围，成功读取前不能作为出处。", {"url": {"type": "string", "maxLength": 2000}}),
     function("click_element", "真实点击当前观察的可见元素，触发页面原有监听器；不按文字/路径过滤、不穿透遮挡。", ELEMENT),
@@ -81,7 +82,7 @@ TOOLS = [
     function("press_key", "在允许的检索控件按键。",
              {**ELEMENT, "key": {"type": "string", "enum": ["Enter", "Escape", "ArrowDown", "ArrowUp", "Tab"]}}),
     function("select_option", "选择观察到的公开筛选项。", {**ELEMENT, "value": {"type": "string", "maxLength": 1000}}),
-    function("check_field", "设置公开筛选勾选状态，不授权业务同意/提交。", {**ELEMENT, "checked": {"type": "boolean"}}),
+    function("check_field", "设置checkbox/radio选中状态；优先正常点击关联可见标签并核对状态，不强制穿透遮挡；radio取消需选择同组其他项。", {**ELEMENT, "checked": {"type": "boolean"}}),
     function("restart_browser", "在可恢复的启动/网络失败后重启同范围匿名浏览器。"),
     function("take_screenshot", "查看匿名页的输入已遮罩截图，需明确开启视觉配置。"),
     function("read_source", "读取已保存原文的编号行，不访问网站。", {
@@ -358,7 +359,7 @@ class Tasks:
                     "steps": task["limits"]["steps"] - task["steps"],
                     "seconds": max(0, int(deadline - time.monotonic()))}
 
-        def excerpt(page, start=1, count=60, source_only=False):
+        def excerpt(page, start=1, count=120, source_only=False):
             lines = page["text"].splitlines()
             numbered = [{"line": n + 1, "text": line} for n, line in enumerate(lines)
                         if start - 1 <= n < start - 1 + count]
@@ -373,7 +374,7 @@ class Tasks:
                 page["seen_ranges"] = merged
             else:
                 page.setdefault("seen_ranges", [])
-            fields = {"id", "url", "title", "ready", "kind", "fetched_at"} if source_only else set(page) - {"text", "seen_ranges"}
+            fields = {"id", "url", "title", "ready", "kind", "fetched_at", "page_state", "page_note"} if source_only else set(page) - {"text", "seen_ranges"}
             brief = {k: copy.deepcopy(v) for k, v in page.items() if k in fields}
             selected = "\n".join(lines[start - 1:start - 1 + count])
             brief.update(text=selected[:8000], numbered_lines=numbered, total_lines=len(lines),
@@ -411,6 +412,7 @@ class Tasks:
                     "retryable": getattr(error, "retryable", error.status != 403), "url": target or scope.start_url,
                     "policy": getattr(error, "policy", None),
                     "task_goal": task["public_request"],
+                    "interaction": getattr(error, "details", None),
                     "root_cause_verified": False,
                     "diagnostic_note": "这些是执行层观测，不是底层根因诊断；ERR_ADDRESS_UNREACHABLE 不证明 DNS 失败、域名不存在或服务器下线。若没有额外证据，请明确写根因未确定。",
                     "remaining": budget(), **(browser.diagnostics() if hasattr(browser, "diagnostics") else {})}
@@ -437,7 +439,8 @@ class Tasks:
                 check()
                 if isinstance(result, dict) and {"text", "links", "url"} <= set(result):
                     result = capture(result)
-                    item.update(status="success" if result.get("ready", True) else "incomplete", page_id=result["id"])
+                    item.update(status="success" if result.get("ready", True) else "incomplete", page_id=result["id"],
+                                page_state=result.get("page_state"), page_note=result.get("page_note"))
                     if not result.get("ready", True):
                         item.update(read_error=result.get("read_error"),
                                     policy_blocks=result.get("policy_blocks", [])[-3:],
@@ -451,11 +454,16 @@ class Tasks:
                 self.store.update_task(key, actions=task["actions"])
             except (AssistantError, PlaywrightError) as error:
                 if isinstance(error, PlaywrightError):
-                    error = BrowserError("浏览器交互失败或超时，可重新观察后恢复。")
+                    error = interaction_error(error, name)
                 if name in {"open_url", "open_link", "refresh_page"} and error.status == 502 and not hasattr(error, "kind"):
                     error = BrowserError(str(error), "page_loading")
+                if isinstance(browser, JobBrowser) and browser.page is not None:
+                    target = arguments.get("url") or browser.page.url
                 result = feedback(error, target)
-                item.update(status="failed", error=str(error), error_kind=result["kind"])
+                if isinstance(browser, JobBrowser):
+                    result.update(browser.list_tabs())
+                item.update(status="failed", error=str(error), error_kind=result["kind"],
+                            interaction=result.get("interaction"))
                 task["errors"].append({"step": task["steps"], **result})
                 if result["kind"] in {"network", "page_loading"}:
                     failed_targets.add(target)
@@ -523,7 +531,7 @@ class Tasks:
 
         def context(initial=None):
             catalog = [{k: (p[k][:300] if isinstance(p[k], str) else p[k])
-                        for k in ("id", "url", "title", "ready") if k in p} for p in task["pages"][-80:]]
+                        for k in ("id", "url", "title", "ready", "page_state") if k in p} for p in task["pages"][-80:]]
             data = {"task_goal": task["public_request"], "public_profile": task["memory"].get("public_profile", ""),
                     "task_profile_supplement": task.get("profile_supplement", ""),
                     "scope": scope.as_dict(), "sources": catalog, "remaining": budget(),

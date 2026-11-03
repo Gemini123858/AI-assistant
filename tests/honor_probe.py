@@ -24,8 +24,8 @@ def main():
             raise RuntimeError("Public probe time budget exhausted")
 
     class ProbeBrowser(JobBrowser):
-        def _response(self, response):
-            super()._response(response)
+        def _response(self, response, *, page=None):
+            super()._response(response, page=page)
             if "/wecruit/positionInfo/listPosition" in response.url:
                 try:
                     body = response.json()

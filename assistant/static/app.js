@@ -571,6 +571,7 @@ function taskLog(detail) {
     heading.append(node("strong", "", `第 ${action.step} 步 · ${browserNames[action.tool] || action.tool}`), node("span", "status-badge", actionStatuses[action.status] || action.status));
     row.append(heading, metadata(Object.entries(action.arguments || {}).filter(([, value]) => value !== null && typeof value !== "object").map(([key, value]) => [argumentNames[key] || key, value])));
     if (action.page_id) row.append(node("p", "caption", `已保存来源 ${action.page_id}`));
+    if (action.page_note) row.append(node("p", "notice", action.page_note));
     if (action.error) row.append(node("p", "notice", action.error));
     if (action.loop_warning) row.append(node("p", "caption", action.loop_warning));
     if (action.remaining) row.append(node("p", "caption", `剩余 ${action.remaining.calls} 次模型调用 · ${action.remaining.seconds} 秒`));
@@ -584,6 +585,9 @@ function taskLog(detail) {
       const block = section(`第 ${error.step || "—"} 步 · ${kinds[error.kind] || "执行诊断"}`, error.error || error.message || "未提供说明");
       if (error.url) block.append(safeLink(error.url, error.url));
       if (error.root_cause_verified === false) block.append(node("p", "caption", "底层原因尚未确认。"));
+      if (error.interaction?.recovery) block.append(node("p", "caption", error.interaction.recovery));
+      if (error.connection_errors?.length) block.append(bulletList(error.connection_errors.map((item) => `${item.reason} · ${item.target}`)));
+      if (error.internal_errors?.length) block.append(bulletList(error.internal_errors));
       if (error.network_errors?.length) block.append(bulletList(error.network_errors.map((item) => `${item.code || item.reason || "请求失败"} · ${item.target}`)));
       if (error.policy_blocks?.length) block.append(bulletList(error.policy_blocks.map((item) => `${item.reason} · ${item.target}`)));
       diagnostics.append(block);

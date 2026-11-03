@@ -98,7 +98,7 @@ class DiagnosticBrowser(JobBrowser):
                 print("Denied search: invalid JSON object.", flush=True)
         super()._route(route)
 
-    def _response(self, response):
+    def _response(self, response, *, page=None):
         if urlsplit(response.url).path == SEARCH_PATH and response.status >= 400:
             try:
                 body = response.text().lower()
@@ -108,7 +108,7 @@ class DiagnosticBrowser(JobBrowser):
                                         if label in body], flush=True)
             except Exception:
                 print("Public search error body could not be inspected.", flush=True)
-        super()._response(response)
+        super()._response(response, page=page)
 
     def read(self, url):
         try:

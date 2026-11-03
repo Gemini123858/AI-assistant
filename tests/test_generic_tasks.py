@@ -42,6 +42,19 @@ class RecoveringBrowser(FixtureBrowser):
 
 
 class GenericTaskTests(unittest.TestCase):
+    def test_original_interaction_reason_reaches_model_and_saved_diagnostics(self):
+        from playwright.sync_api import Error as PlaywrightError
+
+        model = self.runner([call("fill_field", {"element_id": "current-search", "text": "公开查询", "submit": True}),
+                             call("finish_task", result())])
+        with patch.object(FixtureBrowser, "fill", side_effect=PlaywrightError(
+                'Timeout 5000ms; <label data-token="PRIVATE_SENTINEL"> intercepts pointer events')):
+            task = self.start_generic()
+        feedback = json.loads(model.calls[1][-1]["content"])
+        self.assertEqual(feedback["interaction"]["code"], "pointer_intercepted")
+        self.assertEqual(task["errors"][0]["interaction"]["action"], "fill_field")
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(task["errors"]))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name) / "data"
@@ -317,19 +330,19 @@ class GenericTaskTests(unittest.TestCase):
         original = FixtureBrowser.read
         def long_page(browser, url):
             page = original(browser, url)
-            page["text"] = "\n".join(f"合成资料第{n}行" for n in range(1, 81))
+            page["text"] = "\n".join(f"合成资料第{n}行" for n in range(1, 161))
             return page
         final = result()
-        final["findings"][0].update(line_start=65, line_end=65)
+        final["findings"][0].update(line_start=125, line_end=125)
         with patch.object(FixtureBrowser, "read", long_page):
             model = self.runner([call("finish_task", final),
-                call("read_source", {"page_id": "p1", "start_line": 65, "lines": 1}),
+                call("read_source", {"page_id": "p1", "start_line": 125, "lines": 1}),
                 call("finish_task", final)], browser_calls=3)
             task = self.start_generic()
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["calls"], 3)
         self.assertIn("尚未提供给模型", model.calls[1][-1]["content"])
-        self.assertEqual(json.loads(model.calls[2][-1]["content"])["source"]["text"], "合成资料第65行")
+        self.assertEqual(json.loads(model.calls[2][-1]["content"])["source"]["text"], "合成资料第125行")
 
     def test_job_lines_derive_evidence_and_title_on_non_bytedance_page(self):
         page = {"id": "p1", "kind": "page", "url": "https://careers.example/roles/engineer",
