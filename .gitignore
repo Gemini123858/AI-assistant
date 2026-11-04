@@ -2,6 +2,7 @@
 /demand_list.md
 /data/
 /private/
+/server_debug_data/
 .env
 .env.*
 !.env.example

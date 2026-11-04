@@ -145,7 +145,10 @@ def validate_tool_message(message):
             seen.add(key)
             checked.append({"id": key, "type": "function",
                             "function": {"name": name, "arguments": arguments}})
-        result = {"role": "assistant", "content": None, "tool_calls": checked}
+        content = message.get("content")
+        if content is not None and (not isinstance(content, str) or len(content) > 16000):
+            raise ValueError("invalid public content")
+        result = {"role": "assistant", "content": content, "tool_calls": checked}
         if message.get("_usage") is not None:
             result["_usage"] = message["_usage"]
         return result

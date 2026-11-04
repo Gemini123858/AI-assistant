@@ -17,6 +17,10 @@ from .test_conversations import FlowModel, finish
 from .test_tasks import call
 
 
+def speaking(name, args=None, words="我看看。"):
+    return call(name, {**(args or {}), "say": words})
+
+
 class QQTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -55,7 +59,8 @@ class QQTests(unittest.TestCase):
 
     def test_same_tool_loop_history_delivery_and_restart_mapping(self):
         self.config.mode = 'api'
-        model = FlowModel([call('create_notice', {'title': '合成通知', 'summary': '合成说明'}),
+        model = FlowModel([speaking('list_tools', {'groups': ['notices']}),
+                           speaking('create_notice', {'title': '合成通知', 'summary': '合成说明'}),
                            finish('通知已创建'), finish('第二轮回答')])
         self.app.extensions['service'].model = model
         self.receive('创建一条合成通知')
@@ -67,29 +72,27 @@ class QQTests(unittest.TestCase):
         self.assertEqual(self.store.get_conversation(key)['events'][-1]['type'], 'qq_delivery')
         self.chat = QQChat(self.conversations, 'synthetic-app', 'synthetic-owner', self.sent.append)
         self.receive('重复事件不调用模型')
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 3)
         self.receive('继续刚才的合成通知', message_id='m2')
         self.complete()
         self.assertEqual(self.chat.state['conversation_id'], key)
         self.assertIn('创建一条合成通知', json.dumps(model.calls[-1], ensure_ascii=False))
         self.assertIn('通知已创建', json.dumps(model.calls[-1], ensure_ascii=False))
-        self.assertEqual(self.app.test_client().get('/api/conversations/' + key).status_code, 200)
+        self.assertEqual(self.app.test_client().get('/api/conversations/' + key).status_code, 404)
 
-    def test_commands_do_not_call_model_and_new_keeps_old_history(self):
-        self.receive('/help')
-        self.assertEqual(self.store.list_conversations(), [])
-        self.receive('/new', message_id='new-first')
-        self.assertEqual(len(self.store.list_conversations()), 1)
-        self.receive('第一段', message_id='chat')
+    def test_slash_text_is_ordinary_input_and_does_not_reset_history(self):
+        self.config.mode = 'api'
+        model = FlowModel([finish('你好'), finish('接着聊')])
+        self.app.extensions['service'].model = model
+        self.receive('/new')
         self.complete()
-        old = self.chat.state['conversation_id']
-        self.receive('/status', message_id='status')
-        self.assertIn(old, self.sent[-1]['text'])
-        self.receive('/new', message_id='new-second')
-        self.assertNotEqual(old, self.chat.state['conversation_id'])
-        self.assertTrue(self.store.get_conversation(old)['events'])
-        self.receive('/stop', message_id='stop-idle')
-        self.assertIn('没有运行中', self.sent[-1]['text'])
+        key = self.chat.state['conversation_id']
+        self.receive('接着聊', message_id='second')
+        self.complete()
+        self.assertEqual(self.chat.state['conversation_id'], key)
+        self.assertEqual(len(self.store.list_conversations()), 1)
+        self.assertIn('/new', json.dumps(model.calls[-1]))
+        self.assertEqual([t['function']['name'] for t in model.tools[0]], ['list_tools', 'finish_turn'])
 
     def test_busy_rejection_cancel_and_no_replay_after_recovery(self):
         entered, release = threading.Event(), threading.Event()
@@ -104,11 +107,11 @@ class QQTests(unittest.TestCase):
             self.receive('执行一个合成请求')
             self.assertTrue(entered.wait(2))
             self.receive('执行中输入', message_id='busy')
-            self.assertIn('仍在执行', self.sent[-1]['text'])
+            self.assertIn('处理中', self.sent[-1]['text'])
             self.receive('/new', message_id='new-busy')
-            self.assertIn('仍在执行', self.sent[-1]['text'])
-            self.receive('/stop', message_id='cancel')
-            self.assertIn('已请求停止', self.sent[-1]['text'])
+            self.assertIn('处理中', self.sent[-1]['text'])
+            key, turn_id = next((key, tid) for tid, (key, _) in self.chat.pending.items())
+            self.conversations.cancel(key, turn_id)
         finally:
             release.set()
             self.complete()
@@ -129,9 +132,8 @@ class QQTests(unittest.TestCase):
         record = self.store.get_conversation(self.chat.state['conversation_id'])
         self.assertEqual(record['events'][-1]['status'], 'failed')
         self.assertTrue(any(e['type'] == 'answer' for e in record['events']))
-        self.receive('/result', message_id='request-result')
-        self.assertEqual(len(self.sent), 2)
-        self.assertEqual(self.sent[-1]['text'], command['text'])
+        self.chat.poll()
+        self.assertEqual(len(self.sent), 1)
 
     def test_deleted_conversation_and_changed_owner_do_not_reuse_history(self):
         self.receive()
@@ -153,7 +155,6 @@ class QQTests(unittest.TestCase):
         self.complete()
         self.receive('第二轮', message_id='m2')
         self.complete()
-        self.receive('/result', message_id='result')
         self.assertEqual(self.sent[-1]['text'], '合成失败')
 
     def test_disabled_and_credentials_environment_and_status_secrecy(self):

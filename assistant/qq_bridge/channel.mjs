@@ -1,7 +1,7 @@
 // This adapter only accepts the bound owner's C2C events and replies to those events.
 export function splitReply(text, limit = 3500) {
   const characters = Array.from(text);
-  const notice = '\n\n回答较长，QQ仅展示前面部分；完整回答请在网页的 QQ 对话中查看。';
+  const notice = '\n\n回答较长，QQ仅展示前面部分；可以接着问我，分段继续。';
   const truncated = characters.length > limit * 4;
   const visible = truncated
     ? characters.slice(0, limit * 4 - Array.from(notice).length).join('') + notice
@@ -18,7 +18,7 @@ export function createChannel(bot, owner, emit) {
     inbound(message) {
       if (message.kind !== 'c2c' || message.senderId !== owner ||
           typeof message.messageId !== 'string' || !message.messageId || received.has(message.messageId)) return;
-      received.set(message.messageId, { target: { scope: 'c2c', targetId: owner, msgId: message.messageId }, replied: false });
+      received.set(message.messageId, { target: { scope: 'c2c', targetId: owner, msgId: message.messageId }, sent: new Set() });
       if (received.size > 200) received.delete(received.keys().next().value);
       emit({ type: 'message', kind: 'c2c', senderId: owner, messageId: message.messageId,
         text: typeof message.content === 'string' ? message.content : '',
@@ -26,12 +26,12 @@ export function createChannel(bot, owner, emit) {
     },
     async reply(command) {
       const entry = received.get(command.messageId);
-      if (!entry || entry.replied || typeof command.text !== 'string' || !command.text.trim()) {
+      if (!entry || entry.sent.has(command.id) || typeof command.text !== 'string' || !command.text.trim()) {
         emit({ type: 'delivery', id: command.id, ok: false });
         return;
       }
       // A failed/ambiguous send must not cause the full answer to be replayed.
-      entry.replied = true;
+      entry.sent.add(command.id);
       const { chunks, truncated } = splitReply(command.text);
       try {
         for (const chunk of chunks) await bot.sendText(entry.target, chunk);

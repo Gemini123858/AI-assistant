@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from .companion import (CompanionMemory, SYSTEM as QQ_SYSTEM, SUMMARY_SYSTEM, SUMMARY_TOOL,
+                        MEMORY_TOOLS, GROUPS, DISCOVER, spoken_tool, companion_finish, public_text, PROTOCOL_MARKERS, relevance)
 from .drafts import validate_fields
 from .errors import AssistantError
 from .llm import validate_analysis, validate_tool_message
@@ -141,7 +143,15 @@ class Conversations:
         self.notices = Notices(self.records)
         self._threads, self._lock, self._closed = {}, threading.RLock(), False
         self._import_legacy()
+        qq_path = self.store.root / "qqbot.json"
+        if qq_path.exists():
+            previous = self.store._read_json(qq_path).get("conversation_id")
+            if (previous and self.store._conversation_path(previous).exists()
+                    and self.store.get_conversation(previous).get("channel") != "qq"):
+                self.store.change_conversation(previous, lambda record: record.update(channel="qq"))
         for record in self.store.list_conversations():
+            if record.get("channel") != "qq" and any(e["type"] == "qq_delivery" for e in record["events"]):
+                self.store.change_conversation(record["id"], lambda value: value.update(channel="qq"))
             for turn in record["turns"]:
                 if turn["status"] == "running":
                     self._end(record["id"], turn["id"], "interrupted", "服务中断；已完成操作保留，未自动重放。")
@@ -164,12 +174,12 @@ class Conversations:
     def list(self):
         return [{key: item[key] for key in ("id", "title", "created_at", "updated_at")} |
                 {"running": any(t["status"] == "running" for t in item["turns"])}
-                for item in self.store.list_conversations()]
+                for item in self.store.list_conversations() if item.get("channel") != "qq"]
 
     def event(self, key, kind, **data):
         return self.store.change_conversation(key, lambda record: append_event(record, kind, **data))
 
-    def start(self, key, payload):
+    def start(self, key, payload, *, on_response=None):
         question = text_field(payload.get("message"), "消息", 12000)
         refs = payload.get("records", [])
         if not isinstance(refs, list) or len(refs) > 30:
@@ -181,14 +191,14 @@ class Conversations:
                 raise AssistantError("助手正在关闭。", 409)
             def begin(record):
                 if any(turn["status"] == "running" for turn in record["turns"]):
-                    raise AssistantError("本会话仍在执行，请等待或停止后再发送。", 409)
+                    raise AssistantError("上一件事还在处理中，等我这轮忙完再接着聊。", 409)
                 if not record["events"] and record["title"] == "新对话":
                     record["title"] = question[:60]
                 record["turns"].append({"id": turn_id, "status": "running", "calls": 0, "cancel_requested": False,
                     "created_at": now_iso(), "completed_at": None, "task_id": None, "note": "正在处理"})
                 append_event(record, "user", turn_id=turn_id, text=question, records=snapshots)
             record = self.store.change_conversation(key, begin)
-            thread = threading.Thread(target=self._run, args=(key, turn_id, question), daemon=True)
+            thread = threading.Thread(target=self._run, args=(key, turn_id, question, on_response), daemon=True)
             self._threads[(key, turn_id)] = thread
             thread.start()
         return {"conversation": record, "turn_id": turn_id}
@@ -261,7 +271,7 @@ class Conversations:
         for ref_key, previous in known.items():
             ref = {"kind": ref_key[0], "id": ref_key[1]}
             try:
-                current = self.records.read(ref, fetch_body=ref_key in attached)
+                current = self.read_reference(key, ref, fetch_body=ref_key in attached)
             except AssistantError as error:
                 if error.status != 404:
                     raise
@@ -280,11 +290,23 @@ class Conversations:
                              "browser": self.config.mode == "api"}}
         if self.config.qq_imap_user:
             background["mail_account"] = {"address": self.config.qq_imap_user}
-        messages = [{"role": "system", "content": SYSTEM + "\n" + json.dumps(background, ensure_ascii=False)}]
+        qq = record.get("channel") == "qq"
+        through = 0
+        if qq:
+            memory = self.companion(key)
+            summaries = memory.load()["summaries"]
+            through = summaries[-1]["through_seq"] if summaries else 0
+            background.update(abilities=self.abilities(), unfinished=memory.unfinished(),
+                earlier_summaries=[{"from_seq": i["from_seq"], "through_seq": i["through_seq"],
+                                    "text": memory.body(i)} for i in summaries[-3:]],
+                older_history_available=bool(summaries))
+        messages = [{"role": "system", "content": (QQ_SYSTEM if qq else SYSTEM) + "\n" + json.dumps(background, ensure_ascii=False)}]
         pending, notes = set(), []
         for event in record["events"]:
+            if event["seq"] <= through:
+                continue
             kind = event["type"]
-            if kind == "usage":
+            if kind in {"usage", "compaction", "qq_delivery"}:
                 continue
             if kind == "user":
                 message = {"role": "user", "content": json.dumps({"question": event["text"],
@@ -310,11 +332,128 @@ class Conversations:
                 notes.clear()
         return messages
 
+    def companion(self, key):
+        return CompanionMemory(self.store, key, self.config.qq_memory_half_life, self.config.timezone)
+
+    def abilities(self):
+        groups = {key: description for key, (description, _) in GROUPS.items()}
+        if not self.mail.enabled:
+            groups.pop("mail")
+        if self.config.mode != "api":
+            groups.pop("browser")
+        return groups
+
+    def qq_tools(self, loaded):
+        catalog = {tool["function"]["name"]: tool for tool in TOOLS + MEMORY_TOOLS}
+        return [spoken_tool(DISCOVER), companion_finish(TOOLS[-1])] + [spoken_tool(catalog[name]) for name in sorted(loaded)]
+
+    def discover(self, args):
+        groups = args["groups"]
+        if not groups:
+            return set(), {"groups": self.abilities()}
+        if set(groups) - set(self.abilities()):
+            raise AssistantError("请选择已启用的能力类别：" + ", ".join(self.abilities()))
+        selected = {name for group in groups for name in GROUPS[group][1]}
+        return selected, {"loaded": sorted(selected)}
+
+    def read_reference(self, key, ref, *, fetch_body=False):
+        kind = ref["kind"]
+        if kind in {"companion_memory", "companion_note"} or (
+                kind == "memory" and ref["id"] not in {"public_profile", "profile", "rules"}):
+            if self.store.get_conversation(key).get("channel") != "qq":
+                raise AssistantError("这段回忆由QQ入口管理。", 404)
+            return self.companion(key).snapshot({**ref, "kind": "companion_memory" if kind == "memory" else kind})
+        return self.records.read(ref, fetch_body=fetch_body)
+
+    def memory_action(self, key, name, args, origin):
+        memory = self.companion(key)
+        if name in {"remember", "write_note"}:
+            if PROTOCOL_MARKERS.search(args["text"]):
+                raise AssistantError("请用自然文字重新表达这段片段，将格式标记留在交流内容之外。")
+            for ref in args.get("refs", []):
+                self.records.read(ref)
+            kind = "memory" if name == "remember" else "note"
+            return {kind: memory.write(kind, origin=origin, **args)}
+        if name == "recall":
+            return memory.search(**args)
+        if name == "close_note":
+            return memory.close_note(args["id"])
+        events = self.store.get_conversation(key)["events"]
+        calls, rows = {}, []
+        memory_tools = {t["function"]["name"] for t in MEMORY_TOOLS} | {"list_tools"}
+        for event in events:
+            if event["type"] == "model":
+                calls.update({c["id"]: c["function"]["name"] for c in event["message"]["tool_calls"]})
+            if event["seq"] <= args.get("after", 0):
+                continue
+            if event["type"] in {"user", "answer"}:
+                rows.append(event)
+            elif event["type"] == "model" and event.get("public_text"):
+                rows.append({"seq": event["seq"], "type": "assistant", "created_at": event["created_at"],
+                             "text": event["public_text"]})
+            elif event["type"] == "tool_result" and calls.get(event["call_id"]) not in memory_tools:
+                rows.append(event)
+        # Search original words/results, rather than the queries and recycled recall output.
+        if args.get("query"):
+            scores = relevance(args["query"], [json.dumps(e, ensure_ascii=False) for e in rows])
+            rows = [e for _, e in sorted(((s, e) for s, e in zip(scores, rows) if s > 0),
+                                        key=lambda pair: pair[0], reverse=True)]
+        limit = args.get("limit", 10)
+        return {"events": rows[:limit], "has_more": len(rows) > limit}
+
+    def compact(self, key, deadline, turn_id, call_number):
+        record = self.store.get_conversation(key)
+        memory = self.companion(key)
+        summaries = memory.load()["summaries"]
+        after = summaries[-1]["through_seq"] if summaries else 0
+        starts = [e["seq"] for e in record["events"] if e["type"] == "user" and e["seq"] > after]
+        if len(starts) <= self.config.qq_recent_turns:
+            return False
+        cutoff = starts[-self.config.qq_recent_turns] - 1
+        events = [e for e in record["events"] if after < e["seq"] <= cutoff
+                  and e["type"] in {"user", "answer", "model", "tool_result", "state"}]
+        # Work with closed whole turns, so no tool call/result pair is split.
+        groups = []
+        for event in events:
+            if event["type"] == "user":
+                groups.append([])
+            if groups:
+                groups[-1].append(event)
+        chosen = []
+        for group in groups:
+            if chosen and len(json.dumps(chosen + group, ensure_ascii=False)) > self.config.qq_context_chars:
+                break
+            chosen.extend(group)
+        if not chosen:
+            return False
+        messages = [{"role": "system", "content": SUMMARY_SYSTEM},
+                    {"role": "user", "content": json.dumps(chosen, ensure_ascii=False)}]
+        timeout = max(1, min(self.config.timeout, deadline - time.monotonic()))
+        counter = getattr(self.service.model, "count_tokens", None)
+        tokens = counter(messages, [SUMMARY_TOOL], timeout=timeout) if counter else None
+        if tokens is not None and tokens + self.config.max_tokens > self.config.context_tokens:
+            raise AssistantError("这段历史需要更小的整理区间，原话已保留。", 413)
+        self.store.reserve_call(self.service.day(), self.config.daily_calls)
+        self.update_turn(key, turn_id, calls=call_number, note="正在整理较早的交流")
+        message = validate_tool_message(self.service.model.complete_tools(messages, [SUMMARY_TOOL], timeout=timeout))
+        self.event(key, "compaction", turn_id=turn_id, token_usage=message.pop("_usage", None),
+                   from_seq=chosen[0]["seq"], through_seq=chosen[-1]["seq"])
+        call = message["tool_calls"]
+        if len(call) != 1 or call[0]["function"]["name"] != "save_summary":
+            raise AssistantError("这次历史整理尚未完成，原话已保留。", 502)
+        args = json.loads(call[0]["function"]["arguments"])
+        validate_arguments(args, SUMMARY_TOOL["function"]["parameters"])
+        memory.add_summary(chosen[0]["seq"], chosen[-1]["seq"], text_field(args["text"], "历史摘要", 8000))
+        return True
+
     def record_action(self, key, action, snapshots):
         self.event(key, "user_action", text=action, records=snapshots)
 
-    def _run(self, key, turn_id, question):
+    def _run(self, key, turn_id, question, on_response=None):
         used, deadline = 0, time.monotonic() + self.config.turn_seconds
+        qq = self.store.get_conversation(key).get("channel") == "qq"
+        loaded = set()
+        memory_names = {t["function"]["name"] for t in MEMORY_TOOLS}
         def check():
             turn = self.turn(self.store.get_conversation(key), turn_id)
             if self._closed or turn["cancel_requested"]:
@@ -335,20 +474,25 @@ class Conversations:
                     self.config.daily_calls - self.store.usage(self.service.day())["calls"])
                 if remaining < 1:
                     raise AssistantError("今日模型额度已用完；已完成结果保留。", 429)
-                offered = [TOOLS[-1]] if remaining == 1 else TOOLS
-                messages[0]["content"] += f"\n本轮剩余调用预算（包括浏览子任务）：{remaining}；仅一次时立即finish_turn。"
+                if qq and remaining > 1 and len(json.dumps(messages, ensure_ascii=False)) > self.config.qq_context_chars:
+                    if self.compact(key, deadline, turn_id, used + 1):
+                        used += 1
+                        continue
+                offered = ([companion_finish(TOOLS[-1])] if qq else [TOOLS[-1]]) if remaining == 1 else self.qq_tools(loaded) if qq else TOOLS
+                messages[0]["content"] += (f"\n本轮还可响应{remaining}次（含网页子任务）；最后一次用finish_turn接着对用户说完。" if qq else
+                    f"\n本轮剩余调用预算（包括浏览子任务）：{remaining}；仅一次时立即finish_turn。")
                 counter = getattr(self.service.model, "count_tokens", None)
                 input_tokens = counter(messages, offered, timeout=max(1, min(self.config.timeout, deadline - time.monotonic()))) if counter else None
                 if input_tokens is not None:
                     if input_tokens + self.config.max_tokens > self.config.context_tokens:
-                        raise AssistantError(f"当前输入约{input_tokens} tokens，加预留输出{self.config.max_tokens}超过上下文上限{self.config.context_tokens}；未裁剪历史，请新建会话。", 413)
+                        raise AssistantError("这次资料超过了可用上下文，可以缩小资料范围或分段继续，原话已保留。" if qq else f"当前输入约{input_tokens} tokens，加预留输出{self.config.max_tokens}超过上下文上限{self.config.context_tokens}；未裁剪历史，请新建会话。", 413)
                 else:
                     previous = next((e["token_usage"] for e in reversed(self.store.get_conversation(key)["events"])
                         if e.get("token_usage") and e.get("model") == self.config.model and e.get("provider") == self.config.base_url), None)
                     if previous and previous["prompt_tokens"] + self.config.max_tokens >= self.config.context_tokens:
-                        raise AssistantError("上次实际输入tokens已达到上下文预算；未裁剪历史，请新建会话。", 413)
+                        raise AssistantError("这次资料较多，可以缩小范围再继续，原话已保留。" if qq else "上次实际输入tokens已达到上下文预算；未裁剪历史，请新建会话。", 413)
                     if len(json.dumps(messages, ensure_ascii=False)) > self.config.context_chars:
-                        raise AssistantError("当前服务未启用请求前token计数，完整会话超过字符保护上限；未裁剪历史，请新建会话。", 413)
+                        raise AssistantError("这次内容超过字符保护范围，可以分段继续，原话已保留。" if qq else "当前服务未启用请求前token计数，完整会话超过字符保护上限；未裁剪历史，请新建会话。", 413)
                 check()
                 self.store.reserve_call(self.service.day(), self.config.daily_calls)
                 used += 1
@@ -356,10 +500,17 @@ class Conversations:
                 message = validate_tool_message(self.service.model.complete_tools(messages, offered,
                     timeout=max(1, min(self.config.timeout, deadline - time.monotonic()))))
                 usage = message.pop("_usage", None)
-                self.event(key, "model", turn_id=turn_id, message=message,
+                spoken = next((json.loads(c["function"]["arguments"]).get("say")
+                    for c in message["tool_calls"] if json.loads(c["function"]["arguments"]).get("say")), None) if qq else None
+                intermediate = any(c["function"]["name"] != "finish_turn" for c in message["tool_calls"])
+                public_words = public_text(spoken or message.get("content"), limit=300 if intermediate else 16000)
+                model_record = self.event(key, "model", public_text=public_words if qq else None, turn_id=turn_id, message=message,
                     token_usage=usage, model=self.config.model, provider=self.config.base_url,
                     input_token_estimate=input_tokens,
-                    system_template_sha256=hashlib.sha256(SYSTEM.encode()).hexdigest())
+                    system_template_sha256=hashlib.sha256((QQ_SYSTEM if qq else SYSTEM).encode()).hexdigest(),
+                    offered_tools=[t["function"]["name"] for t in offered])
+                if on_response and public_words:
+                    on_response(model_record["events"][-1])
                 calls = message["tool_calls"]
                 schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in offered}
                 for call in calls:
@@ -377,14 +528,25 @@ class Conversations:
                                 if isinstance(item, dict) and item.get("normalized", "") is None:
                                     item.pop("normalized")
                         validate_arguments(arguments, schemas[name])
+                        arguments.pop("say", None)
+                        if qq and name != "finish_turn" and not public_words:
+                            raise AssistantError("请在say里用自然的话回应用户，然后继续这次工具操作。")
                         if name == "finish_turn":
                             reply = text_field(arguments["reply"], "回答", 16000)
-                            snapshots = [self.records.read(ref) for ref in arguments["record_refs"]]
+                            if qq and not public_text(reply):
+                                raise AssistantError("请把最终回复表达为自然的交流文字。")
+                            snapshots = [self.read_reference(key, ref) for ref in arguments["record_refs"]]
                             self.event(key, "tool_result", turn_id=turn_id, call_id=call["id"], output={"finished": True})
                             self.event(key, "answer", turn_id=turn_id, text=reply, records=snapshots)
                             self._end(key, turn_id, "completed", "已完成")
                             return
-                        if name == "run_browser":
+                        if qq and name == "list_tools":
+                            newly_loaded, output = self.discover(arguments)
+                            loaded.update(newly_loaded)
+                        elif qq and name in memory_names:
+                            output = self.memory_action(key, name, arguments,
+                                {"conversation_id": key, "turn_id": turn_id})
+                        elif name == "run_browser":
                             output, child_calls = self._browse(key, turn_id, arguments,
                                 min(self.config.turn_calls - used - 1, self.config.daily_calls -
                                     self.store.usage(self.service.day())["calls"] - 1), deadline, check)

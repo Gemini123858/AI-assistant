@@ -556,11 +556,11 @@ class Store:
             raise AssistantError("会话标识无效。")
         return self.root / "conversations" / f"{key}.json"
 
-    def create_conversation(self, title="新对话"):
+    def create_conversation(self, title="新对话", *, channel="web"):
         with self._mutex:
             stamp, key = now_iso(), uuid.uuid4().hex
             record = {"schema_version": 1, "id": key, "title": text_field(title, "会话标题", 120),
-                      "created_at": stamp, "updated_at": stamp, "turns": [], "events": []}
+                      "created_at": stamp, "updated_at": stamp, "turns": [], "events": [], "channel": channel}
             self._write_json(self._conversation_path(key), record)
             return record
 

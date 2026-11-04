@@ -15,6 +15,7 @@ from .errors import AssistantError
 
 CATEGORIES = {
     "conversations": "会话与旧聊天",
+    "companion": "QQ回忆、便签及历史摘要",
     "drafts": "草稿及发送记录",
     "notices": "通知卡片",
     "tasks": "网页任务及截图",
@@ -78,6 +79,7 @@ def cleanup_plan(root, categories, *, all_data=False, keep_identity=False):
         selected.discard("identity")
     paths = {
         "conversations": [root / name for name in ("conversations", "chat.json", "conversation-migration.json")],
+        "companion": [root / "companion"],
         "drafts": [root / "drafts"], "notices": [root / "notices"],
         "tasks": [root / "tasks", root / "screenshots"], "mail": [root / "mail"],
         "texts": [root / "messages"], "identity": [root / "identity.json"], "usage": [root / "usage.json"],

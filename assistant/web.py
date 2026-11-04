@@ -60,6 +60,15 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
             if not secrets.compare_digest(supplied, csrf_token):
                 raise AssistantError("页面安全令牌无效，请刷新页面后重试。", 403)
 
+    @app.before_request
+    def keep_qq_private():
+        endpoints = {"conversation_detail", "conversation_rename", "conversation_delete",
+                     "conversation_start", "conversation_events", "conversation_cancel"}
+        key = (request.view_args or {}).get("key") if request.endpoint in endpoints else None
+        key = key or request.headers.get("X-Conversation-ID")
+        if key and store.get_conversation(key).get("channel") == "qq":
+            raise AssistantError("这段交流由QQ入口管理。", 404)
+
     @app.after_request
     def security_headers(response):
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",

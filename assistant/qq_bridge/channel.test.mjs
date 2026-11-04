@@ -28,7 +28,7 @@ test('reply is tied to an authorized inbound message; target cannot be supplied 
   await channel.reply({ id: 'delivery', messageId: 'incoming-1', text: '回答', targetId: 'someone-else' });
   assert.deepEqual(sent, [[{ scope: 'c2c', targetId: 'synthetic-owner', msgId: 'incoming-1' }, '回答']]);
   assert.deepEqual(events.at(-1), { type: 'delivery', id: 'delivery', ok: true, truncated: false });
-  await channel.reply({ id: 'replay', messageId: 'incoming-1', text: '回答' });
+  await channel.reply({ id: 'delivery', messageId: 'incoming-1', text: '回答' });
   assert.equal(sent.length, 1);
 });
 
@@ -41,7 +41,7 @@ test('long text respects reply count, preserves Unicode and explicitly announces
   const large = splitReply('测'.repeat(16000));
   assert.equal(large.chunks.length, 4);
   assert.equal(large.truncated, true);
-  assert.match(large.chunks.at(-1), /完整回答请在网页/);
+  assert.match(large.chunks.at(-1), /分段继续/);
   assert.ok(large.chunks.every((s) => Array.from(s).length <= 3500));
 });
 
@@ -57,4 +57,14 @@ test('ambiguous send failure is reported without leaking errors or retrying', as
   assert.equal(calls, 1);
   assert.equal(events.at(-1).ok, false);
   assert.equal(JSON.stringify(events).includes('synthetic-secret'), false);
+});
+
+test('one inbound accepts distinct commentary and final deliveries in order', async () => {
+  const sent = [];
+  const channel = createChannel({ sendText: async (_target, text) => sent.push(text) }, 'synthetic-owner', () => {});
+  channel.inbound(message());
+  await channel.reply({ id: 'step-1', messageId: 'incoming-1', text: '我去看看邮件。' });
+  await channel.reply({ id: 'step-2', messageId: 'incoming-1', text: '找到了，看看正文。' });
+  await channel.reply({ id: 'final', messageId: 'incoming-1', text: '这是结论。' });
+  assert.deepEqual(sent, ['我去看看邮件。', '找到了，看看正文。', '这是结论。']);
 });

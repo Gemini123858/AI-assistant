@@ -16,7 +16,6 @@ from .storage import Store, text_field
 
 
 BRIDGE = Path(__file__).with_name("qq_bridge") / "bridge.mjs"
-HELP = "支持文字聊天。命令：/new 新对话，/status 当前状态，/stop 停止任务，/result 查看最近结果，/help 帮助。邮件发送请在网页确认。"
 
 
 class QQChat:
@@ -29,7 +28,7 @@ class QQChat:
         if self.state.get("app_id") != app_id or self.state.get("owner") != owner:
             self.state = {"schema_version": 1, "app_id": app_id, "owner": owner,
                           "conversation_id": None, "seen": []}
-        self.pending, self.deliveries = {}, {}
+        self.pending, self.deliveries, self.cursors, self.last_words = {}, {}, {}, {}
 
     def receive(self, message):
         if message.get("kind") != "c2c" or message.get("senderId") != self.owner:
@@ -46,40 +45,12 @@ class QQChat:
                 return
             if not text:
                 return
-            if text == "/help":
-                self._reply(message_id, HELP)
-                return
             record = self._current()
-            active = next((turn for turn in record["turns"] if turn["status"] == "running"), None)
-            if text == "/status":
-                note = active["note"] if active else "空闲，可继续发送消息。"
-                self._reply(message_id, f"{note}\n网页会话：{record['title']}\n会话ID：{record['id']}")
-            elif text == "/stop":
-                if active:
-                    self.conversations.cancel(record["id"], active["id"])
-                self._reply(message_id, "已请求停止，等待当前调用结束。" if active else "当前没有运行中的任务。")
-            elif text == "/new":
-                if active:
-                    raise AssistantError("当前对话仍在执行，请等待或用 /stop 停止后再新建。", 409)
-                if record["events"]:
-                    self._current(new=True)
-                self._reply(message_id, "已开始新对话，旧记录仍可在网页查看。")
-            elif text == "/result":
-                if active:
-                    self._reply(message_id, active["note"])
-                else:
-                    last_turn = record["turns"][-1] if record["turns"] else None
-                    answer = next((e["text"] for e in reversed(record["events"])
-                                   if e["type"] == "answer" and last_turn and e.get("turn_id") == last_turn["id"]), None)
-                    note = last_turn["note"] if last_turn else "当前对话还没有结果。"
-                    self._reply(message_id, answer or note)
-            elif text.startswith("/"):
-                self._reply(message_id, HELP)
-            else:
-                if not record["events"]:
-                    self.store.change_conversation(record["id"], lambda item: item.update(title="QQ · " + text[:50]))
-                result = self.conversations.start(record["id"], {"message": text})
-                self.pending[result["turn_id"]] = (record["id"], message_id)
+            result = self.conversations.start(record["id"], {"message": text},
+                on_response=lambda event: self._reply(message_id, event["public_text"], key=record["id"],
+                    turn_id=event["turn_id"], seq=event["seq"]))
+            self.pending[result["turn_id"]] = (record["id"], message_id)
+            self.cursors[result["turn_id"]] = 0
         except AssistantError as error:
             self._reply(message_id, str(error))
 
@@ -94,35 +65,46 @@ class QQChat:
                 del self.pending[turn_id]
                 continue
             turn = self.conversations.turn(record, turn_id)
+            last = self.cursors.get(turn_id, 0)
+            for event in record["events"]:
+                if event.get("turn_id") != turn_id or event["seq"] <= last:
+                    continue
+                if event["type"] == "answer":
+                    self._reply(message_id, event["text"], key=key, turn_id=turn_id, seq=event["seq"])
+                self.cursors[turn_id] = event["seq"]
             if turn["status"] == "running":
                 continue
-            answer = next((e["text"] for e in reversed(record["events"])
-                           if e["type"] == "answer" and e.get("turn_id") == turn_id), None)
-            self._reply(message_id, answer or turn["note"], key=key, turn_id=turn_id)
+            if turn["status"] != "completed":
+                self._reply(message_id, turn["note"], key=key, turn_id=turn_id)
             del self.pending[turn_id]
+            self.cursors.pop(turn_id, None)
+            self.last_words.pop((key, turn_id), None)
 
     def delivery(self, event):
         source = self.deliveries.pop(event.get("id"), None)
         if source and source[0]:
-            key, turn_id = source
+            key, turn_id, seq = source
             try:
                 self.conversations.event(key, "qq_delivery", turn_id=turn_id,
-                    status="sent" if event.get("ok") else "failed",
-                    text="QQ回复已发送。" if event.get("ok") else "QQ回复发送失败或结果不明；完整回答已保存在本会话，未自动重发。",
+                    status="sent" if event.get("ok") else "failed", response_seq=seq,
+                    text="QQ回复已发送。" if event.get("ok") else "QQ回复发送失败或结果不明；本地记录已保留。",
                     truncated=bool(event.get("truncated")))
             except AssistantError as error:
                 if error.status != 404:
                     raise
 
-    def _current(self, new=False):
+    def _current(self):
         key = self.state["conversation_id"]
-        if key and not new:
+        if key:
             try:
-                return self.store.get_conversation(key)
+                record = self.store.get_conversation(key)
+                if record.get("channel") != "qq":
+                    return self.store.change_conversation(key, lambda value: value.update(channel="qq"))
+                return record
             except AssistantError as error:
                 if error.status != 404:
                     raise
-        record = self.store.create_conversation("QQ 对话")
+        record = self.store.create_conversation("QQ 对话", channel="qq")
         self.state["conversation_id"] = record["id"]
         self._save()
         return record
@@ -130,10 +112,18 @@ class QQChat:
     def _save(self):
         self.store._write_json(self.path, self.state)
 
-    def _reply(self, message_id, text, *, key=None, turn_id=None):
+    def _reply(self, message_id, text, *, key=None, turn_id=None, seq=None):
+        text = text.strip()
+        if key and turn_id:
+            if self.last_words.get((key, turn_id)) == text:
+                return
+            self.last_words[(key, turn_id)] = text
         identity = uuid.uuid4().hex
-        self.send({"type": "send", "id": identity, "messageId": message_id, "text": text})
-        self.deliveries[identity] = (key, turn_id)
+        self.deliveries[identity] = (key, turn_id, seq)
+        try:
+            self.send({"type": "send", "id": identity, "messageId": message_id, "text": text})
+        except (OSError, ValueError):
+            self.delivery({"id": identity, "ok": False})
 
 
 def bridge_command(config):
@@ -176,6 +166,7 @@ class QQBot:
         self.thread = self.reader = None
         self.closed = threading.Event()
         self.events = queue.Queue()
+        self._write_lock = threading.Lock()
         self.state = "not_started" if self.config.qq_bot_enabled else "disabled"
         self.last_error = ""
 
@@ -202,8 +193,9 @@ class QQBot:
         return {"enabled": self.config.qq_bot_enabled, "state": self.state, "error": self.last_error}
 
     def _write(self, event):
-        self.process.stdin.write(json.dumps(event, ensure_ascii=False) + "\n")
-        self.process.stdin.flush()
+        with self._write_lock:
+            self.process.stdin.write(json.dumps(event, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
 
     def _read(self):
         for line in self.process.stdout:
@@ -234,7 +226,7 @@ class QQBot:
                 elif kind == "delivery":
                     self.chat.delivery(event)
                     if not event.get("ok"):
-                        self.last_error = "QQ回复发送失败或结果不明；完整回答可在网页查看。"
+                        self.last_error = "QQ回复发送失败或结果不明；完整记录已保存在本地。"
                 elif kind == "error":
                     self.last_error = "QQ连接或协议出错，请检查网络、账号权限与绑定状态。"
                 elif kind == "disconnected":
@@ -242,7 +234,7 @@ class QQBot:
                 self.chat.poll()
             except Exception as error:
                 logging.getLogger(__name__).error("QQ front end failed (%s)", type(error).__name__)
-                self.last_error = "QQ接入处理失败；业务记录保留，请在网页核对。"
+                self.last_error = "QQ接入处理失败；业务记录保留，可以检查本地记录。"
 
     def close(self):
         self.closed.set()

@@ -44,6 +44,9 @@ class Config:
     chat_self_names: str = ""
     qq_bot_enabled: bool = False
     qq_bot_node: str = "node"
+    qq_memory_half_life: int = 30
+    qq_context_chars: int = 48000
+    qq_recent_turns: int = 8
     host: str = "127.0.0.1"
     port: int = 8000
     trusted_hosts: list = field(default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"])
@@ -85,6 +88,9 @@ class Config:
                 chat_self_names=os.getenv("ASSISTANT_CHAT_SELF_NAMES", ""),
                 qq_bot_enabled=os.getenv("ASSISTANT_QQ_ENABLED", "false").lower() == "true",
                 qq_bot_node=os.getenv("ASSISTANT_QQ_NODE", "node").strip(),
+                qq_memory_half_life=int(os.getenv("ASSISTANT_QQ_MEMORY_HALF_LIFE", "30")),
+                qq_context_chars=int(os.getenv("ASSISTANT_QQ_CONTEXT_CHARS", "48000")),
+                qq_recent_turns=int(os.getenv("ASSISTANT_QQ_RECENT_TURNS", "8")),
                 host=os.getenv("ASSISTANT_HOST", "127.0.0.1").strip(),
                 port=int(os.getenv("ASSISTANT_PORT", "8000")),
                 trusted_hosts=[host.strip() for host in os.getenv(
@@ -96,6 +102,8 @@ class Config:
         return config
 
     def validate(self):
+        if not 1 <= self.qq_memory_half_life <= 3650 or not 2000 <= self.qq_context_chars <= 300000 or not 1 <= self.qq_recent_turns <= 50:
+            raise AssistantError("QQ记忆半衰期为1～3650天，整理软目标为2000～300000字符，近期保留为1～50轮。")
         try:
             address = ipaddress.ip_address(self.host)
         except ValueError:
