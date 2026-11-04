@@ -24,11 +24,15 @@ def main():
     print(f"个人助手 v0.4：http://{config.host}:{config.port}（监听地址）", flush=True)
     print("远程访问请使用网关 IP 和映射端口；邮件发送由用户点击草稿发送按钮触发。", flush=True)
     try:
+        app.extensions["qqbot"].start()
         serve(app, host=config.host, port=config.port, threads=8,
               max_request_body_size=128 * 1024)
+    except AssistantError as exc:
+        parser.exit(1, f"无法启动：{exc}\n")
     except KeyboardInterrupt:
         pass
     finally:
+        app.extensions["qqbot"].close()
         app.extensions["conversations"].close()
         app.extensions["mail"].close()
         app.extensions["tasks"].close()

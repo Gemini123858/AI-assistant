@@ -14,6 +14,8 @@ personal-assistant = "assistant.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["assistant*"]
+exclude = ["assistant.qq_bridge.node_modules*"]
 
 [tool.setuptools.package-data]
-assistant = ["templates/*.html", "static/*.css", "static/*.js", "static/*.json", "static/vendor/*"]
+assistant = ["templates/*.html", "static/*.css", "static/*.js", "static/*.json", "static/vendor/*",
+             "qq_bridge/*.mjs", "qq_bridge/package*.json"]

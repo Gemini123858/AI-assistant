@@ -15,6 +15,7 @@ from .tasks import Tasks
 from .mail import Mail
 from .drafts import Drafts
 from .conversations import Conversations
+from .qqbot import QQBot
 
 
 def create_app(config=None, model=None, browser_factory=None, mail_connector=None, smtp_connector=None):
@@ -38,7 +39,7 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         store.close()
         raise
     app.extensions.update(store=store, service=service, tasks=tasks, mail=mail, drafts=drafts,
-                          followup_agent=followup_agent, conversations=conversations)
+                          followup_agent=followup_agent, conversations=conversations, qqbot=QQBot(conversations))
     csrf_token = secrets.token_urlsafe(32)
 
     @app.before_request
@@ -263,6 +264,7 @@ def create_app(config=None, model=None, browser_factory=None, mail_connector=Non
         return jsonify(mode=config.mode, model=config.model if config.mode == "api" else "演示（无真实推理）",
                        usage=store.usage(service.day()), daily_limit=config.daily_calls,
                        timezone=config.timezone, version="0.4.0", identity=store.identity(),
+                       qq_bot=app.extensions["qqbot"].status(),
                        conversation_budget={"calls": config.turn_calls, "seconds": config.turn_seconds,
                                             "context_chars": config.context_chars, "context_tokens": config.context_tokens,
                                             "max_output_tokens": config.max_tokens, "token_count_mode": config.token_count_mode},

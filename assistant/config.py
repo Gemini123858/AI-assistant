@@ -42,6 +42,8 @@ class Config:
     qq_imap_auth_code: str = field(default="", repr=False)
     mail_poll_seconds: int = 60
     chat_self_names: str = ""
+    qq_bot_enabled: bool = False
+    qq_bot_node: str = "node"
     host: str = "127.0.0.1"
     port: int = 8000
     trusted_hosts: list = field(default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"])
@@ -81,6 +83,8 @@ class Config:
                 qq_imap_auth_code=os.getenv("QQ_IMAP_AUTH_CODE", ""),
                 mail_poll_seconds=int(os.getenv("ASSISTANT_MAIL_POLL_SECONDS", "60")),
                 chat_self_names=os.getenv("ASSISTANT_CHAT_SELF_NAMES", ""),
+                qq_bot_enabled=os.getenv("ASSISTANT_QQ_ENABLED", "false").lower() == "true",
+                qq_bot_node=os.getenv("ASSISTANT_QQ_NODE", "node").strip(),
                 host=os.getenv("ASSISTANT_HOST", "127.0.0.1").strip(),
                 port=int(os.getenv("ASSISTANT_PORT", "8000")),
                 trusted_hosts=[host.strip() for host in os.getenv(

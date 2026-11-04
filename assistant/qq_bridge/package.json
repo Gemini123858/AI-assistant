@@ -1,0 +1,13 @@
+{
+  "name": "personal-assistant-qq-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node channel.test.mjs" },
+  "engines": { "node": ">=20.3" },
+  "dependencies": {
+    "@tencent-connect/qqbot-connector": "1.2.0",
+    "@tencent-connect/qqbot-nodejs": "1.0.5",
+    "qrcode": "1.5.4"
+  }
+}

@@ -4,7 +4,7 @@
 
 当前 v0.1～v0.3 的主要闭环已完成，v0.4 已实现可编辑邮件草稿与显式 SMTP 发送的本地闭环。项目初始规划、当前功能和后续安排见 [PLAN.md](PLAN.md)。
 
-`feat/unified-assistant` 分支已实现统一聊天首版，等待真实 API 和用户验收，尚未合入 `main`。设计与实现细节见[统一入口方案](docs/unified-assistant-design.md)。本分支首页提供多会话、资料选择、跨类型工具执行与会话内草稿编辑／发送。
+首页提供多会话、资料选择、跨类型工具执行与会话内草稿编辑／发送。设计与实现细节见[统一入口方案](docs/unified-assistant-design.md)。
 
 ## 当前能力
 
@@ -18,6 +18,7 @@
 - 邮件发送：只发送用户当前看到并点击确认的草稿版本；发送后移入独立只读记录，阻止过期版本、重复发送和结果不明时的盲目重试。
 - 画像：区分可用于公开检索的画像与只在私人分析阶段使用的画像；更新有来源记录，用户可查看和纠正。
 - 多会话：历史会话可切换、重命名和删除，完整保存工具执行、资料快照与手工操作；不同会话可引用并修改同一份草稿。
+- QQ 私聊（可选）：绑定本人机器人，用 QQ 聊天窗口与现有助手对话，网页可查看完整会话与任务记录。
 - 统一入口：输入框旁添加邮件、通知、网页结果或草稿，也可让助手搜索已保存资料；同轮可完成邮件分析、网页查询和起草。
 - 本地持久化：任务、邮件、会话、用量及记忆在重启后保留；未完成轮次标记中断，不自动继续调用模型。
 
@@ -54,7 +55,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/data/browser-cache"
 
 ## 校内服务器 IP 测试部署
 
-在目标机器 clone 后进入项目目录，按“快速启动”安装 Python 依赖和 Chromium。无需安装 Node.js、数据库或 Docker。如果 Chromium 提示缺少系统库，运行 `.venv/bin/python -m playwright install-deps chromium`；此步骤通常需要管理员权限。
+在目标机器 clone 后进入项目目录，按“快速启动”安装 Python 依赖和 Chromium。核心应用不依赖数据库；可选 QQ 入口需要 Node.js >=20.3，网页任务的 Docker／本地运行配置见[浏览器运行说明](docs/browser-runtime.md)。如果 Chromium 提示缺少系统库，运行 `.venv/bin/python -m playwright install-deps chromium`；此步骤通常需要管理员权限。
 
 编辑服务器上的私有 `.env`，保留 Kimi、邮箱等配置，再设置：
 
@@ -192,6 +193,22 @@ ASSISTANT_CONTEXT_CHARS=300000
 
 本轮调用预算包含主助手和浏览执行器的调用，并受日剩余额度限制；默认日额度30次仍可能先耗尽，可按真实使用情况调整。上下文按主会话完整历史组织，字符上限是程序侧限制，不等于模型精确 token 容量；超出时停止，不自动裁剪。修改配置后重启。
 
+## QQ 机器人聊天入口（可选）
+
+可用 QQ 本人私聊作为现有助手的文字输入输出入口，与网页共用业务能力；不新增伙伴记忆或上下文压缩。仅本人可访问，群消息被忽略。网页能查看 QQ 会话，邮件发送仍在网页确认。
+
+```bash
+# Node.js >=20.3，先安装依赖并停止正在运行的应用
+npm --prefix assistant/qq_bridge ci --omit=optional --ignore-scripts
+.venv/bin/python -m assistant.qqbot bind
+```
+
+本人 QQ 扫码后，在 `.env` 中添加 `ASSISTANT_QQ_ENABLED=true`，再按原方式启动应用。若 Node 不在 PATH，可设置 `ASSISTANT_QQ_NODE` 为绝对路径。支持 `/new`、`/status`、`/stop`、`/result`、`/help`；连续追问沿用同一会话，执行中再次发送任务会提示忙碌。
+
+按 `Ctrl+C` 停止应用时会一并关闭 QQ 连接进程，下次启动无需重新扫码。迁移到服务器时，先停止本地实例，再私下复制 `.env` 和 `data/`（包括 `qqbot-credentials.json`），安装 Node 依赖并启动，即可沿用原机器人；不要让本地和服务器同时连接同一个机器人。凭据不通过 Git 同步。
+
+安装、手工凭据配置、收发限制和排错见 [QQ 文字聊天入口](docs/qq-chat-setup.md)。用户已完成 QQ 连接本地测试；离线回归覆盖对话和工具复用，具体模型效果与长任务回复窗口仍以实际使用为准。
+
 ## 配置 QQ 邮箱
 
 在 `.env` 中添加：
@@ -258,6 +275,7 @@ ASSISTANT_CHAT_SELF_NAMES=
 - `conversation-migration.json`：旧聊天导入标记，防止重复导入；
 - `usage.json`：模型调用用量。
 - `identity.json`：助手名称与用户昵称，可在停机时直接编辑。
+- `qqbot-credentials.json`、`qqbot.json`：可选 QQ 入口的私有绑定凭据、当前会话映射与近期消息去重记录。
 
 浏览器中另保存当前会话标识，以及本标签页未发送的输入／尚未保存的草稿内容，便于刷新恢复；不将这些输入上传到公开仓库。会话历史、业务记录和浏览器本地输入具有不同生命周期，删除会话不会清除所有关联资料。
 
@@ -328,7 +346,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/data/browser-cache"
 
 - 邮件发送第一版仅支持 QQ SMTP 纯文本邮件；尚无附件、HTML、联系人目录、HTTPS 公网部署、主动推送、Bark 或网盘备份。
 - 合成 SMTP 已验证，真实 QQ 发送仍需由用户指定测试收件人并明确触发；SMTP 接受不等于最终投递或阅读。
-- QQ/微信客户端自动接入已取消；聊天内容需通过邮件、复制或导入提供。
+- 可选 QQ 机器人本人文字私聊入口；不登录个人 QQ 客户端或自动读取其他聊天。微信接入仍未实现，其他聊天内容可通过邮件、复制或导入提供。
 - 浏览器代理由 `ASSISTANT_BROWSER_PROXY` 显式配置，域名使用系统 DNS，连接层选择解析结果中的公网地址。
 - Linux 无中文字体时，Chromium 截图可能显示方框，但 DOM 文字读取不受影响。
 - 页面可读、HTTP 成功或测试通过都不等于模型结论可靠，也不代表覆盖了整个网站。
